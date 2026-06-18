@@ -22,8 +22,8 @@ use serde_json::Value;
 
 use crate::{
     spawn_streaming, CredentialSpec, Harness, HarnessCapabilities, HarnessError, HarnessInfo,
-    HarnessReadiness, InstallCallback, InstallEvent, RunCallback, RunHandle, RunMode, RunRequest,
-    RunTuning,
+    HarnessModel, HarnessReadiness, InstallCallback, InstallEvent, RunCallback, RunHandle, RunMode,
+    RunRequest, RunTuning,
 };
 
 mod parser;
@@ -63,6 +63,13 @@ impl Harness for CodexHarness {
                 supports_login: true,
             },
         }
+    }
+
+    fn list_models(&self) -> Result<Vec<HarnessModel>, HarnessError> {
+        // Codex declares no static models (ids churn → free-text entry); fill the
+        // picker from models.dev's `openai` lineup when the `models-dev` feature is
+        // on (empty otherwise → the user types an id).
+        Ok(crate::models_dev::provider_models("openai"))
     }
 
     fn readiness(&self) -> HarnessReadiness {
@@ -130,7 +137,8 @@ impl Harness for CodexHarness {
     }
 
     fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
-        let RunRequest { run_id, prompt, cwd, mode, tuning, resume } = request;
+        // `attachments` ignored: codex exec is a text CLI (no image input here).
+        let RunRequest { run_id, prompt, cwd, mode, tuning, resume, attachments: _ } = request;
         let args = build_codex_args(prompt, mode, &tuning, resume.as_deref());
         let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 

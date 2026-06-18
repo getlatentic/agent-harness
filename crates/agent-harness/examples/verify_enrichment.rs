@@ -43,6 +43,7 @@ fn main() -> Result<(), String> {
             mode: RunMode::Ask,
             tuning,
             resume: None,
+            attachments: Vec::new(),
         },
         on_event,
     )
@@ -55,8 +56,8 @@ fn main() -> Result<(), String> {
             RunEvent::Session { session_id, model, .. } => {
                 session = session_id.is_some() || model.is_some();
             }
-            RunEvent::ToolStart { input, .. } => tool_input |= input.is_some(),
-            RunEvent::ToolEnd { output, .. } => tool_output |= output.is_some(),
+            RunEvent::ToolStart { raw_input, .. } => tool_input |= raw_input.is_some(),
+            RunEvent::ToolEnd { content, .. } => tool_output |= content.is_some(),
             RunEvent::Usage { input_tokens, output_tokens, total_tokens, .. } => {
                 usage = input_tokens.is_some() || output_tokens.is_some() || total_tokens.is_some();
             }
@@ -84,11 +85,11 @@ fn print_event(ev: &RunEvent) {
         RunEvent::Session { session_id, model, .. } => {
             format!("Session(session_id={session_id:?}, model={model:?})")
         }
-        RunEvent::ToolStart { name, input, .. } => {
-            format!("ToolStart(name={name:?}, input={:?})", input.as_deref().map(|s| trunc(s, 60)))
+        RunEvent::ToolStart { title, raw_input, .. } => {
+            format!("ToolStart(title={title:?}, input={:?})", raw_input.as_deref().map(|s| trunc(s, 60)))
         }
-        RunEvent::ToolEnd { ok, output, .. } => {
-            format!("ToolEnd(ok={ok}, output={:?})", output.as_deref().map(|s| trunc(s, 60)))
+        RunEvent::ToolEnd { ok, content, .. } => {
+            format!("ToolEnd(ok={ok}, output={:?})", content.as_deref().map(|s| trunc(s, 60)))
         }
         RunEvent::Usage { input_tokens, output_tokens, total_tokens, .. } => {
             format!("Usage(in={input_tokens:?}, out={output_tokens:?}, total={total_tokens:?})")

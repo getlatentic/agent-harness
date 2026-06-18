@@ -1,11 +1,189 @@
 # Changelog
 
-Notable changes to this workspace — `cli-stream`, `bob-rs`, `agent-harness` —
-recorded together (they're versioned in lockstep). Format loosely follows
-[Keep a Changelog](https://keepachangelog.com). All three are on crates.io;
-unreleased changes accumulate under **Unreleased** until the next release.
+Notable changes to this workspace — `cli-stream`, `bob-rs`, and `agent-harness`
+— recorded together (they're versioned in lockstep). Format loosely follows
+[Keep a Changelog](https://keepachangelog.com). All three are on crates.io.
+Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
+
+Targeting **0.4.0** — the first release with breaking changes to `RunEvent`.
+Consumers pinned to `^0.3` are unaffected until they bump to `"0.4"`.
+
+### Changed
+- **BREAKING — `RunEvent::Usage` gained `cache_read_tokens`,
+  `cache_write_tokens`, and `cost_usd`** (`cache_*` are `Option<u64>`, `cost_usd`
+  is `Option<f64>`; camelCase, omitted from the wire when `None`). Prompt-cache
+  counters were previously thrown away; they're the difference between a useful
+  cost display and a misleading one. `cost_usd` is an estimated run cost, emitted
+  by `openai-compatible` when per-model rates are configured (`with_model_cost`). A
+  match on `Usage` that bound all fields without `..` must add `..` (or the new
+  fields).
+- **BREAKING — `RunEvent` no longer derives `Eq`** (it now carries an `f64`
+  cost). `==` and `assert_eq!` still work via `PartialEq`; `RunEvent` just can no
+  longer be a `HashSet`/`HashMap` key.
+- **BREAKING — tool events standardized on ACP's `ToolCall` shape.**
+  `RunEvent::ToolStart` now carries `title` (was `name`), `tool_kind`,
+  **`locations: Vec<ToolLocation>`** (the files the call touches — ACP's
+  `locations`), and `raw_input` (was `input`); `RunEvent::ToolEnd` now carries
+  `content` (was `output`), **`raw_output`**, and `locations`. New `ToolLocation
+  { path, line }` type (neutral mirror of ACP's `ToolCallLocation` — no
+  dependency on the `acp` crate in core). This lets the ACP adapter pass an
+  agent's tool calls through losslessly and lets *our own* tools report the path
+  they operate on, so a host can show the call's subject and distinguish e.g.
+  listing a directory from reading a file. (`tool_kind` keeps its name — ACP
+  calls it `kind`, but our wire reserves `kind` for the event tag.) CLI adapters
+  (Claude/Codex/bob) default `locations` empty; openai-compatible populates it from
+  the tool's `path` argument; ACP passes through whatever the agent sends.
+
+### Added
+- **ACP agents can be given a launch-time model.** ACP carries no model, so
+  `AcpHarness` selects one *out-of-band*: `AcpHarness::opencode()` lists models
+  via `opencode models` (so `list_models()` is populated instead of empty) and
+  applies a chosen `RunTuning::model` by writing a temp JSON config and pointing
+  `$OPENCODE_CONFIG` at it for that spawn (removed when the run ends). A generic
+  `AcpHarness::custom(…)` has no model mechanism — `list_models()` stays empty and
+  `RunTuning::model` is ignored. The point: which model an ACP agent uses is a
+  *launcher* concern (pick the binary, then pick the model), decided before the
+  ACP session — which only begins once the process is spawned — ever starts.
+- **`list_models()` can pull from the models.dev catalog (opt-in `models-dev`
+  feature).** Adds `harness::models_dev::provider_models(provider)` — one cached
+  GET of models.dev's `api.json`, filtered to a provider's `tool_call`
+  (agent-usable) models. The CLI adapters use it: **Codex** now lists the
+  `openai` lineup (was empty — free-text only), **Claude** appends the live
+  `anthropic` lineup after its `sonnet`/`opus` aliases, and
+  `OpenHarness::with_models_dev(provider)` points a cloud endpoint at
+  a provider's catalog (new `Discovery::ModelsDev`). Off by default (keeps the
+  core HTTP-free — the feature pulls `ureq`); with the feature off or the catalog
+  unreachable, `list_models` falls back to each adapter's static list. For
+  Claude/Codex the list is runnable as-is (one CLI login covers the whole
+  provider). `HarnessModel` gained `PartialEq`/`Eq`.
+- **New `openai-compatible` feature — agent-harness's local-model runtime.** Where
+  the claude / codex / bob / acp adapters *wrap* an external agent, the
+  `openai-compatible` feature *is* the agent: it speaks the OpenAI-compatible chat
+  API over blocking HTTP (`ureq`)
+  and runs the agent loop in Rust, owning a built-in tool surface reimplemented
+  from OpenCode's design (MIT): **`read`** (1-based `offset`/`limit`,
+  line-numbered, per-line + total caps), **`glob`** (gitignore-aware file
+  matching), **`grep`** (regex content search), and **`list`** (one-level
+  gitignore-aware directory listing) — all via ripgrep's own libraries
+  (`ignore`/`globset`/`regex`) in-process, no `rg` binary needed —
+  **`write`** (overwrite + mkdir-p), **`edit`** (exact string replacement with
+  uniqueness enforcement + `replace_all`, plus a whitespace-tolerant line-match
+  fallback), and **`bash`** (timeout + cooperative cancel) — plus **`webfetch`**
+  (URL → text/markdown/html, 5 MB cap), **`todowrite`** (→ `RunEvent::Plan`),
+  **`question`** (→ `RunEvent::AskQuestion`; ends the run and resumes with the
+  user's answer), **`websearch`** (Exa/Parallel over MCP, keyed by
+  `EXA_API_KEY`/`PARALLEL_API_KEY`), and **`apply_patch`** (the `*** Begin Patch`
+  envelope, offered to gpt-5-class models in place of `edit`/`write`). Tools live
+  in a registry the loop dispatches through; each declares its parameters as a
+  typed `schemars` struct (the JSON Schema is derived from the type). One type
+  serves Ollama, OpenRouter, vLLM, LM Studio, … via
+  `OpenHarness::ollama()` / `::custom(...)`; Ollama models are
+  discovered live via `/api/tags` (`list_models()`). Read-only tools are offered
+  in both modes; `RunMode::Edit` adds the mutating ones (writes land on disk
+  directly — review stays in the host). It implements `agent-harness`'s
+  `Harness` trait and registers through the open `Registry`; it is its own crate
+  (carrying the HTTP + search deps), not a feature of `agent-harness`.
+  Sessions persist + resume — opt-in via `with_session_dir` (JSON files keyed by
+  id: a metadata record + the transcript; `RunRequest.resume` replays a prior
+  session, `sessions()` lists them newest-first). Skills: discovers `SKILL.md`
+  files (including Claude Code's `~/.claude/skills`), advertises a
+  name+description catalog in the system prompt, and loads a skill's body on
+  demand via the `skill` tool. Subagents: a `task` tool spawns a child agent
+  (its own session with `parent_id`, the same tools minus `task`/`question`) and
+  returns its result. Responses **stream** token deltas (`RunEvent::Text` per
+  fragment). Context management follows OpenCode: large tool outputs are
+  **capped** (2000 lines / 50 KiB) and spilled to a temp file the model can
+  `read` back; and near the context limit the transcript is **compacted** by
+  inserting a summary marker into the **non-lossy** full transcript and sending
+  the model a windowed view (full history stays on disk and survives resume). The
+  limit comes from `with_context_tokens`, or — for **Ollama** — is auto-discovered
+  from the model's own `/api/show` context length, so compaction works locally
+  with no manual configuration. `read` accepts absolute paths (like OpenCode; writes
+  stay cwd-scoped). `apply_patch` shares `edit`'s whitespace-tolerant fallback.
+  Project instruction files (`AGENTS.md` / `CLAUDE.md`, the user-global ones plus
+  every one from the git root down to the cwd) load into the system prompt; HTTP
+  calls **retry** transient failures (429 / 5xx / transport, honoring
+  `Retry-After`, never retrying a context-overflow); model **reasoning** streams
+  as `RunEvent::Thinking` — from a dedicated `reasoning_content` / `reasoning`
+  field, or lifted from inline `<think>…</think>` tags (configurable via
+  `with_reasoning_tag`, default `think`, `without_reasoning_extraction` to
+  disable; handles tags split across SSE chunks); and hosts can register
+  **named subagents** via
+  `with_agent` that the `task` tool targets by `subagent_type` — each with its own
+  role prompt and optional model override, advertised to the model as a catalog.
+  An **MCP client** connects configured servers (`with_mcp_server`) at run start —
+  over **stdio** (a launched process, newline-delimited JSON-RPC) or **HTTP** (a
+  remote Streamable-HTTP endpoint, JSON or SSE) behind one transport trait — does
+  the `initialize` handshake + `tools/list`, and surfaces each server's tools
+  (namespaced `server_tool`) through the same tool set as the built-ins, offered +
+  dispatched identically and shared with subagents — and a server's **resources**,
+  if any, get a read-only `server_read_resource` tool (the resource list in its
+  description), and a server's **prompts** are exposed host-side via
+  `mcp_prompts()` / `get_mcp_prompt(...)` (`prompts/list` / `prompts/get`) for a
+  host to surface as commands — the autonomous loop itself doesn't invoke them.
+  Connection is best-effort (a server that fails is skipped with a status line,
+  never fatal). It also honors `RunTuning.output_schema` for
+  **structured output** (sends OpenAI `response_format: json_schema` each turn, so
+  the final answer conforms; tool-call turns stay unconstrained), and emits an
+  estimated **cost** on `RunEvent::Usage.cost_usd` when a model's per-token rates
+  are registered via `with_model_cost`, and accepts **image input**
+  (`RunRequest.attachments`) which it sends to vision models as base64 data-URI
+  `image_url` parts on the first user message, and gates tool calls with
+  **permission rules** (`with_permission_rule` — allow / deny / **ask** by tool +
+  subject pattern, e.g. deny `bash` matching `rm -rf`, checked before execution).
+  An `ask` rule consults a host **permission prompt** (`with_permission_prompt` —
+  a callback invoked synchronously on the run thread, so the host blocks on its
+  own confirm UI; the interactive allow/ask/deny of OpenCode). No rules =
+  allow-all (the bypass posture). LSP is intentionally held. Not yet published.
+- **`RunTuning.output_schema`** — an optional JSON Schema for **structured
+  output**. An adapter that supports it constrains the model's final answer to the
+  schema; `openai-compatible` does (OpenAI `response_format`), the CLI adapters ignore
+  it for now. Additive (`Option`, defaults `None`).
+- **`RunRequest.attachments` + the `Attachment` type** — **multimodal image
+  input**. A multimodal adapter (`openai-compatible`) sends them to the model; the
+  text CLI adapters (Claude / codex / ACP) ignore them. The `Vec` defaults empty,
+  but adding the field is a breaking recompile for exhaustive `RunRequest`
+  literals (add `attachments: Vec::new()`).
+- **`AcpHarness` — drive external Agent Client Protocol agents** (new `acp`
+  feature, off by default). Spawns an ACP agent (`::opencode()` runs
+  `opencode acp`; `::custom(id, name, command, args)` for Gemini/Goose/…),
+  speaks ACP (nd-JSON over stdio) via Zed's `agent-client-protocol` crate — we
+  are the ACP *client* — and translates its `session/update` stream into
+  `RunEvent`s using the aligned schema. Built on the crate's current **0.14**
+  role/builder model: `Client.builder()` registers handlers for the agent's
+  permission requests + session notifications, then `connect_with` spawns the
+  agent and runs the session (`initialize` → `session/new` → `session/prompt`).
+  Tracking current ACP (pinned `0.14`, not the long-stale `0.7`) is what lets it
+  handshake with current agents (opencode / Zed / Gemini). The async connection
+  is driven on a `smol` executor inside the worker thread, keeping the same
+  thread+callback `run()` shape as the other adapters; a cancel races the
+  connection and tears the agent down. `RunMode::Edit` auto-allows
+  tool-permission prompts, `RunMode::Ask` rejects them (read-only). Opt-in —
+  pulls the ACP crate + `smol`, off by default. Follow-ups: `session/load`
+  resume, per-run model selection (a session config option).
+- **`RunEvent::Plan { entries: Vec<PlanEntry> }`** — the agent's task/todo list
+  (neutral shape). New `PlanEntry` + `PlanEntryStatus` + `PlanEntryPriority`
+  types. The `acp` adapter maps ACP `plan` onto it; `openai-compatible` emits it
+  from its `todowrite` tool. `PlanEntryStatus` gained `Cancelled` (additive —
+  the enum is `#[non_exhaustive]`) to match OpenCode's todo statuses.
+- **`RunEvent::SessionInfoUpdate { title, updated_at }`** — a live session
+  title/timestamp update, mapping field-for-field onto ACP
+  `session_info_update` (`title` + `updatedAt`), for sessions lists that want a
+  title before the run ends.
+- **`ToolKind` gained `Delete` / `Move` / `Fetch`** so it mirrors ACP's
+  tool-call `kind` set (`read`/`edit`/`delete`/`move`/`search`/`execute`/`fetch`/
+  `other`) — a `ToolStart` maps onto an ACP `tool_call` without a translation
+  table. (Additive — `ToolKind` is `#[non_exhaustive]`. Our `Write` has no ACP
+  kind; a bridge maps it to `edit`.)
+- **`Harness::list_models()`** — a defaulted trait method returning the static
+  `info().capabilities.models`. Adapters with a runtime model source (a hosted
+  API's `/v1/models`, Ollama's `/api/tags`) override it; a harness with no
+  model concept returns an empty list and the host hides the picker.
+- The **Claude** parser now surfaces `cache_read_input_tokens` /
+  `cache_creation_input_tokens`, and the **codex** parser surfaces
+  `cached_input_tokens`, on `RunEvent::Usage`.
 
 ## [0.3.5] - 2026-06-12
 

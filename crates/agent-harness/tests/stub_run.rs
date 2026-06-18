@@ -97,6 +97,7 @@ fn request() -> RunRequest {
         mode: RunMode::Ask,
         tuning: RunTuning::default(),
         resume: None,
+        attachments: Vec::new(),
     }
 }
 

@@ -29,13 +29,14 @@ fn main() -> Result<(), HarnessError> {
         mode: RunMode::Ask,
         tuning: RunTuning::default(),
         resume: None,
+        attachments: Vec::new(),
     })?;
 
     for ev in rx {
         match ev {
             RunEvent::Text { delta, .. } => print!("{delta}"),
             RunEvent::Thinking { delta, .. } => eprint!("{delta}"),
-            RunEvent::ToolStart { name, .. } => eprintln!("\n[tool] {name}"),
+            RunEvent::ToolStart { title, .. } => eprintln!("\n[tool] {title}"),
             RunEvent::Error { message, .. } => eprintln!("\n[error] {message}"),
             RunEvent::Exited { exit_code, .. } => {
                 println!("\n[exited: {exit_code:?}]");

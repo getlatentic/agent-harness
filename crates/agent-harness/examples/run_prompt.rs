@@ -23,6 +23,7 @@ fn main() -> Result<(), HarnessError> {
         mode: RunMode::Ask,           // Ask = answer only; Edit = may edit files
         tuning: RunTuning::default(), // optional: model / effort / max_turns
         resume: None,                 // Some(session_id) to continue a prior run
+        attachments: Vec::new(),      // images for multimodal models; none here
     })?; // keep `_handle` to `.cancel()`; dropping it does NOT stop the run
 
     // ONE normalized event stream, regardless of the backing CLI. `rx` hangs
@@ -32,7 +33,7 @@ fn main() -> Result<(), HarnessError> {
         match ev {
             RunEvent::Text { delta, .. } => print!("{delta}"), // the answer
             RunEvent::Thinking { delta, .. } => eprint!("{delta}"), // model reasoning
-            RunEvent::ToolStart { name, .. } => eprintln!("\n[tool] {name}"),
+            RunEvent::ToolStart { title, .. } => eprintln!("\n[tool] {title}"),
             RunEvent::Error { message, .. } => eprintln!("\n[error] {message}"),
             RunEvent::Exited { .. } => break,
             _ => {}

@@ -189,6 +189,7 @@ fn main() -> Result<(), String> {
             mode: RunMode::Ask,
             tuning: RunTuning::default(),
             resume: None,
+            attachments: Vec::new(),
         },
         on_event,
     )

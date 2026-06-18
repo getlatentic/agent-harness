@@ -383,6 +383,12 @@ pub fn parse_codex_line(line: &str) -> ParsedLine {
             if input_tokens.is_none() && output_tokens.is_none() {
                 return ParsedLine::default();
             }
+            // Codex reports cache reads as `cached_input_tokens`; it has no
+            // separate cache-write counter (read-through cache), so
+            // `cache_write_tokens` stays None. Absent → None, unchanged.
+            let cache_read_tokens = usage
+                .and_then(|u| u.get("cached_input_tokens"))
+                .and_then(Value::as_u64);
             let total_tokens = match (input_tokens, output_tokens) {
                 (Some(i), Some(o)) => Some(i + o),
                 _ => None,
@@ -392,6 +398,8 @@ pub fn parse_codex_line(line: &str) -> ParsedLine {
                     input_tokens,
                     output_tokens,
                     total_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens: None,
                 }),
                 ..ParsedLine::default()
             }

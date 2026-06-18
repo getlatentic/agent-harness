@@ -216,6 +216,20 @@ pub struct RunTuning {
     /// into CLI-specific flag names when it uses this; keep cross-harness
     /// knobs as their own typed fields above. Default empty.
     pub extra_args: Vec<String>,
+    /// A JSON Schema the final assistant answer must conform to (structured
+    /// output). Adapters that support it constrain the model's final message to
+    /// this schema; the rest ignore it. `None` → free-form text.
+    pub output_schema: Option<serde_json::Value>,
+}
+
+/// A non-text input attached to a run — currently an image. Multimodal adapters
+/// (`openai-compatible`) send it to the model; text-only CLI adapters ignore it.
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    /// MIME type, e.g. `image/png` or `image/jpeg`.
+    pub mime_type: String,
+    /// Raw bytes; the adapter base64-encodes them into a data URI for the wire.
+    pub data: Vec<u8>,
 }
 
 /// A harness-neutral run request. Adapter-specific knobs (bob's
@@ -227,6 +241,10 @@ pub struct RunRequest {
     /// Caller-chosen id used to correlate events with the handle.
     pub run_id: String,
     pub prompt: String,
+    /// Non-text inputs (images) for multimodal models; empty for a text run.
+    /// Multimodal adapters send them to the model; text-only CLI adapters
+    /// ignore them.
+    pub attachments: Vec<Attachment>,
     /// Working directory for the run — the workspace path, so the
     /// harness's tool calls land inside the user's vault.
     pub cwd: Option<PathBuf>,
@@ -276,7 +294,7 @@ pub struct HarnessReadiness {
 /// A model the harness can be pointed at, for the picker's model
 /// selector. `value` is passed verbatim to the CLI (`--model` / `-m`)
 /// via [`RunTuning::model`]; `label` is the human-facing name.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessModel {
     pub value: String,
@@ -356,6 +374,21 @@ pub trait Harness: Send + Sync {
     /// The credential this harness needs.
     fn credential(&self) -> CredentialSpec;
 
+    /// Enumerate the models this harness can run, *live*. The default returns
+    /// the static list declared in [`HarnessInfo`]
+    /// (`info().capabilities.models`), so existing adapters need no change.
+    ///
+    /// Override it when the model set is discovered at runtime rather than
+    /// known at compile time — a hosted-API adapter querying the provider's
+    /// `/v1/models`, an Ollama adapter hitting `/api/tags`. A harness with no
+    /// model-selection concept (bob runs whatever it's configured with)
+    /// returns an empty list, and the host hides the picker — capability by
+    /// the *absence* of models, not a separate flag. May shell out / hit the
+    /// network; treat it as blocking and run it off the UI thread.
+    fn list_models(&self) -> Result<Vec<HarnessModel>, HarnessError> {
+        Ok(self.info().capabilities.models)
+    }
+
     /// Trigger the harness's own interactive sign-in (its CLI's OAuth),
     /// streaming progress as [`InstallEvent`]s — the same subprocess
     /// stream shape as [`install`](Harness::install). The flow opens the
@@ -402,6 +435,7 @@ pub trait Harness: Send + Sync {
     ///     mode: RunMode::Ask,
     ///     tuning: RunTuning::default(),
     ///     resume: None,
+    ///     attachments: Vec::new(),
     /// })?;
     /// for event in rx {
     ///     match event {
@@ -581,6 +615,7 @@ mod tests {
             mode: RunMode::Ask,
             tuning: RunTuning::default(),
             resume: None,
+            attachments: Vec::new(),
         }
     }
 

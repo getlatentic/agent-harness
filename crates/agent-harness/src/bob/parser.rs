@@ -559,8 +559,8 @@ mod tests {
         });
         assert!(matches!(
             start.as_slice(),
-            [RunEvent::ToolStart { tool_call_id, name, .. }]
-                if tool_call_id == "t1" && name == "write_file"
+            [RunEvent::ToolStart { tool_call_id, title, .. }]
+                if tool_call_id == "t1" && title == "write_file"
         ));
         let end = normalize_bob_event(ProcessEvent::Stdout {
             run_id: "r1".to_owned(),
