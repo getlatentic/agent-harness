@@ -185,6 +185,25 @@ pub struct OpenHarness {
     reasoning_tag: Option<String>,
 }
 
+/// Configuration for [`OpenHarness::custom`] — named fields rather than a long
+/// positional argument list, so a call site reads unambiguously (which string is
+/// the id vs the display name). Derives `Default`, so optional fields can be
+/// omitted with `..Default::default()`.
+#[derive(Clone, Debug, Default)]
+pub struct OpenHarnessConfig {
+    /// Stable id used in the registry / picker (e.g. `"openrouter"`).
+    pub id: String,
+    /// Human-readable name shown in the UI (e.g. `"OpenRouter"`).
+    pub display_name: String,
+    /// Base URL with no trailing slash; chat is `{base}/v1/chat/completions`.
+    pub base_url: String,
+    /// Env var the API key is read from; `None` → no auth (a local server).
+    pub api_key_env: Option<String>,
+    /// Curated models for the picker; may be empty (free-text ids are allowed,
+    /// or call [`OpenHarness::with_models_dev`] for catalog discovery).
+    pub models: Vec<HarnessModel>,
+}
+
 impl OpenHarness {
     /// Local Ollama on its default port, with live `/api/tags` discovery and
     /// no auth. Chat hits `http://localhost:11434/v1/chat/completions`.
@@ -209,22 +228,15 @@ impl OpenHarness {
     }
 
     /// Any other OpenAI-compatible endpoint (OpenRouter, vLLM, LM Studio, a
-    /// self-hosted gateway). `api_key_env` names the env var holding the key
-    /// (`None` for an unauthenticated local server); `models` is the curated
-    /// list for the picker (may be empty — free-text model ids are allowed).
-    pub fn custom(
-        id: impl Into<String>,
-        display_name: impl Into<String>,
-        base_url: impl Into<String>,
-        api_key_env: Option<String>,
-        models: Vec<HarnessModel>,
-    ) -> Self {
-        let display_name = display_name.into();
+    /// self-hosted gateway), configured by an [`OpenHarnessConfig`] so each
+    /// argument is named at the call site.
+    pub fn custom(config: OpenHarnessConfig) -> Self {
+        let OpenHarnessConfig { id, display_name, base_url, api_key_env, models } = config;
         Self {
-            id: id.into(),
+            id,
             description: format!("{display_name} via its OpenAI-compatible API."),
             display_name,
-            base_url: base_url.into(),
+            base_url,
             api_key_env,
             default_model: models.first().map(|m| m.value.clone()),
             discovery: Discovery::Static(models),
@@ -553,13 +565,13 @@ mod tests {
 
     #[test]
     fn custom_requires_its_key_and_lists_static_models() {
-        let h = OpenHarness::custom(
-            "openrouter",
-            "OpenRouter",
-            "https://openrouter.ai/api",
-            Some("OPENROUTER_API_KEY".to_owned()),
-            vec![HarnessModel { value: "x-ai/grok".to_owned(), label: "Grok".to_owned() }],
-        );
+        let h = OpenHarness::custom(OpenHarnessConfig {
+            id: "openrouter".to_owned(),
+            display_name: "OpenRouter".to_owned(),
+            base_url: "https://openrouter.ai/api".to_owned(),
+            api_key_env: Some("OPENROUTER_API_KEY".to_owned()),
+            models: vec![HarnessModel { value: "x-ai/grok".to_owned(), label: "Grok".to_owned() }],
+        });
         assert!(h.info().capabilities.credential_required);
         assert!(h.credential().required);
         assert_eq!(h.credential().keychain_account, "OPENROUTER_API_KEY");

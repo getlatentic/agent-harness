@@ -7,7 +7,7 @@
 //! implementing [`Harness`](crate::Harness) in their own crate and calling
 //! [`Registry::register`] — no fork of this crate required.
 
-use crate::{Harness, HarnessInfo};
+use crate::{Harness, HarnessInfo, HarnessReadiness};
 #[cfg(feature = "bob")]
 use crate::Bob;
 #[cfg(feature = "claude")]
@@ -48,12 +48,34 @@ impl Registry {
         self
     }
 
+    /// Add an already-boxed harness — like [`register`](Registry::register) but
+    /// for a `Box<dyn Harness>` a host built behind the trait object (e.g. its
+    /// configured providers). Chainable.
+    pub fn register_boxed(mut self, harness: Box<dyn Harness>) -> Self {
+        self.harnesses.push(harness);
+        self
+    }
+
     /// Resolve a harness by its [`HarnessInfo::id`].
     pub fn by_id(&self, id: &str) -> Option<&dyn Harness> {
         self.harnesses
             .iter()
             .map(Box::as_ref)
             .find(|h| h.info().id == id)
+    }
+
+    /// Resolve a harness by id, taking ownership of its box out of the registry —
+    /// for a host that needs an owned `Box<dyn Harness>` to hold across a run,
+    /// rather than the borrow [`by_id`](Registry::by_id) returns.
+    pub fn into_by_id(self, id: &str) -> Option<Box<dyn Harness>> {
+        self.harnesses.into_iter().find(|h| h.info().id == id)
+    }
+
+    /// Probe readiness of every registered harness, in registration order — the
+    /// "what's actually on this machine" discovery a picker renders. Each probe
+    /// may shell out; treat as blocking and run it off the UI thread.
+    pub fn discover(&self) -> Vec<HarnessReadiness> {
+        self.harnesses.iter().map(|h| h.readiness()).collect()
     }
 
     /// Metadata for every registered harness, in registration order.
@@ -227,5 +249,21 @@ mod tests {
         assert!(reg.by_id("bob").is_some());
         assert!(reg.by_id("acme").is_some(), "custom harness must resolve");
         assert_eq!(reg.ids(), vec!["bob", "acme"]);
+    }
+
+    #[test]
+    fn register_boxed_then_into_by_id_returns_an_owned_box() {
+        let reg = Registry::new().register_boxed(Box::new(Acme));
+        assert_eq!(reg.ids(), vec!["acme"]);
+        let owned: Option<Box<dyn Harness>> = reg.into_by_id("acme");
+        assert!(owned.is_some(), "into_by_id must hand back the owned box");
+    }
+
+    #[test]
+    fn discover_probes_readiness_of_every_registered_harness() {
+        let readiness = Registry::new().register_boxed(Box::new(Acme)).discover();
+        assert_eq!(readiness.len(), 1);
+        assert_eq!(readiness[0].harness_id, "acme");
+        assert!(readiness[0].ready);
     }
 }

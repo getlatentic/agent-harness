@@ -86,16 +86,21 @@ fn build_harness(params: &HashMap<String, String>) -> Box<dyn Harness> {
     let get = |k: &str| params.get(k).filter(|s| !s.is_empty()).cloned();
     match get("harness").as_deref() {
         Some("acp") => Box::new(harness::AcpHarness::opencode()),
-        Some("acp-gemini") => Box::new(harness::AcpHarness::custom(
-            "gemini",
-            "Gemini",
-            "gemini",
-            ["--experimental-acp"],
-        )),
+        Some("acp-gemini") => Box::new(harness::AcpHarness::custom(harness::AcpHarnessConfig {
+            id: "gemini".to_owned(),
+            display_name: "Gemini".to_owned(),
+            command: "gemini".to_owned(),
+            args: vec!["--experimental-acp".to_owned()],
+        })),
         _ => {
             let session_dir = std::env::temp_dir().join("openai-compatible-playground");
             let base = match get("base") {
-                Some(url) => OpenHarness::custom("custom", "Custom", url, None, Vec::new()),
+                Some(url) => OpenHarness::custom(harness::OpenHarnessConfig {
+                    id: "custom".to_owned(),
+                    display_name: "Custom".to_owned(),
+                    base_url: url,
+                    ..Default::default()
+                }),
                 None => OpenHarness::ollama(),
             };
             Box::new(

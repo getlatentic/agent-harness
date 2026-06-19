@@ -11,8 +11,10 @@ use harness::{Harness, HarnessError, OpenHarness, RunEvent, RunMode, RunRequest,
 
 fn main() -> Result<(), HarnessError> {
     // Local Ollama on its default port (no API key). For a hosted endpoint:
-    //   OpenHarness::custom("openrouter", "OpenRouter",
-    //       "https://openrouter.ai/api", Some("OPENROUTER_API_KEY".into()), vec![])
+    //   OpenHarness::custom(OpenHarnessConfig {
+    //       id: "openrouter".into(), display_name: "OpenRouter".into(),
+    //       base_url: "https://openrouter.ai/api".into(),
+    //       api_key_env: Some("OPENROUTER_API_KEY".into()), ..Default::default() })
     let model = OpenHarness::ollama();
 
     let (_handle, rx) = model.run_channel(RunRequest {

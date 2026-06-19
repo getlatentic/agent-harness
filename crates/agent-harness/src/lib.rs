@@ -76,13 +76,14 @@ pub use claude::{ClaudeHarness as Claude, CLAUDE_HARNESS_ID};
 #[cfg(feature = "codex")]
 pub use codex::{CodexHarness as Codex, CODEX_HARNESS_ID};
 #[cfg(feature = "acp")]
-pub use acp::AcpHarness;
+pub use acp::{AcpHarness, AcpHarnessConfig};
 // The OpenAI-compatible / local-model runtime + its public surface (permission
 // rules, MCP config, named subagents, model pricing, sessions).
 #[cfg(feature = "openai-compatible")]
 pub use openai_compatible::{
-    AgentDef, McpPrompt, McpPromptArg, McpServer, McpTransport, ModelCost, OpenHarness, Permission,
-    PermissionPrompt, PermissionRequest, PermissionRule, PromptMessage, SessionRecord,
+    AgentDef, McpPrompt, McpPromptArg, McpServer, McpTransport, ModelCost, OpenHarness,
+    OpenHarnessConfig, Permission, PermissionPrompt, PermissionRequest, PermissionRule,
+    PromptMessage, SessionRecord,
 };
 // The open registry + convenience constructors over the built-ins.
 pub use registry::{

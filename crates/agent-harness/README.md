@@ -71,7 +71,7 @@ agent-harness = { version = "0.4", features = ["openai-compatible"] }
 ```
 
 ```rust
-let ollama = harness::OpenHarness::ollama();   // or ::custom(id, name, base_url, key_env, models)
+let ollama = harness::OpenHarness::ollama();   // or ::custom(OpenHarnessConfig { id, display_name, base_url, .. })
 let (_handle, events) = ollama.run_channel(request)?;
 ```
 

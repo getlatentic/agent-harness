@@ -11,7 +11,9 @@ use harness::{AcpHarness, Harness, HarnessError, RunEvent, RunMode, RunRequest, 
 fn main() -> Result<(), HarnessError> {
     // OpenCode over ACP — spawns `opencode acp` and relays its session stream.
     // Point at any other ACP agent with `AcpHarness::custom`, e.g.:
-    //   AcpHarness::custom("gemini", "Gemini", "gemini", ["--experimental-acp"])
+    //   AcpHarness::custom(AcpHarnessConfig { id: "gemini".into(),
+    //       display_name: "Gemini".into(), command: "gemini".into(),
+    //       args: vec!["--experimental-acp".into()] })
     let agent = AcpHarness::opencode();
 
     let (_handle, rx) = agent.run_channel(RunRequest {

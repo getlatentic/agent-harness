@@ -69,6 +69,20 @@ struct ModelControl {
     config_field: String,
 }
 
+/// Configuration for [`AcpHarness::custom`] — named fields rather than a
+/// positional list, so a call site reads unambiguously. Derives `Default`.
+#[derive(Clone, Debug, Default)]
+pub struct AcpHarnessConfig {
+    /// Stable id used in the registry / picker (e.g. `"gemini"`).
+    pub id: String,
+    /// Human-readable name shown in the UI (e.g. `"Gemini"`).
+    pub display_name: String,
+    /// Program to spawn (e.g. `"gemini"`).
+    pub command: String,
+    /// Args that launch it in ACP mode (e.g. `["--experimental-acp"]`).
+    pub args: Vec<String>,
+}
+
 impl AcpHarness {
     /// OpenCode over ACP — spawns `opencode acp`. opencode reads a JSON config
     /// file named by `$OPENCODE_CONFIG`; its `model` field (a `provider/model`
@@ -76,7 +90,12 @@ impl AcpHarness {
     /// this constructor wires launch-time model selection (`list_models` + the
     /// per-run [`RunTuning`](crate::RunTuning) model).
     pub fn opencode() -> Self {
-        let mut harness = Self::custom("opencode", "OpenCode", "opencode", ["acp"]);
+        let mut harness = Self::custom(AcpHarnessConfig {
+            id: "opencode".to_owned(),
+            display_name: "OpenCode".to_owned(),
+            command: "opencode".to_owned(),
+            args: vec!["acp".to_owned()],
+        });
         harness.model_control = Some(ModelControl {
             list_subcommand: vec!["models".to_owned()],
             config_env: "OPENCODE_CONFIG".to_owned(),
@@ -85,21 +104,17 @@ impl AcpHarness {
         harness
     }
 
-    /// Any ACP agent: `command` + `args` that launch it as an ACP server over
-    /// stdio (e.g. `("gemini", "Gemini", "gemini", ["--acp"])`).
-    pub fn custom(
-        id: impl Into<String>,
-        display_name: impl Into<String>,
-        command: impl Into<String>,
-        args: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
-        let display_name = display_name.into();
+    /// Any ACP agent, configured by an [`AcpHarnessConfig`]: `command` + `args`
+    /// that launch it as an ACP server over stdio, with named fields so the call
+    /// site reads clearly.
+    pub fn custom(config: AcpHarnessConfig) -> Self {
+        let AcpHarnessConfig { id, display_name, command, args } = config;
         Self {
-            id: id.into(),
+            id,
             description: format!("{display_name} via the Agent Client Protocol."),
             display_name,
-            command: command.into(),
-            args: args.into_iter().map(Into::into).collect(),
+            command,
+            args,
             model_control: None,
         }
     }
@@ -425,7 +440,12 @@ mod tests {
         // A `custom` agent has no model_control, so list_models() short-circuits
         // to empty — it never spawns the command (here a bogus one) — and the
         // host hides the picker on the *absence* of models.
-        let harness = AcpHarness::custom("x", "X", "definitely-not-a-real-command", ["acp"]);
+        let harness = AcpHarness::custom(AcpHarnessConfig {
+            id: "x".to_owned(),
+            display_name: "X".to_owned(),
+            command: "definitely-not-a-real-command".to_owned(),
+            args: vec!["acp".to_owned()],
+        });
         assert!(harness.list_models().expect("ok").is_empty());
         let caps = harness.info().capabilities;
         assert!(caps.models.is_empty());
