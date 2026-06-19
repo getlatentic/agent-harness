@@ -44,8 +44,9 @@ impl Tool for ApplyPatch {
     fn mutating(&self) -> bool {
         true
     }
-    fn offered(&self, mode: RunMode, model: &str) -> bool {
-        matches!(mode, RunMode::Edit) && uses_apply_patch(model)
+    fn offered(&self, _mode: RunMode, model: &str) -> bool {
+        // gpt-5-class only; offered in every mode (refused at `execute` if read-only).
+        uses_apply_patch(model)
     }
     fn execute(&self, args: &Value, ctx: &ToolCtx) -> ToolOutcome {
         let a: ApplyPatchArgs = match parse_args(args) {

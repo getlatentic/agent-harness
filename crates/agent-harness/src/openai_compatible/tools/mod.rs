@@ -9,11 +9,11 @@
 //! (glob/grep), [`shell`] (bash).
 //!
 //! Two deviations from OpenCode, by design:
-//! * **Mode gating is schema-level.** OpenCode offers every tool and denies
-//!   sensitive calls at execution time via a permission ruleset; we have no
-//!   ruleset, so [`RunMode`] is the gate — a mutating tool simply isn't
-//!   *offered* in [`RunMode::Ask`] (and `execute` re-checks). Review stays in
-//!   the host, as for the CLI adapters — this layer executes, it doesn't gate.
+//! * **Mode gating is at the call, not the schema.** Every tool is offered in
+//!   every mode (the model sees the full surface); a mutating call in a
+//!   read-only ([`RunMode::Ask`]) run is refused at `execute`, with a message
+//!   telling the model to answer instead. Review of applied edits stays in the
+//!   host, as for the CLI adapters.
 //! * **Descriptions are inline** `&str`, not sibling `.txt` files.
 //!
 //! Paths are **relative to the run's `cwd`**; traversal outside it is refused
@@ -64,15 +64,15 @@ pub(crate) trait Tool: Send + Sync {
     fn parameters(&self) -> Value;
     /// Neutral behaviour class, for `RunEvent::ToolStart` routing.
     fn kind(&self) -> ToolKind;
-    /// Whether the tool mutates state — mutating tools are offered only in
-    /// [`RunMode::Edit`] and refused in `Ask`.
+    /// Whether the tool mutates state — a mutating call is refused at `execute`
+    /// in a read-only ([`RunMode::Ask`]) run.
     fn mutating(&self) -> bool;
-    /// Whether the tool is offered to the model in `mode` for `model`. Default:
-    /// read-only tools always, mutating tools only in [`RunMode::Edit`]. Tools
-    /// with model- or environment-dependent availability (the apply_patch ⇄
-    /// edit/write swap, websearch) override this.
-    fn offered(&self, mode: RunMode, _model: &str) -> bool {
-        !self.mutating() || matches!(mode, RunMode::Edit)
+    /// Whether the tool is offered to the model. Default: always — the model
+    /// sees the full tool surface in every mode, and a mutating call in a
+    /// read-only run is refused at `execute` (not hidden here). Only the
+    /// apply_patch ⇄ edit/write swap overrides this (model-dependent).
+    fn offered(&self, _mode: RunMode, _model: &str) -> bool {
+        true
     }
     /// Whether the tool is available to a subagent (a `task` child). Default
     /// yes; `task` (no nesting) and `question` (no user to answer) opt out.
@@ -148,9 +148,10 @@ impl ToolSet {
         Self { tools, permissions, permission_prompt }
     }
 
-    /// The OpenAI `tools` array offered to the model for `mode`: read-only tools
-    /// in both modes, mutating ones only in [`RunMode::Edit`]; in a subagent,
-    /// tools that opt out (`task`, `question`) are withheld.
+    /// The OpenAI `tools` array offered to the model: every tool in every mode
+    /// (a mutating call is gated at `execute`, not hidden here), minus the
+    /// model's apply_patch ⇄ edit/write swap and, in a subagent, the opt-outs
+    /// (`task`, `question`).
     pub(crate) fn defs(&self, mode: RunMode, model: &str, subagent: bool) -> Vec<Value> {
         self.tools
             .iter()
@@ -179,7 +180,11 @@ impl ToolSet {
             return ToolOutcome::err(format!("unknown tool `{name}`"));
         };
         if tool.mutating() && !matches!(ctx.mode, RunMode::Edit) {
-            return ToolOutcome::err(format!("`{name}` is unavailable in read-only (Ask) mode"));
+            return ToolOutcome::err(format!(
+                "`{name}` is disabled in read-only mode — this run can't change files. \
+                 Answer the user directly; do not retry. Tell them to turn on editing if a \
+                 change is needed."
+            ));
         }
         if let Some(reason) = self.denied(tool.as_ref(), args) {
             return ToolOutcome::err(reason);
@@ -472,18 +477,18 @@ mod tests {
     }
 
     #[test]
-    fn mode_gating_offers_mutators_only_in_edit() {
+    fn all_tools_are_offered_in_every_mode() {
         // A local (non-gpt) model, so edit/write are offered (no apply_patch swap).
         let ask = names(RunMode::Ask, "qwen2.5-coder");
         let edit = names(RunMode::Edit, "qwen2.5-coder");
-        // Read-only tools are offered in both modes.
-        for t in ["read", "glob", "grep", "list", "webfetch", "todowrite", "question", "skill"] {
+        // Every tool — read-only AND mutating — is offered in both modes; a
+        // mutating CALL in Ask is refused at execute (see
+        // `mutating_tools_refused_in_ask_mode`), not withheld from the schema.
+        for t in [
+            "read", "glob", "grep", "list", "webfetch", "todowrite", "question", "skill", "write",
+            "edit", "bash", "task",
+        ] {
             assert!(ask.contains(&t.to_string()), "{t} offered in Ask");
-            assert!(edit.contains(&t.to_string()), "{t} offered in Edit");
-        }
-        // Mutating tools only in Edit.
-        for t in ["write", "edit", "bash", "task"] {
-            assert!(!ask.contains(&t.to_string()), "{t} withheld in Ask");
             assert!(edit.contains(&t.to_string()), "{t} offered in Edit");
         }
     }

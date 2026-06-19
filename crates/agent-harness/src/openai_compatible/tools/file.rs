@@ -82,9 +82,10 @@ impl Tool for Write {
     fn mutating(&self) -> bool {
         true
     }
-    fn offered(&self, mode: RunMode, model: &str) -> bool {
-        // Hidden for gpt-5-class models, which get `apply_patch` instead.
-        matches!(mode, RunMode::Edit) && !uses_apply_patch(model)
+    fn offered(&self, _mode: RunMode, model: &str) -> bool {
+        // Hidden for gpt-5-class models, which get `apply_patch` instead. Offered
+        // in every mode — a write in a read-only run is refused at `execute`.
+        !uses_apply_patch(model)
     }
     fn permission_subject(&self, args: &Value) -> Option<String> {
         args.get("path").and_then(Value::as_str).map(str::to_owned)
@@ -130,9 +131,10 @@ impl Tool for Edit {
     fn mutating(&self) -> bool {
         true
     }
-    fn offered(&self, mode: RunMode, model: &str) -> bool {
-        // Hidden for gpt-5-class models, which get `apply_patch` instead.
-        matches!(mode, RunMode::Edit) && !uses_apply_patch(model)
+    fn offered(&self, _mode: RunMode, model: &str) -> bool {
+        // Hidden for gpt-5-class models, which get `apply_patch` instead. Offered
+        // in every mode — a write in a read-only run is refused at `execute`.
+        !uses_apply_patch(model)
     }
     fn permission_subject(&self, args: &Value) -> Option<String> {
         args.get("path").and_then(Value::as_str).map(str::to_owned)
