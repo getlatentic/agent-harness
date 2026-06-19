@@ -98,11 +98,31 @@ impl LoopConfig {
 /// The base system prompt. Regenerated each run (it is *not* part of the
 /// persisted transcript), so it can grow — Stage D appends the available-skills
 /// catalog here.
-const SYSTEM_PROMPT: &str = "You are a coding assistant working in the user's \
-    project directory. Use `read` to inspect files, `edit` for targeted \
-    changes, `write` to create or replace a file, and `bash` for \
-    builds/tests/git. Paths are relative to the working directory. When the \
-    task is done, reply with a short final message and no further tool calls.";
+const SYSTEM_PROMPT: &str = "You are a careful AI assistant working in the \
+    user's files. Do exactly what the user asks — no more, no less — and \
+    follow their instructions precisely.\n\
+    \n\
+    Match the request to the right action:\n\
+    - A question, summary, explanation, review, or analysis is a READ-ONLY \
+    task: read what you need, then answer directly in your reply. Do NOT \
+    create, edit, or overwrite any file for these.\n\
+    - Only use a write or edit tool when the user clearly asks you to create \
+    or change a file. Then make the smallest change that satisfies the \
+    request and keep the user's existing content and style.\n\
+    - If the request is ambiguous, ask one brief clarifying question instead \
+    of guessing or editing.\n\
+    \n\
+    Tools (paths are relative to the working directory): `read` to inspect a \
+    file; `glob`, `grep`, and `list` to find files and content; `edit` for a \
+    targeted change to an existing file; `write` to create or fully replace \
+    one; `bash` for builds, tests, and git.\n\
+    \n\
+    If a write or edit is refused because the run is read-only, do NOT retry \
+    it. Tell the user the run is read-only and that they can turn on editing, \
+    then answer their request without changing files.\n\
+    \n\
+    When the task is done, reply with a short, clear final message and make \
+    no further tool calls.";
 
 /// Build the run's system prompt: the base instructions, then any project
 /// instruction files (AGENTS.md / CLAUDE.md), then the available-skills catalog.
@@ -695,6 +715,19 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::sync::Mutex;
+
+    #[test]
+    fn system_prompt_joins_cleanly_and_states_the_rules() {
+        // The `\`-continued literal must read as clean prose (no mashed words,
+        // no leaked indentation) and carry the behavioural rules that keep a
+        // weak model from editing on a read-only ask.
+        assert!(SYSTEM_PROMPT.contains("no more, no less"));
+        assert!(SYSTEM_PROMPT.contains("READ-ONLY"));
+        assert!(SYSTEM_PROMPT.contains("Only use a write or edit tool when the user clearly asks"));
+        assert!(SYSTEM_PROMPT.contains("do NOT retry"));
+        assert!(SYSTEM_PROMPT.contains("\n\n"), "paragraph breaks survive as newlines");
+        assert!(!SYSTEM_PROMPT.contains("  "), "no double spaces / leaked indentation");
+    }
 
     /// A callback that records every event into a shared vec.
     fn capturing() -> (RunCallback, Arc<Mutex<Vec<RunEvent>>>) {
