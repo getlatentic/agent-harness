@@ -28,10 +28,12 @@ use serde_json::Value;
 // root: the `Harness` trait it implements + the request/metadata types it uses.
 use crate::{
     CredentialSpec, Harness, HarnessCapabilities, HarnessError, HarnessInfo, HarnessModel,
-    HarnessReadiness, InstallCallback, RunCallback, RunHandle, RunRequest,
+    HarnessReadiness, InstallCallback, InstalledModel, ModelManagement, PullProgressCallback,
+    RunCallback, RunHandle, RunRequest,
 };
 
 mod instructions;
+mod ollama;
 mod run;
 mod session;
 mod skills;
@@ -40,6 +42,15 @@ mod wire;
 
 pub use session::SessionRecord;
 pub use tools::mcp::{McpPrompt, McpPromptArg, McpServer, McpTransport, PromptMessage};
+
+/// Cap on the context window we ask Ollama to load (`num_ctx`). `/api/show` may
+/// report a model's full trained context (often 128k+); loading that much KV
+/// cache can exhaust memory, and ~32k is ample for the system prompt + tools + a
+/// working file. The documented sweet spot for local tool-calling is 16–32k.
+const OLLAMA_CTX_CEILING: u64 = 32_768;
+/// Fallback `num_ctx` when a model's context can't be probed — still well above
+/// Ollama's 4096 default, which silently truncates our system prompt.
+const OLLAMA_CTX_DEFAULT: u64 = 8_192;
 
 /// How a harness instance discovers its model list for [`Harness::list_models`].
 enum Discovery {
@@ -210,7 +221,7 @@ impl OpenHarness {
     pub fn ollama() -> Self {
         Self {
             id: "ollama".to_owned(),
-            display_name: "Ollama (local)".to_owned(),
+            display_name: "Ollama".to_owned(),
             description: "Local models served by Ollama via its OpenAI-compatible API.".to_owned(),
             base_url: "http://localhost:11434".to_owned(),
             api_key_env: None,
@@ -261,6 +272,20 @@ impl OpenHarness {
         self
     }
 
+    /// Guard the model-management operations: only the Ollama discovery mode
+    /// manages models locally. Returns the same "unsupported" error the trait
+    /// defaults give, so a non-Ollama instance reports cleanly instead of
+    /// hitting a `/api/...` endpoint that isn't there.
+    fn require_ollama_management(&self) -> Result<(), HarnessError> {
+        match &self.discovery {
+            Discovery::OllamaTags => Ok(()),
+            Discovery::Static(_) | Discovery::ModelsDev(_) => Err(HarnessError::Other(format!(
+                "{} does not support managing models.",
+                self.display_name
+            ))),
+        }
+    }
+
     /// The API key for this instance, read from the configured env var.
     fn api_key(&self) -> Option<String> {
         self.api_key_env
@@ -269,19 +294,29 @@ impl OpenHarness {
             .filter(|v| !v.trim().is_empty())
     }
 
-    /// The context window for compaction: the explicit `with_context_tokens`
-    /// value when set, else — for Ollama — the model's own context length probed
-    /// from `/api/show` (so compaction works for local models with no manual
-    /// configuration). Best-effort; `None` leaves compaction off.
-    fn resolve_context_tokens(&self, model: &str) -> Option<u64> {
-        if self.context_tokens.is_some() {
-            return self.context_tokens;
-        }
+    /// Resolve the run's context settings as `(compaction_limit, ollama_num_ctx)`.
+    ///
+    /// For Ollama both are the same *effective* window — the explicit
+    /// `with_context_tokens` override (uncapped, the host's call), else the
+    /// model's probed `/api/show` context capped at [`OLLAMA_CTX_CEILING`], else
+    /// [`OLLAMA_CTX_DEFAULT`]. `ollama_num_ctx` is sent in the native `/api/chat`
+    /// request so Ollama loads that window instead of its 4096 default (which
+    /// would silently truncate the prompt), and compaction targets the same
+    /// number so the two never disagree. Other providers self-manage the window:
+    /// `ollama_num_ctx` is `None` (they use `/v1`) and the compaction limit is
+    /// the explicit override or `None`.
+    fn resolve_context(&self, model: &str) -> (Option<u64>, Option<u64>) {
         match &self.discovery {
-            Discovery::OllamaTags => wire::ollama_context_length(&self.base_url, model),
+            Discovery::OllamaTags => {
+                let effective = self
+                    .context_tokens
+                    .or_else(|| ollama::context_length(&self.base_url, model).map(|n| n.min(OLLAMA_CTX_CEILING)))
+                    .unwrap_or(OLLAMA_CTX_DEFAULT);
+                (Some(effective), Some(effective))
+            }
             // Non-Ollama: no per-model context probe here (models.dev carries
             // limits, but that's a separate enrichment).
-            Discovery::Static(_) | Discovery::ModelsDev(_) => None,
+            Discovery::Static(_) | Discovery::ModelsDev(_) => (self.context_tokens, None),
         }
     }
 
@@ -424,6 +459,7 @@ impl Harness for OpenHarness {
                 supports_effort: false,
                 supports_max_turns: true,
                 supports_login: false,
+                supports_custom_instructions: true,
             },
         }
     }
@@ -442,7 +478,7 @@ impl Harness for OpenHarness {
         match &self.discovery {
             // Reachability doubles as the readiness probe: if `/api/tags`
             // answers, Ollama is up.
-            Discovery::OllamaTags => match wire::list_ollama_tags(&self.base_url) {
+            Discovery::OllamaTags => match ollama::list_tags(&self.base_url) {
                 Ok(_) => base(true, None),
                 Err(e) => base(
                     false,
@@ -485,7 +521,7 @@ impl Harness for OpenHarness {
                 ))
             })?;
 
-        let context_tokens = self.resolve_context_tokens(&model);
+        let (context_tokens, ollama_num_ctx) = self.resolve_context(&model);
         let model_cost = self.model_cost_for(&model);
         // Inline images become base64 data URIs the wire attaches to the prompt.
         let image_data_uris: Vec<String> =
@@ -502,6 +538,7 @@ impl Harness for OpenHarness {
             resume,
             store: self.session_dir.clone().map(session::FileStore::new),
             context_tokens,
+            ollama_num_ctx,
             agents: self.agents.clone(),
             mcp_servers: self.mcp_servers.clone(),
             output_schema: tuning.output_schema,
@@ -510,6 +547,7 @@ impl Harness for OpenHarness {
             permissions: self.permissions.clone(),
             permission_prompt: self.permission_prompt.clone(),
             reasoning_tag: self.reasoning_tag.clone(),
+            extra_instructions: tuning.extra_instructions,
         };
 
         let cancel = Arc::new(AtomicBool::new(false));
@@ -538,10 +576,41 @@ impl Harness for OpenHarness {
 
     fn list_models(&self) -> Result<Vec<HarnessModel>, HarnessError> {
         match &self.discovery {
-            Discovery::OllamaTags => wire::list_ollama_tags(&self.base_url).map_err(HarnessError::Other),
+            Discovery::OllamaTags => ollama::list_tags(&self.base_url).map_err(HarnessError::Other),
             Discovery::Static(_) => Ok(self.info().capabilities.models),
             Discovery::ModelsDev(provider) => Ok(crate::models_dev::provider_models(provider)),
         }
+    }
+
+    // Model management is an Ollama-only capability: it installs/removes models
+    // on the local server. Other OpenAI-compatible endpoints (OpenRouter,
+    // models.dev-backed) host their models remotely, so the trait defaults
+    // (unsupported) stand for them.
+    fn model_management(&self) -> Option<ModelManagement> {
+        match &self.discovery {
+            Discovery::OllamaTags => Some(ModelManagement { base_url: self.base_url.clone() }),
+            Discovery::Static(_) | Discovery::ModelsDev(_) => None,
+        }
+    }
+
+    fn list_installed_models(&self) -> Result<Vec<InstalledModel>, HarnessError> {
+        self.require_ollama_management()?;
+        ollama::list_installed(&self.base_url).map_err(HarnessError::Other)
+    }
+
+    fn pull_model(
+        &self,
+        model: &str,
+        cancel: &std::sync::atomic::AtomicBool,
+        on_progress: PullProgressCallback<'_>,
+    ) -> Result<(), HarnessError> {
+        self.require_ollama_management()?;
+        ollama::pull(&self.base_url, model, cancel, on_progress).map_err(HarnessError::Other)
+    }
+
+    fn delete_model(&self, model: &str) -> Result<(), HarnessError> {
+        self.require_ollama_management()?;
+        ollama::delete(&self.base_url, model).map_err(HarnessError::Other)
     }
 }
 
@@ -561,6 +630,28 @@ mod tests {
         // Dynamic discovery → no static models in info(); list_models() fills it.
         assert!(info.capabilities.models.is_empty());
         assert!(!h.credential().required);
+    }
+
+    #[test]
+    fn only_ollama_exposes_model_management() {
+        let ollama = OpenHarness::ollama();
+        let mgmt = ollama.model_management().expect("Ollama manages models");
+        assert_eq!(mgmt.base_url, "http://localhost:11434");
+
+        // A remote OpenAI-compatible endpoint hosts its models, so management is
+        // unsupported — and the operations report that rather than calling out.
+        let remote = OpenHarness::custom(OpenHarnessConfig {
+            id: "openrouter".to_owned(),
+            display_name: "OpenRouter".to_owned(),
+            base_url: "https://openrouter.ai/api".to_owned(),
+            api_key_env: Some("OPENROUTER_API_KEY".to_owned()),
+            models: Vec::new(),
+        });
+        assert!(remote.model_management().is_none());
+        assert!(remote.list_installed_models().is_err());
+        assert!(remote.delete_model("whatever").is_err());
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        assert!(remote.pull_model("whatever", &cancel, &mut |_| {}).is_err());
     }
 
     #[test]

@@ -17,6 +17,7 @@ use serde_json::Value;
 use crate::{HarnessError, RunCallback, RunControl, RunEvent, RunMode};
 
 use super::instructions;
+use super::ollama;
 use super::session::{self, FileStore};
 use super::skills;
 use super::tools;
@@ -67,6 +68,11 @@ pub(crate) struct LoopConfig {
     /// The model's context-window size in tokens, when known — enables
     /// compaction near the limit; `None` disables it.
     pub context_tokens: Option<u64>,
+    /// When set, talk to Ollama's native `/api/chat` with this `num_ctx` instead
+    /// of the OpenAI `/v1` endpoint (which ignores it and loads every model at
+    /// 4096, truncating the prompt). Always equals `context_tokens` for Ollama;
+    /// `None` for OpenAI-compatible providers, which use `/v1`.
+    pub ollama_num_ctx: Option<u64>,
     /// Named subagents the `task` tool can spawn via `subagent_type`.
     pub agents: Vec<(String, crate::openai_compatible::AgentDef)>,
     /// MCP servers to launch over stdio and expose their tools to the model.
@@ -87,6 +93,9 @@ pub(crate) struct LoopConfig {
     /// Inline reasoning tag to lift out of streamed output into `Thinking`
     /// (e.g. `Some("think")` for `<think>…</think>`); `None` disables it.
     pub reasoning_tag: Option<String>,
+    /// The host's per-harness "custom instructions", appended to the system
+    /// prompt as a final section; `None`/blank adds nothing.
+    pub extra_instructions: Option<String>,
 }
 
 impl LoopConfig {
@@ -117,6 +126,9 @@ const SYSTEM_PROMPT: &str = "You are a careful AI assistant working in the \
     targeted change to an existing file; `write` to create or fully replace \
     one; `bash` for builds, tests, and git.\n\
     \n\
+    To see what files exist or to find one, call `list` or `glob` first — \
+    never guess file names or their contents from memory.\n\
+    \n\
     If a write or edit is refused because the run is read-only, do NOT retry \
     it. Tell the user the run is read-only and that they can turn on editing, \
     then answer their request without changing files.\n\
@@ -124,8 +136,21 @@ const SYSTEM_PROMPT: &str = "You are a careful AI assistant working in the \
     When the task is done, reply with a short, clear final message and make \
     no further tool calls.";
 
-/// Build the run's system prompt: the base instructions, then any project
+/// Appended as the last message on every read-only (Ask) turn. Small local
+/// models attend most to the end of the prompt and honor the system-message
+/// hierarchy poorly, so the per-turn constraint is repeated here in the user
+/// channel. The mutator tools are also withheld in Ask mode, so this is the
+/// prompt half of the same read-only guarantee, not the only line of defense.
+const READ_ONLY_REMINDER: &str = "Reminder: this is a read-only request. Do not \
+    create, edit, or overwrite any file. Read what you need, then reply with your \
+    answer directly.";
+
+/// Build the STABLE part of the system prompt: base instructions, then project
 /// instruction files (AGENTS.md / CLAUDE.md), then the available-skills catalog.
+/// The volatile environment (working directory) is appended LAST by the caller
+/// via [`environment_block`], so everything here stays a byte-identical,
+/// cache-friendly prefix across runs in the same workspace. `cwd` only locates
+/// the instruction / skill files.
 fn build_system_prompt(base: &str, cwd: &Path, skills: &[skills::Skill]) -> String {
     let mut prompt = base.to_owned();
     if let Some(text) = instructions::gather(cwd) {
@@ -136,6 +161,15 @@ fn build_system_prompt(base: &str, cwd: &Path, skills: &[skills::Skill]) -> Stri
         prompt.push_str(&catalog);
     }
     prompt
+}
+
+/// The VARIABLE tail of the system prompt: the working directory, appended
+/// after the fixed + user-configurable sections so everything above stays a
+/// cacheable prefix. Deliberately minimal — no per-run file list (the model
+/// discovers files with `list`/`glob`), so this block is identical for every
+/// run in a given workspace.
+fn environment_block(cwd: &Path) -> String {
+    format!("\n\n# Environment\nWorking directory: {}", cwd.display())
 }
 
 /// A catalog of the registered subagents for the `task` tool's `subagent_type`,
@@ -206,6 +240,14 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
     if let Some(catalog) = agent_catalog(&cfg.agents) {
         system_prompt.push_str(&catalog);
     }
+    if let Some(extra) = cfg.extra_instructions.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        system_prompt.push_str("\n\n# Additional instructions\n");
+        system_prompt.push_str(extra);
+    }
+    // VARIABLE section LAST: the working directory changes per workspace, so
+    // appending it after the fixed + user-configurable sections keeps the whole
+    // prefix above it byte-identical run-to-run (a cache-friendly KV prefix).
+    system_prompt.push_str(&environment_block(&cfg.cwd));
     // The FULL transcript (no system prompt — that's regenerated each run) is
     // what we persist: never lossy. The request sent to the model is a *windowed
     // view* of it ([`window`]), so compaction can summarize old turns without
@@ -218,6 +260,8 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
     // connection config, running a child session under this one.
     let runner =
         Subagent { cfg: &cfg, parent_session_id: &session.id, skills: &skills, on_event: &on_event, toolset: &toolset };
+    // One-shot model access for `summarize`'s map-reduce, over the same config.
+    let model = Model { cfg: &cfg };
 
     for turn in 0..cfg.max_turns {
         if cancel.load(Ordering::SeqCst) {
@@ -231,6 +275,9 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
         // windowed view to send.
         compact_if_needed(&cfg, &mut transcript, &system_prompt, &on_event, rid);
         let mut sent = window(&system_prompt, &transcript);
+        if cfg.mode == RunMode::Ask {
+            sent.push(ChatMessage::user(READ_ONLY_REMINDER));
+        }
         if turn + 1 == cfg.max_turns {
             // Final step — nudge the model to answer rather than call more tools.
             sent.push(ChatMessage::user(
@@ -240,22 +287,34 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
 
         // Stream the turn: text deltas surface as `RunEvent::Text` as they
         // arrive; the assembled message (with tool calls) drives the dispatch.
-        let (msg, usage) = match wire::post_chat_stream(
-            &cfg.base_url,
-            cfg.api_key.as_deref(),
-            &cfg.model,
-            &sent,
-            &tool_defs,
-            wire::RequestExtras {
-                response_format: response_format.as_ref(),
-                image_data_uris: &cfg.image_data_uris,
-                reasoning_tag: cfg.reasoning_tag.as_deref(),
-            },
-            |fragment| match fragment {
-                wire::Fragment::Text(t) => (*on_event)(RunEvent::Text { run_id: rid.to_owned(), delta: t.to_owned() }),
-                wire::Fragment::Reasoning(r) => (*on_event)(RunEvent::Thinking { run_id: rid.to_owned(), delta: r.to_owned() }),
-            },
-        ) {
+        let extras = wire::RequestExtras {
+            response_format: response_format.as_ref(),
+            image_data_uris: &cfg.image_data_uris,
+            reasoning_tag: cfg.reasoning_tag.as_deref(),
+        };
+        // Ollama gets its native `/api/chat` so `num_ctx` actually applies; every
+        // other provider speaks the OpenAI `/v1` shape.
+        let streamed = match cfg.ollama_num_ctx {
+            Some(num_ctx) => ollama::post_chat_stream(
+                &cfg.base_url,
+                &cfg.model,
+                &sent,
+                &tool_defs,
+                num_ctx,
+                extras,
+                |fragment| emit_fragment(&on_event, rid, fragment),
+            ),
+            None => wire::post_chat_stream(
+                &cfg.base_url,
+                cfg.api_key.as_deref(),
+                &cfg.model,
+                &sent,
+                &tool_defs,
+                extras,
+                |fragment| emit_fragment(&on_event, rid, fragment),
+            ),
+        };
+        let (msg, usage) = match streamed {
             Ok(pair) => pair,
             Err(message) => return finish_error(&on_event, rid, message),
         };
@@ -294,6 +353,7 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
                 call_id: &call.id,
                 skills: &skills,
                 subagent: Some(&runner),
+                model: Some(&model),
             };
             let outcome = toolset.execute(&call.function.name, &args, &ctx);
             // Side events the tool produced (todowrite → Plan, question →
@@ -400,6 +460,10 @@ const SUMMARY_PROMPT: &str = "Summarize the conversation so far into a concise b
 complete brief, so work can continue without the full history. Use these sections:\n\
 ## Goal\n## Constraints & preferences\n## Progress (done / in progress / blocked)\n\
 ## Key decisions\n## Next steps\n## Critical context (files, commands, identifiers)\n\n\
+Rules:\n\
+- Keep every section even if empty — write \"(none)\" rather than dropping it.\n\
+- Use terse bullet points, not prose paragraphs.\n\
+- Preserve file paths, commands, error strings, and identifiers verbatim — never paraphrase them.\n\n\
 Conversation:";
 
 /// Internal role for a compaction marker stored in the transcript (its content
@@ -490,6 +554,38 @@ fn flatten_for_summary(messages: &[ChatMessage]) -> String {
     out
 }
 
+/// Route a streamed fragment to the host as the matching `RunEvent`. A free
+/// function (not a captured closure) so the same handler can be handed to either
+/// endpoint's streamer without tripping the closure's higher-ranked lifetime.
+fn emit_fragment(on_event: &RunCallback, rid: &str, fragment: wire::Fragment) {
+    match fragment {
+        wire::Fragment::Text(t) => (*on_event)(RunEvent::Text { run_id: rid.to_owned(), delta: t.to_owned() }),
+        wire::Fragment::Reasoning(r) => (*on_event)(RunEvent::Thinking { run_id: rid.to_owned(), delta: r.to_owned() }),
+    }
+}
+
+/// One non-streaming completion returning just the assistant message, routed to
+/// the right endpoint (native Ollama when `ollama_num_ctx` is set, else OpenAI
+/// `/v1`). Used where streaming isn't needed: compaction summaries and subagent
+/// turns. `model` may differ from `cfg.model` (subagents can override it).
+fn chat_once(cfg: &LoopConfig, model: &str, messages: &[ChatMessage], tools: &[Value]) -> Result<ChatMessage, String> {
+    match cfg.ollama_num_ctx {
+        Some(num_ctx) => {
+            let (msg, _usage) =
+                ollama::post_chat_stream(&cfg.base_url, model, messages, tools, num_ctx, wire::RequestExtras::default(), |_| {})?;
+            Ok(msg)
+        }
+        None => {
+            let resp = wire::post_chat(&cfg.base_url, cfg.api_key.as_deref(), model, messages, tools)?;
+            resp.choices
+                .into_iter()
+                .next()
+                .map(|choice| choice.message)
+                .ok_or_else(|| "the endpoint returned no choices".to_owned())
+        }
+    }
+}
+
 /// When the windowed request would near the model's context limit, summarize the
 /// older turns into a `compaction` marker inserted into the transcript — the
 /// model then sees `[system, summary, recent tail]` (via [`window`]) while the
@@ -505,7 +601,11 @@ fn compact_if_needed(
     let Some(limit) = cfg.context_tokens.map(|n| n as usize) else {
         return;
     };
-    let reserve = (limit / 4).min(20_000);
+    // Reserve half the window (capped) rather than a quarter: on a ~4K local
+    // window a quarter is only ~1K headroom, so the request brushes the limit
+    // before compaction fires and the model truncates mid-prompt. Half gives a
+    // small window real slack; the cap keeps large windows from over-reserving.
+    let reserve = (limit / 2).min(20_000);
     if estimate_tokens(&window(system_prompt, transcript)) <= limit.saturating_sub(reserve) {
         return;
     }
@@ -522,10 +622,7 @@ fn compact_if_needed(
     let head = window(system_prompt, &transcript[..boundary]);
     let flattened = flatten_for_summary(&head[1..]); // drop the system prompt
     let request = vec![ChatMessage::user(format!("{SUMMARY_PROMPT}\n\n{flattened}"))];
-    let summary = match wire::post_chat(&cfg.base_url, cfg.api_key.as_deref(), &cfg.model, &request, &[]) {
-        Ok(resp) => resp.choices.into_iter().next().and_then(|c| c.message.content),
-        Err(_) => None,
-    };
+    let summary = chat_once(cfg, &cfg.model, &request, &[]).ok().and_then(|m| m.content);
     let Some(summary) = summary.filter(|s| !s.trim().is_empty()) else {
         return;
     };
@@ -552,6 +649,28 @@ struct Subagent<'a> {
 impl tools::SubagentRunner for Subagent<'_> {
     fn run(&self, subagent_type: Option<&str>, prompt: &str, cancel: &AtomicBool) -> Result<String, String> {
         run_subagent(self, subagent_type, prompt, cancel)
+    }
+}
+
+/// One-shot model access for the `summarize` tool's map-reduce: a single
+/// tool-less [`chat_once`] over the run's connection config, no agent loop. Held
+/// by [`tools::ToolCtx::model`].
+struct Model<'a> {
+    cfg: &'a LoopConfig,
+}
+
+impl tools::ModelClient for Model<'_> {
+    fn complete(&self, system: Option<&str>, user: &str, cancel: &AtomicBool) -> Result<String, String> {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("cancelled".to_owned());
+        }
+        let mut messages = Vec::with_capacity(2);
+        if let Some(s) = system {
+            messages.push(ChatMessage::system(s));
+        }
+        messages.push(ChatMessage::user(user));
+        let msg = chat_once(self.cfg, &self.cfg.model, &messages, &[])?;
+        Ok(msg.content.unwrap_or_default())
     }
 }
 
@@ -604,8 +723,10 @@ fn run_subagent(
         });
     }
 
-    let system_prompt = build_system_prompt(base, &parent.cwd, skills);
+    let mut system_prompt = build_system_prompt(base, &parent.cwd, skills);
+    system_prompt.push_str(&environment_block(&parent.cwd));
     let tool_defs = toolset.defs(parent.mode, model, true);
+    let model_client = Model { cfg: parent };
     let mut transcript = vec![ChatMessage::user(prompt.to_owned())];
     let mut final_text = String::new();
 
@@ -615,11 +736,7 @@ fn run_subagent(
         }
         compact_if_needed(parent, &mut transcript, &system_prompt, on_event, &parent.run_id);
         let sent = window(&system_prompt, &transcript);
-        let resp = wire::post_chat(&parent.base_url, parent.api_key.as_deref(), model, &sent, &tool_defs)?;
-        let Some(choice) = resp.choices.into_iter().next() else {
-            return Err("the endpoint returned no choices".to_owned());
-        };
-        let msg = choice.message;
+        let msg = chat_once(parent, model, &sent, &tool_defs)?;
         if let Some(text) = msg.content.as_deref().filter(|t| !t.is_empty()) {
             final_text = text.to_owned();
         }
@@ -649,6 +766,7 @@ fn run_subagent(
                 call_id: &call.id,
                 skills,
                 subagent: None, // no nesting
+                model: Some(&model_client),
             };
             let outcome = toolset.execute(&call.function.name, &args, &ctx);
             transcript.push(ChatMessage::tool_result(call.id.clone(), outcome.output));
@@ -729,6 +847,24 @@ mod tests {
         assert!(!SYSTEM_PROMPT.contains("  "), "no double spaces / leaked indentation");
     }
 
+    #[test]
+    fn environment_block_is_a_minimal_trailing_cwd_section() {
+        let block = environment_block(Path::new("/work/space"));
+        assert!(block.starts_with("\n\n# Environment"), "its own trailing section");
+        assert!(block.contains("Working directory: /work/space"));
+        // No per-run file list — the variable block must stay byte-identical
+        // run-to-run in a workspace so the cacheable prefix above it never moves.
+        assert!(!block.contains("- "), "no file listing in the variable block");
+    }
+
+    #[test]
+    fn base_prompt_directs_tool_use_for_file_discovery() {
+        // The dropped manifest's job is now the model's: discover via tools, not
+        // memory. The fixed prompt must say so (a weak model otherwise guesses).
+        assert!(SYSTEM_PROMPT.contains("call `list` or `glob` first"));
+        assert!(SYSTEM_PROMPT.contains("never guess file names"));
+    }
+
     /// A callback that records every event into a shared vec.
     fn capturing() -> (RunCallback, Arc<Mutex<Vec<RunEvent>>>) {
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -750,6 +886,7 @@ mod tests {
             resume,
             store,
             context_tokens: None,
+            ollama_num_ctx: None,
             agents: Vec::new(),
             mcp_servers: Vec::new(),
             output_schema: None,
@@ -758,6 +895,7 @@ mod tests {
             permissions: Vec::new(),
             permission_prompt: None,
             reasoning_tag: Some("think".to_owned()),
+            extra_instructions: None,
         }
     }
 

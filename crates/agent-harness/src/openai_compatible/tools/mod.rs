@@ -9,10 +9,13 @@
 //! (glob/grep), [`shell`] (bash).
 //!
 //! Two deviations from OpenCode, by design:
-//! * **Mode gating is at the call, not the schema.** Every tool is offered in
-//!   every mode (the model sees the full surface); a mutating call in a
-//!   read-only ([`RunMode::Ask`]) run is refused at `execute`, with a message
-//!   telling the model to answer instead. Review of applied edits stays in the
+//! * **Read-only withholds, then refuses.** Mutating tools (`write`/`edit`/
+//!   `apply_patch`/`bash`/`task`) are withheld from the model in a read-only
+//!   ([`RunMode::Ask`]) run, because a small local model that can *see* them
+//!   tends to call them even when only asked to summarize, then loops on the
+//!   refusal. OpenCode instead offers everything and denies at execution; for
+//!   weak models, not offering is the stronger lever. A mutating call is still
+//!   refused at `execute` as a backstop. Review of applied edits stays in the
 //!   host, as for the CLI adapters.
 //! * **Descriptions are inline** `&str`, not sibling `.txt` files.
 //!
@@ -37,6 +40,7 @@ mod question;
 mod search;
 mod shell;
 mod skill;
+mod summarize;
 mod task;
 mod todo;
 mod websearch;
@@ -64,13 +68,13 @@ pub(crate) trait Tool: Send + Sync {
     fn parameters(&self) -> Value;
     /// Neutral behaviour class, for `RunEvent::ToolStart` routing.
     fn kind(&self) -> ToolKind;
-    /// Whether the tool mutates state — a mutating call is refused at `execute`
-    /// in a read-only ([`RunMode::Ask`]) run.
+    /// Whether the tool mutates state. Mutating tools are withheld from the model
+    /// in a read-only ([`RunMode::Ask`]) run by [`ToolSet::defs`], and refused at
+    /// `execute` as a backstop if one is somehow called anyway.
     fn mutating(&self) -> bool;
-    /// Whether the tool is offered to the model. Default: always — the model
-    /// sees the full tool surface in every mode, and a mutating call in a
-    /// read-only run is refused at `execute` (not hidden here). Only the
-    /// apply_patch ⇄ edit/write swap overrides this (model-dependent).
+    /// Whether the tool is offered to the model, before [`ToolSet::defs`] applies
+    /// the read-only filter (which withholds mutating tools in `Ask`). Default:
+    /// yes; only the apply_patch ⇄ edit/write swap overrides this (model-dependent).
     fn offered(&self, _mode: RunMode, _model: &str) -> bool {
         true
     }
@@ -84,6 +88,13 @@ pub(crate) trait Tool: Send + Sync {
     /// intentional context the model must see in full (`skill`) opt out.
     fn truncates_output(&self) -> bool {
         true
+    }
+    /// Which end of an over-cap output to keep. Default [`Keep::Head`] (the
+    /// start, where most tools' useful output is); `bash` overrides to keep the
+    /// tail too, because a command's exit/error lines land at the end and a small
+    /// model needs exactly those.
+    fn keep_output(&self) -> Keep {
+        Keep::Head
     }
     /// The "subject" of a call for permission-rule pattern matching — the command
     /// for `bash`, the path for file tools; `None` if the tool isn't pattern-gated
@@ -108,6 +119,7 @@ fn builtins() -> Vec<Box<dyn Tool>> {
         Box::new(todo::TodoWrite),
         Box::new(question::QuestionTool),
         Box::new(skill::LoadSkill),
+        Box::new(summarize::Summarize),
         Box::new(websearch::WebSearch),
         Box::new(file::Write),
         Box::new(file::Edit),
@@ -148,14 +160,20 @@ impl ToolSet {
         Self { tools, permissions, permission_prompt }
     }
 
-    /// The OpenAI `tools` array offered to the model: every tool in every mode
-    /// (a mutating call is gated at `execute`, not hidden here), minus the
+    /// The OpenAI `tools` array offered to the model: the read-only tools always,
+    /// the mutating tools only in [`RunMode::Edit`] — they're withheld from a
+    /// read-only `Ask` run, because a small local model that can *see* `write` /
+    /// `edit` tends to call them even when asked only to summarize, then loops on
+    /// the refusal. Withholding is the evidenced fix; `execute` still refuses a
+    /// mutating call as a backstop against a hallucinated name. Also drops the
     /// model's apply_patch ⇄ edit/write swap and, in a subagent, the opt-outs
     /// (`task`, `question`).
     pub(crate) fn defs(&self, mode: RunMode, model: &str, subagent: bool) -> Vec<Value> {
         self.tools
             .iter()
-            .filter(|t| t.offered(mode, model) && (!subagent || t.in_subagent()))
+            .filter(|t| t.offered(mode, model))
+            .filter(|t| !subagent || t.in_subagent())
+            .filter(|t| !(t.mutating() && matches!(mode, RunMode::Ask)))
             .map(|t| {
                 json!({
                     "type": "function",
@@ -191,7 +209,7 @@ impl ToolSet {
         }
         let mut outcome = tool.execute(args, ctx);
         if tool.truncates_output() {
-            outcome.output = truncate_output(outcome.output);
+            outcome.output = truncate_output(outcome.output, tool.keep_output());
         }
         outcome
     }
@@ -248,6 +266,16 @@ pub(crate) trait SubagentRunner {
     ) -> Result<String, String>;
 }
 
+/// One stateless model completion (no tools, no agent loop) — the model access a
+/// tool needs to drive its own multi-call routine. Implemented by the run loop
+/// over the run's connection config; the `summarize` tool reaches it through
+/// [`ToolCtx::model`] to run its map-reduce. Object-safe, so `ToolCtx` holds
+/// `&dyn`. Distinct from [`SubagentRunner`], which spawns a whole tool-using
+/// child agent; this is a single prompt→text call.
+pub(crate) trait ModelClient {
+    fn complete(&self, system: Option<&str>, user: &str, cancel: &AtomicBool) -> Result<String, String>;
+}
+
 /// Per-run context for executing a tool call: where the run operates, what it
 /// may do, and a cooperative cancel flag (so a long `bash` can be interrupted).
 pub(crate) struct ToolCtx<'a> {
@@ -264,6 +292,9 @@ pub(crate) struct ToolCtx<'a> {
     /// Spawns a subagent for the `task` tool, when this run allows it. `None`
     /// inside a subagent (no nesting) and in contexts without a runner.
     pub subagent: Option<&'a dyn SubagentRunner>,
+    /// One-shot model access for tools that drive their own model loop
+    /// (`summarize`'s map-reduce). `None` in contexts without a reachable model.
+    pub model: Option<&'a dyn ModelClient>,
 }
 
 /// Outcome of executing one tool call: `ok` maps to `RunEvent::ToolEnd.ok`,
@@ -298,39 +329,130 @@ impl ToolOutcome {
     }
 }
 
-/// Trim a tool's output to its head when it exceeds the output caps, with a
-/// note. We don't spill the remainder to a file (OpenCode does) because our file
-/// tools are sandboxed to the cwd and couldn't read it back — the note tells the
-/// model to narrow its command instead.
-fn truncate_output(output: String) -> String {
+/// Which end of an over-cap output to keep when truncating.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Keep {
+    /// Keep the start — most tools' useful output is at the top.
+    Head,
+    /// Keep the end — for a tool whose diagnostic lands last (`bash`'s exit/error
+    /// lines), so a small model isn't shown only the leading noise.
+    #[allow(dead_code)] // a direction tools may request; bash uses HeadAndTail
+    Tail,
+    /// Keep both ends (split the budget), with a middle marker for the gap — the
+    /// `bash` case: the command and its trailing error/exit are both preserved.
+    HeadAndTail,
+}
+
+/// Cap a tool's output when it exceeds the output caps, spilling the full text to
+/// a scratch file so the omitted span stays reachable via `read` rather than
+/// forcing a narrower re-run. `keep` chooses which end(s) to retain (the start
+/// for most tools, both ends for `bash` so its trailing error survives).
+fn truncate_output(output: String, keep: Keep) -> String {
     let total_lines = output.lines().count();
     if total_lines <= MAX_OUTPUT_LINES && output.len() <= MAX_OUTPUT_BYTES {
         return output;
     }
-    let mut kept = String::new();
-    let mut kept_lines = 0usize;
-    for line in output.lines() {
-        if kept_lines >= MAX_OUTPUT_LINES || kept.len() + line.len() + 1 > MAX_OUTPUT_BYTES {
+    // Spill once up front so every branch can reference the full-output path.
+    let spilled = spill_output(&output);
+    let lines: Vec<&str> = output.lines().collect();
+    match keep {
+        Keep::Head => take_end(&lines, total_lines, MAX_OUTPUT_LINES, MAX_OUTPUT_BYTES, false, &spilled),
+        Keep::Tail => take_end(&lines, total_lines, MAX_OUTPUT_LINES, MAX_OUTPUT_BYTES, true, &spilled),
+        Keep::HeadAndTail => take_both_ends(&lines, total_lines, &spilled),
+    }
+}
+
+/// Keep the head (`from_back = false`) or tail (`true`) of `lines` within the
+/// line/byte caps, then append a note pointing at the spill file (or advising a
+/// narrower command when the spill failed).
+fn take_end(lines: &[&str], total_lines: usize, max_lines: usize, max_bytes: usize, from_back: bool, spilled: &Option<String>) -> String {
+    let mut chosen: Vec<&str> = Vec::new();
+    let mut bytes = 0usize;
+    let ordered: Box<dyn Iterator<Item = &&str>> =
+        if from_back { Box::new(lines.iter().rev()) } else { Box::new(lines.iter()) };
+    for line in ordered {
+        if chosen.len() >= max_lines || bytes + line.len() + 1 > max_bytes {
             break;
         }
-        kept.push_str(line);
-        kept.push('\n');
-        kept_lines += 1;
+        bytes += line.len() + 1;
+        chosen.push(line);
     }
-    let omitted = total_lines.saturating_sub(kept_lines);
-    // Spill the full output to a file the model can fetch with `read` (OpenCode's
-    // approach). Best-effort — if the spill fails, just advise narrowing.
-    match spill_output(&output) {
-        Some(path) => kept.push_str(&format!(
+    if from_back {
+        chosen.reverse();
+    }
+    let omitted = total_lines.saturating_sub(chosen.len());
+    let mut body = chosen.join("\n");
+    body.push('\n');
+    let note = truncation_note(omitted, spilled);
+    if from_back {
+        format!("{note}\n{body}")
+    } else {
+        format!("{body}{note}")
+    }
+}
+
+/// Keep both ends of `lines` (half the line/byte budget each) with a middle
+/// marker for the omitted span — `bash`'s shape, so the command's leading output
+/// and its trailing exit/error are both preserved.
+fn take_both_ends(lines: &[&str], total_lines: usize, spilled: &Option<String>) -> String {
+    let half_lines = MAX_OUTPUT_LINES / 2;
+    let half_bytes = MAX_OUTPUT_BYTES / 2;
+    let head = collect_within(lines.iter(), half_lines, half_bytes);
+    // The tail skips lines already in the head, so the two halves never overlap
+    // on a small input that fits within `2 * half` lines.
+    let tail_pool = &lines[head.len()..];
+    let tail = collect_within(tail_pool.iter().rev(), half_lines, half_bytes);
+    let omitted = total_lines.saturating_sub(head.len() + tail.len());
+    let mut out = head.join("\n");
+    out.push('\n');
+    out.push_str(&middle_marker(omitted, spilled));
+    out.push('\n');
+    for line in tail.iter().rev() {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Take lines from `iter` until the line or byte budget is hit, preserving the
+/// iterator's order in the returned vec.
+fn collect_within<'a>(iter: impl Iterator<Item = &'a &'a str>, max_lines: usize, max_bytes: usize) -> Vec<&'a str> {
+    let mut chosen = Vec::new();
+    let mut bytes = 0usize;
+    for line in iter {
+        if chosen.len() >= max_lines || bytes + line.len() + 1 > max_bytes {
+            break;
+        }
+        bytes += line.len() + 1;
+        chosen.push(*line);
+    }
+    chosen
+}
+
+/// The trailing note for a head/tail truncation: point at the spill file when it
+/// was written, else advise narrowing.
+fn truncation_note(omitted: usize, spilled: &Option<String>) -> String {
+    match spilled {
+        Some(path) => format!(
             "[output truncated — {omitted} more line(s) omitted. Full output saved to {path} — \
              read it with the `read` tool (offset/limit), or narrow the command.]"
-        )),
-        None => kept.push_str(&format!(
+        ),
+        None => format!(
             "[output truncated — {omitted} more line(s) omitted; narrow the command, or use \
              read/grep with offset/limit on the relevant file.]"
-        )),
+        ),
     }
-    kept
+}
+
+/// The middle marker between a kept head and tail (the head+tail case).
+fn middle_marker(omitted: usize, spilled: &Option<String>) -> String {
+    match spilled {
+        Some(path) => format!(
+            "[… {omitted} line(s) omitted from the middle. Full output saved to {path} — \
+             read it with the `read` tool (offset/limit) for the gap. …]"
+        ),
+        None => format!("[… {omitted} line(s) omitted from the middle; narrow the command for the gap. …]"),
+    }
 }
 
 /// Write a tool's full output to a scratch file and return its absolute path, so
@@ -459,7 +581,7 @@ mod tests {
     /// Run a tool through the public dispatch with a fresh (un-cancelled) context.
     fn run(name: &str, args: Value, cwd: &Path, mode: RunMode) -> ToolOutcome {
         let cancel = AtomicBool::new(false);
-        ToolSet::builtin().execute(name, &args, &ToolCtx { cwd, mode, cancel: &cancel, run_id: "t", call_id: "c", skills: &[], subagent: None })
+        ToolSet::builtin().execute(name, &args, &ToolCtx { cwd, mode, cancel: &cancel, run_id: "t", call_id: "c", skills: &[], subagent: None, model: None })
     }
 
     fn names(mode: RunMode, model: &str) -> Vec<String> {
@@ -477,18 +599,19 @@ mod tests {
     }
 
     #[test]
-    fn all_tools_are_offered_in_every_mode() {
-        // A local (non-gpt) model, so edit/write are offered (no apply_patch swap).
+    fn mutating_tools_withheld_in_ask_offered_in_edit() {
+        // A local (non-gpt) model, so edit/write aren't swapped for apply_patch.
         let ask = names(RunMode::Ask, "qwen2.5-coder");
         let edit = names(RunMode::Edit, "qwen2.5-coder");
-        // Every tool — read-only AND mutating — is offered in both modes; a
-        // mutating CALL in Ask is refused at execute (see
-        // `mutating_tools_refused_in_ask_mode`), not withheld from the schema.
-        for t in [
-            "read", "glob", "grep", "list", "webfetch", "todowrite", "question", "skill", "write",
-            "edit", "bash", "task",
-        ] {
+        // Read-only tools are offered in both modes.
+        for t in ["read", "glob", "grep", "list", "webfetch", "todowrite", "question", "skill", "summarize"] {
             assert!(ask.contains(&t.to_string()), "{t} offered in Ask");
+            assert!(edit.contains(&t.to_string()), "{t} offered in Edit");
+        }
+        // Mutating tools are withheld from a read-only run, offered in Edit — the
+        // schema half of the read-only guarantee (`execute` is the backstop).
+        for t in ["write", "edit", "bash", "task"] {
+            assert!(!ask.contains(&t.to_string()), "{t} withheld in Ask");
             assert!(edit.contains(&t.to_string()), "{t} offered in Edit");
         }
     }
@@ -534,6 +657,7 @@ mod tests {
             call_id: "c",
             skills: &[],
             subagent: None,
+            model: None,
         };
         // The matching command is refused *before* executing (rm never runs).
         let denied = tools.execute("bash", &json!({ "command": "rm -rf /tmp/x" }), &ctx);
@@ -554,6 +678,7 @@ mod tests {
             call_id: "c",
             skills: &[],
             subagent: None,
+            model: None,
         };
         // Prompt denies any command mentioning "secret", allows the rest.
         let prompt: crate::openai_compatible::PermissionPrompt =
@@ -677,7 +802,7 @@ mod tests {
     fn bash_honors_cancel() {
         let dir = scratch("bash-cancel");
         let cancel = AtomicBool::new(true); // already cancelled
-        let out = ToolSet::builtin().execute("bash", &json!({ "command": "sleep 5" }), &ToolCtx { cwd: &dir, mode: RunMode::Edit, cancel: &cancel, run_id: "t", call_id: "c", skills: &[], subagent: None });
+        let out = ToolSet::builtin().execute("bash", &json!({ "command": "sleep 5" }), &ToolCtx { cwd: &dir, mode: RunMode::Edit, cancel: &cancel, run_id: "t", call_id: "c", skills: &[], subagent: None, model: None });
         assert!(!out.ok);
         assert!(out.output.contains("cancelled"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -825,7 +950,7 @@ mod tests {
             body: "Run the deploy script.".into(),
         }];
         let ctx =
-            ToolCtx { cwd: Path::new("/tmp"), mode: RunMode::Ask, cancel: &cancel, run_id: "t", call_id: "c", skills: &skills, subagent: None };
+            ToolCtx { cwd: Path::new("/tmp"), mode: RunMode::Ask, cancel: &cancel, run_id: "t", call_id: "c", skills: &skills, subagent: None, model: None };
         let out = ToolSet::builtin().execute("skill", &json!({ "name": "deploy" }), &ctx);
         assert!(out.ok, "{}", out.output);
         assert!(out.output.contains("Run the deploy script."));
@@ -875,6 +1000,7 @@ mod tests {
             call_id: "c",
             skills: &[],
             subagent: Some(&echo),
+            model: None,
         };
         let out = ToolSet::builtin().execute("task", &json!({ "description": "do it", "prompt": "the work" }), &ctx);
         assert!(out.ok, "{}", out.output);
@@ -910,14 +1036,54 @@ mod tests {
 
     #[test]
     fn long_tool_output_is_truncated_to_the_head() {
-        // Short output is untouched.
-        assert_eq!(truncate_output("a\nb\nc".to_string()), "a\nb\nc");
+        // Short output is untouched (regardless of direction).
+        assert_eq!(truncate_output("a\nb\nc".to_string(), Keep::Head), "a\nb\nc");
         // Past the line cap → trimmed to the head + a note.
         let big: String = (0..5000).map(|i| format!("line {i}\n")).collect();
-        let out = truncate_output(big);
+        let out = truncate_output(big, Keep::Head);
         assert!(out.contains("truncated"), "has a truncation note");
         assert!(out.lines().count() <= MAX_OUTPUT_LINES + 2, "trimmed near the line cap");
         assert!(out.starts_with("line 0\n"), "keeps the head");
+        assert!(!out.contains("line 4999"), "drops the tail");
+    }
+
+    #[test]
+    fn tail_truncation_keeps_the_end() {
+        // The diagnostic at the very end survives; the leading noise is dropped.
+        let big: String = (0..5000).map(|i| format!("line {i}\n")).collect();
+        let out = truncate_output(big, Keep::Tail);
+        assert!(out.contains("truncated"), "has a truncation note");
+        assert!(out.lines().count() <= MAX_OUTPUT_LINES + 2, "trimmed near the line cap");
+        assert!(out.trim_end().ends_with("line 4999"), "keeps the tail: {:?}", &out[out.len().saturating_sub(40)..]);
+        assert!(!out.contains("line 0\n"), "drops the head");
+    }
+
+    #[test]
+    fn head_and_tail_truncation_keeps_both_ends() {
+        // bash's shape: a chatty command whose error lands on the last line. Both
+        // the leading output and the trailing diagnostic must be preserved.
+        let mut big: String = (0..5000).map(|i| format!("info line {i}\n")).collect();
+        big.push_str("error: command failed\n(exit 1)\n");
+        let out = truncate_output(big, Keep::HeadAndTail);
+        assert!(out.contains("info line 0"), "keeps the head");
+        assert!(out.contains("error: command failed") && out.contains("(exit 1)"), "keeps the trailing diagnostic: {:?}", &out[out.len().saturating_sub(60)..]);
+        assert!(out.contains("omitted from the middle"), "marks the gap in the middle");
+        assert!(!out.contains("info line 2500"), "the middle is dropped");
+        assert!(out.lines().count() <= MAX_OUTPUT_LINES + 3, "within the line budget (+ marker)");
+    }
+
+    #[test]
+    fn bash_truncation_keeps_the_trailing_error() {
+        // End-to-end through dispatch: a real over-cap `bash` run keeps its tail
+        // (where the exit line lives) — the head-only cap would have lost it.
+        let dir = scratch("bash-trunc");
+        let cmd = "for i in $(seq 1 5000); do echo info line $i; done; echo 'BOOM the real error'; exit 7";
+        let out = run("bash", json!({ "command": cmd }), &dir, RunMode::Edit);
+        assert!(!out.ok, "non-zero exit is an error");
+        assert!(out.output.contains("BOOM the real error"), "the trailing error survives truncation");
+        assert!(out.output.contains("exit 7"), "the exit framing survives");
+        assert!(out.output.contains("omitted from the middle"), "middle elided, ends kept");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -929,6 +1095,30 @@ mod tests {
         let out = run("read", json!({ "path": f.to_str().unwrap() }), Path::new("/nonexistent-cwd"), RunMode::Ask);
         assert!(out.ok, "{}", out.output);
         assert!(out.output.contains("absolute content"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_caps_on_total_bytes_within_the_line_limit() {
+        let dir = scratch("read-bytes");
+        // Many lines, each under the per-line char cap (2000) but cumulatively
+        // megabytes — the case the line cap (2000 lines) alone wouldn't catch.
+        let line = "x".repeat(1500);
+        let content = (0..1000).map(|_| format!("{line}\n")).collect::<String>();
+        let f = dir.join("wide.txt");
+        std::fs::write(&f, &content).unwrap();
+        let out = run("read", json!({ "path": "wide.txt" }), &dir, RunMode::Ask);
+        assert!(out.ok, "{}", out.output);
+        // Trimmed to roughly the byte cap (+ one line + footer), far below the
+        // ~1.5 MB the line cap alone would have let through.
+        assert!(out.output.len() <= MAX_OUTPUT_BYTES + 2 * 1024, "stays near the byte cap: {} bytes", out.output.len());
+        assert!(out.output.contains("output capped at"), "byte-cap footer: {}", &out.output[out.output.len().saturating_sub(120)..]);
+        assert!(out.output.contains("offset="), "tells the model how to page on");
+        // A single line that alone exceeds the budget still makes progress (it's
+        // char-truncated, then emitted — the loop never stalls empty).
+        std::fs::write(&f, format!("{}\n", "y".repeat(60 * 1024))).unwrap();
+        let one = run("read", json!({ "path": "wide.txt" }), &dir, RunMode::Ask);
+        assert!(one.ok && one.output.starts_with("1: yyy"), "emits the one huge line: {}", &one.output[..40.min(one.output.len())]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

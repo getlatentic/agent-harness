@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use crate::ToolKind;
 
-use super::{parse_args, safe_join, schema_for, Tool, ToolCtx, ToolOutcome};
+use super::{parse_args, safe_join, schema_for, Keep, Tool, ToolCtx, ToolOutcome};
 
 /// Default `bash` timeout (OpenCode's 2 minutes); overridable per call.
 const DEFAULT_BASH_TIMEOUT_MS: u64 = 120_000;
@@ -54,6 +54,11 @@ impl Tool for Bash {
     }
     fn permission_subject(&self, args: &Value) -> Option<String> {
         args.get("command").and_then(Value::as_str).map(str::to_owned)
+    }
+    fn keep_output(&self) -> Keep {
+        // A command's exit/error lines land at the end; keep both ends so the
+        // model sees the trailing diagnostic, not just the leading output.
+        Keep::HeadAndTail
     }
     fn execute(&self, args: &Value, ctx: &ToolCtx) -> ToolOutcome {
         let a: BashArgs = match parse_args(args) {

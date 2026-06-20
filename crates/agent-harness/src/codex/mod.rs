@@ -61,6 +61,7 @@ impl Harness for CodexHarness {
                 supports_effort: true,
                 supports_max_turns: false,
                 supports_login: true,
+                supports_custom_instructions: false,
             },
         }
     }

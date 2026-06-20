@@ -1,19 +1,18 @@
 //! The OpenAI-compatible chat wire format + the blocking HTTP calls.
 //!
 //! Works against any endpoint that speaks the OpenAI
-//! `/v1/chat/completions` shape — Ollama (`http://localhost:11434/v1`),
-//! OpenRouter, vLLM, LM Studio — plus Ollama's native `/api/tags` for
-//! model discovery. HTTP is blocking (`ureq`), driven from the worker
-//! thread `run()` spawns; errors come back as `String` and the loop turns
-//! them into a [`crate::RunEvent::Error`].
+//! `/v1/chat/completions` shape — OpenRouter, vLLM, LM Studio, and Ollama's
+//! `/v1` shim. Ollama's native `/api/*` endpoints (used for local models so
+//! `num_ctx` can be set) live in [`super::ollama`], which reuses this module's
+//! [`ThinkSplitter`] and [`send_with_retry`]. HTTP is blocking (`ureq`), driven
+//! from the worker thread `run()` spawns; errors come back as `String` and the
+//! loop turns them into a [`crate::RunEvent::Error`].
 
 use std::io::{BufRead, BufReader};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-
-use crate::HarnessModel;
 
 /// One chat message, in either direction (request history or response).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,8 +118,9 @@ const MAX_RETRIES: u32 = 3;
 
 /// Send a request, retrying transient failures (HTTP 429 / 5xx, connection
 /// errors) with exponential backoff that honors `Retry-After` — OpenCode's retry
-/// policy. A 4xx (bad request, auth, context-overflow) is terminal.
-fn send_with_retry(url: &str, make: impl Fn() -> Result<ureq::Response, Box<ureq::Error>>) -> Result<ureq::Response, String> {
+/// policy. A 4xx (bad request, auth, context-overflow) is terminal. Shared with
+/// the native Ollama path ([`super::ollama`]).
+pub(super) fn send_with_retry(url: &str, make: impl Fn() -> Result<ureq::Response, Box<ureq::Error>>) -> Result<ureq::Response, String> {
     let mut attempt = 0u32;
     loop {
         match make() {
@@ -345,7 +345,7 @@ fn drain_stream(
 /// [`Fragment::Reasoning`]; only visible text is returned, to fold into the
 /// assistant message (the thinking is shown, not stored as the answer).
 #[derive(Default)]
-struct ThinkSplitter {
+pub(super) struct ThinkSplitter {
     /// `<tag>` / `</tag>` to match; empty when inactive.
     open: String,
     close: String,
@@ -362,7 +362,7 @@ impl ThinkSplitter {
     /// content through unchanged. The tag is configurable because the convention
     /// is model-specific (DeepSeek-R1/Qwen use `think`; others differ, and some
     /// expose reasoning via a field instead — handled separately).
-    fn new(tag: Option<&str>) -> Self {
+    pub(super) fn new(tag: Option<&str>) -> Self {
         match tag {
             Some(t) if !t.is_empty() => {
                 Self { open: format!("<{t}>"), close: format!("</{t}>"), active: true, ..Self::default() }
@@ -371,7 +371,7 @@ impl ThinkSplitter {
         }
     }
 
-    fn feed(&mut self, piece: &str, on: &mut impl FnMut(Fragment)) -> String {
+    pub(super) fn feed(&mut self, piece: &str, on: &mut impl FnMut(Fragment)) -> String {
         if !self.active {
             on(Fragment::Text(piece));
             return piece.to_owned();
@@ -414,7 +414,7 @@ impl ThinkSplitter {
     }
 
     /// Flush any carried text at stream end (a dangling partial tag is shown as-is).
-    fn finish(&mut self, on: &mut impl FnMut(Fragment)) -> String {
+    pub(super) fn finish(&mut self, on: &mut impl FnMut(Fragment)) -> String {
         let rest = std::mem::take(&mut self.carry);
         if rest.is_empty() {
             return String::new();
@@ -503,52 +503,6 @@ struct DeltaFunction {
     arguments: Option<String>,
 }
 
-/// GET `{base}/api/tags` — Ollama's installed-model list — mapping each
-/// model name to a [`HarnessModel`] for the picker. Ollama lists live under
-/// `/api/tags`, *not* under `/v1`.
-pub(crate) fn list_ollama_tags(base: &str) -> Result<Vec<HarnessModel>, String> {
-    let url = format!("{base}/api/tags");
-    let resp = ureq::get(&url)
-        .call()
-        .map_err(|e| format!("model list from {url} failed: {e}"))?;
-    let body: Value = resp
-        .into_json()
-        .map_err(|e| format!("decoding model list from {url}: {e}"))?;
-    let models = body
-        .get("models")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|m| m.get("name").and_then(Value::as_str))
-                .map(|name| HarnessModel { value: name.to_owned(), label: name.to_owned() })
-                .collect()
-        })
-        .unwrap_or_default();
-    Ok(models)
-}
-
-/// POST `{base}/api/show` — Ollama's per-model metadata — and read the model's
-/// context-window size, so compaction can auto-configure for local models
-/// without the host hardcoding it. Best-effort: any failure yields `None`
-/// (compaction simply stays off, as it would without a configured limit).
-pub(crate) fn ollama_context_length(base: &str, model: &str) -> Option<u64> {
-    let url = format!("{base}/api/show");
-    let resp = ureq::post(&url).timeout(Duration::from_secs(10)).send_json(json!({ "model": model })).ok()?;
-    let body: Value = resp.into_json().ok()?;
-    context_length_from_show(&body)
-}
-
-/// Read a model's context window from an Ollama `/api/show` body: the value
-/// lives in `model_info` under an architecture-keyed `<arch>.context_length`
-/// (e.g. `qwen2.context_length`), so we scan for that suffix.
-fn context_length_from_show(body: &Value) -> Option<u64> {
-    body.get("model_info")
-        .and_then(Value::as_object)?
-        .iter()
-        .find(|(k, _)| k.ends_with(".context_length"))
-        .and_then(|(_, v)| v.as_u64())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,20 +541,6 @@ mod tests {
         });
         assert_eq!(text, "<think>x</think>hi");
         assert_eq!(msg.content.as_deref(), Some("<think>x</think>hi"));
-    }
-
-    #[test]
-    fn reads_context_length_from_model_info() {
-        let body = json!({
-            "model_info": {
-                "general.architecture": "qwen2",
-                "qwen2.context_length": 32768,
-                "qwen2.embedding_length": 3584
-            }
-        });
-        assert_eq!(context_length_from_show(&body), Some(32768));
-        assert_eq!(context_length_from_show(&json!({ "model_info": {} })), None);
-        assert_eq!(context_length_from_show(&json!({})), None);
     }
 
     #[test]

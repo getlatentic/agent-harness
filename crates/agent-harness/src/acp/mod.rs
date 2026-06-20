@@ -139,6 +139,7 @@ impl Harness for AcpHarness {
                 supports_effort: false,
                 supports_max_turns: false,
                 supports_login: false,
+                supports_custom_instructions: false,
             },
         }
     }

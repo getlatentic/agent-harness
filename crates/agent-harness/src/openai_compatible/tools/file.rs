@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::{RunMode, ToolKind};
 
-use super::{parse_args, safe_join, schema_for, uses_apply_patch, Tool, ToolCtx, ToolOutcome, MAX_LINE_CHARS};
+use super::{parse_args, safe_join, schema_for, uses_apply_patch, Tool, ToolCtx, ToolOutcome, MAX_LINE_CHARS, MAX_OUTPUT_BYTES};
 
 /// Default line cap for `read`, mirroring OpenCode's limit.
 const DEFAULT_READ_LINES: usize = 2000;
@@ -42,6 +42,13 @@ impl Tool for Read {
         ToolKind::Read
     }
     fn mutating(&self) -> bool {
+        false
+    }
+    fn truncates_output(&self) -> bool {
+        // `read` enforces its own byte budget (see `read_file`) with a paging
+        // footer ("call read again with offset=…"), so it opts out of the
+        // generic head-truncation — whose note would otherwise clobber the
+        // more-actionable paging footer.
         false
     }
     fn permission_subject(&self, args: &Value) -> Option<String> {
@@ -162,21 +169,40 @@ fn read_file(cwd: &Path, rel: &str, offset: Option<usize>, limit: Option<usize>)
     let start = offset.unwrap_or(1).max(1); // 1-based
     let limit = limit.unwrap_or(DEFAULT_READ_LINES);
     let mut out = String::new();
+    // A cumulative byte budget alongside the line/char caps: the line cap alone
+    // lets 2000 long lines reach megabytes and blow a small context window, so
+    // stop once the emitted text nears [`MAX_OUTPUT_BYTES`] and page the rest.
+    let mut byte_capped_at: Option<usize> = None;
+    let mut last_shown = start - 1; // index past the last emitted line
     for (idx, line) in lines.iter().enumerate().skip(start - 1).take(limit) {
         let n = idx + 1;
-        if line.chars().count() > MAX_LINE_CHARS {
+        let rendered = if line.chars().count() > MAX_LINE_CHARS {
             let clipped: String = line.chars().take(MAX_LINE_CHARS).collect();
-            out.push_str(&format!("{n}: {clipped}… (line truncated)\n"));
+            format!("{n}: {clipped}… (line truncated)\n")
         } else {
-            out.push_str(&format!("{n}: {line}\n"));
+            format!("{n}: {line}\n")
+        };
+        // Stop before exceeding the budget, but always emit at least one line so
+        // a single huge line still makes progress rather than looping empty.
+        if !out.is_empty() && out.len() + rendered.len() > MAX_OUTPUT_BYTES {
+            byte_capped_at = Some(n);
+            break;
         }
+        out.push_str(&rendered);
+        last_shown = idx + 1;
     }
-    let shown_end = (start - 1) + limit;
-    if shown_end < lines.len() {
+    if let Some(n) = byte_capped_at {
+        out.push_str(&format!(
+            "… output capped at {} KB at line {}; call read again with offset={}.\n",
+            MAX_OUTPUT_BYTES / 1024,
+            n - 1,
+            n
+        ));
+    } else if last_shown < lines.len() {
         out.push_str(&format!(
             "… {} more lines; call read again with offset={}.\n",
-            lines.len() - shown_end,
-            shown_end + 1
+            lines.len() - last_shown,
+            last_shown + 1
         ));
     }
     if out.is_empty() {

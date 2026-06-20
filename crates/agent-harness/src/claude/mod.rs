@@ -63,6 +63,7 @@ impl Harness for ClaudeHarness {
                 supports_effort: false,
                 supports_max_turns: true,
                 supports_login: true,
+                supports_custom_instructions: false,
             },
         }
     }

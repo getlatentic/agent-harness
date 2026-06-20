@@ -220,6 +220,11 @@ pub struct RunTuning {
     /// output). Adapters that support it constrain the model's final message to
     /// this schema; the rest ignore it. `None` → free-form text.
     pub output_schema: Option<serde_json::Value>,
+    /// Extra system-prompt instructions from the host — the user's per-harness
+    /// "custom instructions". The `openai-compatible` adapter appends it after
+    /// its base system prompt; other adapters currently ignore it (a CLI mapping
+    /// such as Claude's `--append-system-prompt` can opt in later). `None` → none.
+    pub extra_instructions: Option<String>,
 }
 
 /// A non-text input attached to a run — currently an image. Multimodal adapters
@@ -301,6 +306,88 @@ pub struct HarnessModel {
     pub label: String,
 }
 
+/// An installed model with the metadata a model-manager UI shows — the
+/// neutral shape returned by [`Harness::list_installed_models`]. Richer than
+/// [`HarnessModel`] (the picker's name-only entry): on-disk `size` in bytes plus
+/// the parameter count / quantization where the backend reports them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledModel {
+    pub name: String,
+    /// On-disk size in bytes.
+    pub size: u64,
+    /// e.g. `"3.2B"`; `None` when the backend doesn't report it.
+    pub parameter_size: Option<String>,
+    /// e.g. `"Q4_K_M"`; `None` when the backend doesn't report it.
+    pub quantization_level: Option<String>,
+}
+
+/// A progress update from [`Harness::pull_model`], one per chunk of a streaming
+/// download. `status` is always present (`"pulling manifest"`, `"success"`, …);
+/// the byte counters appear once a layer is downloading, so a host can show a
+/// percentage from `completed`/`total` aggregated across `digest`s.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullProgress {
+    pub status: String,
+    /// The layer this line reports on; `None` for phase lines (manifest,
+    /// success).
+    pub digest: Option<String>,
+    pub total: Option<u64>,
+    pub completed: Option<u64>,
+}
+
+/// A host push-callback for [`Harness::pull_model`] download progress, invoked
+/// per stream chunk on the calling thread.
+pub type PullProgressCallback<'a> = &'a mut (dyn FnMut(PullProgress) + Send);
+
+/// Folds a stream of [`PullProgress`] into a single overall percent, so a host
+/// shows one progress bar for a multi-layer download. A streaming pull reports
+/// `completed`/`total` *per `digest`* and resends a digest's line as it grows;
+/// this keeps the latest figures per digest, so the overall percent is
+/// `100 * Σcompleted / Σtotal` across the digests seen so far.
+#[derive(Debug, Default)]
+pub struct PullProgressAggregator {
+    layers: std::collections::HashMap<String, (u64, u64)>,
+}
+
+impl PullProgressAggregator {
+    /// Fold one progress update in (only `digest` lines carrying a `total`
+    /// count) and return the overall percent so far — `None` until any byte
+    /// total is known (e.g. during the manifest phase).
+    pub fn update(&mut self, progress: &PullProgress) -> Option<f64> {
+        if let (Some(digest), Some(total)) = (&progress.digest, progress.total) {
+            self.layers.insert(digest.clone(), (progress.completed.unwrap_or(0), total));
+        }
+        self.percent()
+    }
+
+    /// Overall percent across every digest seen, clamped to 0–100; `None` until a
+    /// total is known. A just-finished layer can momentarily report
+    /// `completed > total`, so the ratio is capped.
+    pub fn percent(&self) -> Option<f64> {
+        let total: u64 = self.layers.values().map(|(_, t)| *t).sum();
+        if total == 0 {
+            return None;
+        }
+        let completed: u64 = self.layers.values().map(|(c, _)| *c).sum();
+        Some((completed as f64 / total as f64 * 100.0).clamp(0.0, 100.0))
+    }
+}
+
+/// What a harness's local-model management exposes — returned by
+/// [`Harness::model_management`] (`None` when unsupported). Today only the
+/// `openai-compatible` Ollama adapter manages models; carrying its endpoint lets
+/// a host link out (e.g. "browse all models") without re-deriving it, while the
+/// pull/list/delete operations themselves stay behind the trait so HTTP never
+/// leaves the adapter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelManagement {
+    /// The model server's base URL (e.g. `http://localhost:11434`), for a host
+    /// to show or link to; not used to issue requests host-side.
+    pub base_url: String,
+}
+
 /// What a harness supports, so every consumer (the picker, the options
 /// panel, the credential preflight, the chat availability gate) adapts
 /// to it *declaratively* instead of branching on the harness id. A new
@@ -334,6 +421,11 @@ pub struct HarnessCapabilities {
     /// picker's "Sign in" affordance when installed-but-not-signed-in.
     /// `false` for harnesses Compose authenticates itself (bob).
     pub supports_login: bool,
+    /// Honors [`RunTuning::extra_instructions`] — the user's per-harness custom
+    /// instructions, appended to the system prompt. `true` only for the
+    /// `openai-compatible` adapter so far; the picker hides the field for the
+    /// rest rather than offering a control that does nothing.
+    pub supports_custom_instructions: bool,
 }
 
 /// Static metadata for the harness picker.
@@ -387,6 +479,49 @@ pub trait Harness: Send + Sync {
     /// network; treat it as blocking and run it off the UI thread.
     fn list_models(&self) -> Result<Vec<HarnessModel>, HarnessError> {
         Ok(self.info().capabilities.models)
+    }
+
+    /// Whether this harness can install/list/delete its own models locally, and
+    /// if so the endpoint metadata a host UI can surface (see
+    /// [`ModelManagement`]). `None` (the default) means model management isn't
+    /// supported — a host hides the "Manage models" surface. Only the
+    /// `openai-compatible` Ollama adapter returns `Some` today.
+    fn model_management(&self) -> Option<ModelManagement> {
+        None
+    }
+
+    /// Installed local models with their on-disk size + details, for a manager
+    /// UI (distinct from [`list_models`](Harness::list_models), the picker's
+    /// name-only set). Default: unsupported — override alongside
+    /// [`model_management`](Harness::model_management). Blocking (hits the local
+    /// server); run it off the UI thread.
+    fn list_installed_models(&self) -> Result<Vec<InstalledModel>, HarnessError> {
+        Err(HarnessError::Other(
+            "This harness does not support managing models.".to_owned(),
+        ))
+    }
+
+    /// Download (install) a model, streaming progress to `on_progress`. `cancel`
+    /// is polled during the download; flipping it aborts the pull. Blocking
+    /// until the download finishes (or fails / is cancelled); run it off the UI
+    /// thread. Default: unsupported.
+    fn pull_model(
+        &self,
+        _model: &str,
+        _cancel: &std::sync::atomic::AtomicBool,
+        _on_progress: PullProgressCallback<'_>,
+    ) -> Result<(), HarnessError> {
+        Err(HarnessError::Other(
+            "This harness does not support managing models.".to_owned(),
+        ))
+    }
+
+    /// Remove an installed local model. Removing one that's already absent
+    /// succeeds (the requested end state). Default: unsupported.
+    fn delete_model(&self, _model: &str) -> Result<(), HarnessError> {
+        Err(HarnessError::Other(
+            "This harness does not support managing models.".to_owned(),
+        ))
     }
 
     /// Trigger the harness's own interactive sign-in (its CLI's OAuth),
@@ -547,6 +682,40 @@ pub(crate) fn api_key_value_usable(value: Option<String>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn layer(digest: &str, completed: u64, total: u64) -> PullProgress {
+        PullProgress {
+            status: format!("pulling {digest}"),
+            digest: Some(digest.to_owned()),
+            total: Some(total),
+            completed: Some(completed),
+        }
+    }
+
+    #[test]
+    fn pull_aggregator_sums_across_digests_keeping_latest_per_digest() {
+        let mut agg = PullProgressAggregator::default();
+        // Manifest phase: no byte totals yet → no percent.
+        assert_eq!(
+            agg.update(&PullProgress { status: "pulling manifest".into(), digest: None, total: None, completed: None }),
+            None
+        );
+        // One layer half done.
+        assert_eq!(agg.update(&layer("sha256:a", 50, 100)), Some(50.0));
+        // A second layer appears; percent now spans both totals.
+        assert_eq!(agg.update(&layer("sha256:b", 0, 100)), Some(25.0));
+        // The first layer's line is resent larger — the latest figure replaces
+        // it (not summed onto the prior one).
+        assert_eq!(agg.update(&layer("sha256:a", 100, 100)), Some(50.0));
+        assert_eq!(agg.update(&layer("sha256:b", 100, 100)), Some(100.0));
+    }
+
+    #[test]
+    fn pull_aggregator_clamps_overshoot_to_100() {
+        let mut agg = PullProgressAggregator::default();
+        // A finished layer can report completed > total momentarily.
+        assert_eq!(agg.update(&layer("sha256:a", 120, 100)), Some(100.0));
+    }
 
     // Gated like the fn it tests — `api_key_value_usable` only exists when a
     // claude/codex adapter is compiled in.
