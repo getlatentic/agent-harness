@@ -84,7 +84,10 @@ mod imp {
         CACHE
             .get_or_init(|| {
                 if let Some(cached) = load_cached() {
-                    std::thread::spawn(refresh_cache);
+                    // The catalog changes slowly — refresh at most once a day.
+                    if cache_is_stale() {
+                        std::thread::spawn(refresh_cache);
+                    }
                     return Some(cached);
                 }
                 let body = fetch_remote()?;
@@ -129,6 +132,19 @@ mod imp {
     fn refresh_cache() {
         if let Some(body) = fetch_remote() {
             write_cache(&body);
+        }
+    }
+
+    /// Whether the cache file is at least a day old — the only time the
+    /// background refresh fires, so we re-fetch the ~2 MB catalog at most daily.
+    fn cache_is_stale() -> bool {
+        const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+        let Some(path) = cache_path() else {
+            return false;
+        };
+        match std::fs::metadata(&path).and_then(|meta| meta.modified()) {
+            Ok(modified) => modified.elapsed().map(|age| age >= MAX_AGE).unwrap_or(true),
+            Err(_) => true,
         }
     }
 
