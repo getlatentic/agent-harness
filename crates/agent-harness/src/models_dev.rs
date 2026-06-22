@@ -8,10 +8,12 @@
 //! The network call + HTTP client are gated behind the **`models-dev`** feature
 //! (off by default, keeping the neutral core HTTP-free). With the feature off,
 //! [`provider_models`] returns an empty list, so adapters fall back to their
-//! static models. With it on, the ~2 MB catalog is fetched **once per process**
-//! and cached; a provider's models are filtered to the agent-usable ones
-//! (`tool_call: true`, which drops embeddings / tts / image models) and mapped to
-//! [`HarnessModel`].
+//! static models. With it on, the ~2 MB catalog is fetched once and cached **on
+//! disk** (under `AGENT_HARNESS_CACHE_DIR`, when the host app sets it): later
+//! launches load the cache instantly — so the picker works offline — and refresh
+//! it in the background. A provider's models are filtered to the agent-usable
+//! ones (`tool_call: true`, which drops embeddings / tts / image models), mapped
+//! to [`HarnessModel`], and ordered newest first.
 //!
 //! [`Harness::list_models`]: crate::Harness::list_models
 
@@ -36,6 +38,7 @@ pub fn provider_models(provider: &str) -> Vec<HarnessModel> {
 #[cfg(feature = "models-dev")]
 mod imp {
     use std::collections::HashMap;
+    use std::path::PathBuf;
     use std::sync::OnceLock;
     use std::time::Duration;
 
@@ -66,24 +69,67 @@ mod imp {
         /// embeddings / tts share the text modality but have `tool_call: false`).
         #[serde(default)]
         tool_call: bool,
+        /// ISO release date (`YYYY-MM-DD`) where models.dev has it — used to put
+        /// newer models first in the picker.
+        #[serde(default)]
+        release_date: Option<String>,
     }
 
-    /// The catalog, fetched once and cached for the process lifetime (it's ~2 MB;
-    /// refetching per `list_models` call would be wasteful). A failed fetch caches
-    /// `None`, so callers fall back without retrying every call.
+    /// The catalog for the process. Prefers the on-disk cache — instant and
+    /// works offline — and refreshes it in the background; on a cold first run
+    /// with no cache it fetches once and persists it. A miss caches `None`, so
+    /// callers fall back without retrying every call.
     fn catalog() -> Option<&'static Catalog> {
         static CACHE: OnceLock<Option<Catalog>> = OnceLock::new();
-        CACHE.get_or_init(fetch).as_ref()
+        CACHE
+            .get_or_init(|| {
+                if let Some(cached) = load_cached() {
+                    std::thread::spawn(refresh_cache);
+                    return Some(cached);
+                }
+                let body = fetch_remote()?;
+                write_cache(&body);
+                serde_json::from_str(&body).ok()
+            })
+            .as_ref()
     }
 
-    fn fetch() -> Option<Catalog> {
-        let body = ureq::get(API_URL)
-            .timeout(Duration::from_secs(15))
+    /// Where the catalog is cached, when the host app names a cache dir via
+    /// `AGENT_HARNESS_CACHE_DIR`; `None` → no disk cache (fetch-only).
+    fn cache_path() -> Option<PathBuf> {
+        let dir = std::env::var_os("AGENT_HARNESS_CACHE_DIR")?;
+        Some(PathBuf::from(dir).join("models_dev.json"))
+    }
+
+    fn load_cached() -> Option<Catalog> {
+        let body = std::fs::read_to_string(cache_path()?).ok()?;
+        serde_json::from_str(&body).ok()
+    }
+
+    fn write_cache(body: &str) {
+        let Some(path) = cache_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, body);
+    }
+
+    fn fetch_remote() -> Option<String> {
+        ureq::get(API_URL)
+            .timeout(Duration::from_secs(8))
             .call()
             .ok()?
             .into_string()
-            .ok()?;
-        serde_json::from_str(&body).ok()
+            .ok()
+    }
+
+    /// Refetch and rewrite the disk cache so the next launch is current.
+    fn refresh_cache() {
+        if let Some(body) = fetch_remote() {
+            write_cache(&body);
+        }
     }
 
     pub fn provider_models(provider: &str) -> Vec<HarnessModel> {
@@ -95,17 +141,22 @@ mod imp {
         let Some(p) = catalog.0.get(provider) else {
             return Vec::new();
         };
-        let mut models: Vec<HarnessModel> = p
-            .models
-            .values()
-            .filter(|m| m.tool_call)
+        let mut models: Vec<&Model> = p.models.values().filter(|m| m.tool_call).collect();
+        // Newest first: models.dev `release_date` is ISO (`YYYY-MM-DD`), so a
+        // reverse string compare orders chronologically; undated models sort to
+        // the bottom, ties broken by id for a stable order.
+        models.sort_by(|a, b| {
+            b.release_date
+                .cmp(&a.release_date)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        models
+            .into_iter()
             .map(|m| HarnessModel {
                 value: m.id.clone(),
                 label: m.name.clone().unwrap_or_else(|| m.id.clone()),
             })
-            .collect();
-        models.sort_by(|a, b| a.value.cmp(&b.value));
-        models
+            .collect()
     }
 
     #[cfg(test)]
@@ -135,6 +186,22 @@ mod imp {
 
             // unknown provider → empty (caller falls back to its static list).
             assert!(select(&catalog, "nope").is_empty());
+        }
+
+        #[test]
+        fn select_orders_newest_release_first() {
+            let json = r#"{
+              "anthropic": { "models": {
+                "old":     { "id": "old",     "tool_call": true, "release_date": "2023-03-01" },
+                "new":     { "id": "new",     "tool_call": true, "release_date": "2024-10-01" },
+                "mid":     { "id": "mid",     "tool_call": true, "release_date": "2024-02-01" },
+                "undated": { "id": "undated", "tool_call": true }
+              }}
+            }"#;
+            let catalog: Catalog = serde_json::from_str(json).expect("parse catalog");
+            let ids: Vec<String> =
+                select(&catalog, "anthropic").into_iter().map(|m| m.value).collect();
+            assert_eq!(ids, ["new", "mid", "old", "undated"], "newest first, undated last");
         }
 
         // A network smoke test against the real catalog — ignored by default so
