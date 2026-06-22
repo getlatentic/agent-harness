@@ -226,7 +226,10 @@ struct NativeFunctionCall {
 /// `/api/tags`, not under `/v1`.)
 pub(crate) fn list_tags(base: &str) -> Result<Vec<HarnessModel>, String> {
     let url = format!("{base}/api/tags");
-    let resp = ureq::get(&url).call().map_err(|e| format!("model list from {url} failed: {e}"))?;
+    let resp = ureq::get(&url)
+        .timeout(Duration::from_secs(5))
+        .call()
+        .map_err(|e| format!("model list from {url} failed: {e}"))?;
     let body: Value = resp.into_json().map_err(|e| format!("decoding model list from {url}: {e}"))?;
     let models = body
         .get("models")
@@ -267,7 +270,10 @@ fn context_length_from_show(body: &Value) -> Option<u64> {
 /// name-only shape from the same endpoint.)
 pub(crate) fn list_installed(base: &str) -> Result<Vec<InstalledModel>, String> {
     let url = format!("{base}/api/tags");
-    let resp = ureq::get(&url).call().map_err(|e| format!("model list from {url} failed: {e}"))?;
+    let resp = ureq::get(&url)
+        .timeout(Duration::from_secs(5))
+        .call()
+        .map_err(|e| format!("model list from {url} failed: {e}"))?;
     let body: Value = resp.into_json().map_err(|e| format!("decoding model list from {url}: {e}"))?;
     Ok(body.get("models").and_then(Value::as_array).map(|arr| arr.iter().map(installed_from_tag).collect()).unwrap_or_default())
 }
