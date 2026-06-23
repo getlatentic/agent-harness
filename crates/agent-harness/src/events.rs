@@ -49,22 +49,48 @@ pub struct SuggestedEdit {
 /// `name` is kept alongside for display/phrasing; `tool_kind` is for
 /// behaviour. Named `tool_kind` (not `kind`) so it never collides with the
 /// `#[serde(tag = "kind")]` event discriminator on [`RunEvent`].
+///
+/// The values mirror ACP's tool-call `kind`
+/// (`read`/`edit`/`delete`/`move`/`search`/`execute`/`fetch`/`other`), so a
+/// [`RunEvent::ToolStart`] maps onto an ACP `tool_call` without a translation
+/// table. The one divergence: our `Write` (create/overwrite a whole file) has
+/// no ACP counterpart — ACP folds whole-file writes into `edit` — so an
+/// ACP bridge maps `Write` → `edit`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub enum ToolKind {
-    /// Read or inspect a file's contents.
+    /// Read or inspect a file's contents. (ACP `read`.)
     Read,
-    /// Create or overwrite a whole file.
+    /// Create or overwrite a whole file. (No ACP kind — bridges to `edit`.)
     Write,
-    /// Modify part of an existing file.
+    /// Modify part of an existing file. (ACP `edit`.)
     Edit,
-    /// Search or list files / the web.
+    /// Delete a file. (ACP `delete`.)
+    Delete,
+    /// Move or rename a file. (ACP `move`.)
+    Move,
+    /// Search or list files / the web. (ACP `search`.)
     Search,
-    /// Run a shell command or external process.
+    /// Run a shell command or external process. (ACP `execute`.)
     Execute,
-    /// Anything else (MCP calls, task spawns, completion signals, …).
+    /// Fetch a URL / remote resource. (ACP `fetch`.)
+    Fetch,
+    /// Anything else (MCP calls, task spawns, completion signals, …). (ACP `other`.)
     Other,
+}
+
+/// A file/path a tool call touches — the neutral mirror of ACP's
+/// `ToolCallLocation`. Lets the app show the call's subject (and distinguish,
+/// say, listing a directory from reading a file) and offer follow-along
+/// navigation. Populated by the ACP adapter (passthrough) and openai-compatible's
+/// own tools; empty for the CLI adapters that don't report paths structurally.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolLocation {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
 }
 
 /// A tool call beginning — its id + name, so the UI can render a
@@ -99,7 +125,9 @@ pub struct ToolCallEnd {
 /// camelCase mirrors the existing `ProcessEvent` wire contract the TS
 /// store already reads (`event.kind`, `event.runId`, …), so the
 /// front-end consumes one shape regardless of which harness produced it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+// Not `Eq`: `Usage.cost_usd` is an `f64` (only `PartialEq`). `==`/`assert_eq!`
+// still work; `RunEvent` just can't be a `HashSet`/`HashMap` key.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 // `rename_all` camelCases the variant tags ("suggestedEdits"); serde
 // does NOT cascade that to struct-variant fields, so `rename_all_fields`
 // is required to get `runId` / `exitCode` on the wire rather than the
@@ -120,6 +148,10 @@ pub enum RunEvent {
     /// codex's `thread.started`); keeping `Started` instant matters for
     /// the "thinking…" feedback. Either field may be absent when the CLI
     /// doesn't report it (e.g. codex gives a thread id but no model).
+    /// Constructible out-of-tree: any `Harness` (in-tree, or a third-party
+    /// crate like `openai-compatible`) mints this directly, so it is *not*
+    /// variant-`#[non_exhaustive]` — sealing it would break the open-producer
+    /// contract (see the note on [`RunEvent::Exited`]).
     Session {
         run_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -133,25 +165,35 @@ pub enum RunEvent {
     /// `Text` so the UI can show reasoning without mixing it into the
     /// answer (e.g. Claude's `thinking_delta`).
     Thinking { run_id: String, delta: String },
-    /// A tool call started — render a state-ful card keyed by id.
-    /// `input` is the call's arguments when delivered inline (omitted
-    /// from the wire when absent, e.g. Claude streams them separately).
+    /// A tool call started — render a state-ful card keyed by id. Mirrors ACP's
+    /// `ToolCall`: `title` + `kind` + `locations` (files it touches) + the raw
+    /// arguments (`raw_input`, omitted when streamed separately, e.g. Claude).
     ToolStart {
         run_id: String,
         tool_call_id: String,
-        name: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        input: Option<String>,
+        title: String,
+        // ACP calls this `kind`; our wire reserves `kind` for the event tag, so
+        // it stays `tool_kind` (→ `toolKind` on the wire).
         tool_kind: ToolKind,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        locations: Vec<ToolLocation>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        raw_input: Option<String>,
     },
-    /// A tool call finished (matched to its start by id). `output` is the
-    /// tool's result when the harness reports it inline (omitted when absent).
+    /// A tool call finished (matched to its start by id). Mirrors ACP's tool
+    /// result: `content` (human-readable, flattened to text) + `raw_output`
+    /// (structured JSON) + the `locations` it touched. `ok` reduces ACP's
+    /// terminal `Completed`/`Failed` status to a flag.
     ToolEnd {
         run_id: String,
         tool_call_id: String,
         ok: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
-        output: Option<String>,
+        content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        raw_output: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        locations: Vec<ToolLocation>,
     },
     /// One or more proposed edits. The app prepares + previews them.
     SuggestedEdits {
@@ -166,6 +208,12 @@ pub enum RunEvent {
     /// harness-specific costs/credits (bob's coins) are NOT here; a
     /// consumer that wants them reads the harness's own output. Any
     /// field may be absent when the CLI doesn't break usage down.
+    ///
+    /// `cache_read_tokens` / `cache_write_tokens` are the prompt-cache
+    /// counters reported *separately* from `input_tokens` (Claude's
+    /// `cache_read_input_tokens` / `cache_creation_input_tokens`) — not folded
+    /// into `input_tokens`, and omitted from the wire when the CLI doesn't
+    /// report caching.
     Usage {
         run_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -174,6 +222,16 @@ pub enum RunEvent {
         output_tokens: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         total_tokens: Option<u64>,
+        /// Prompt-cache tokens served from cache this run (~0.1x input cost).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_read_tokens: Option<u64>,
+        /// Prompt-cache tokens written to cache this run (~1.25x input cost).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_write_tokens: Option<u64>,
+        /// Estimated cost in USD for this run, when the adapter knows per-token
+        /// rates (`openai-compatible` via `with_model_cost`); `None` otherwise.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cost_usd: Option<f64>,
     },
     /// The agent is asking the user one or more multiple-choice questions
     /// (Claude's `AskUserQuestion`, Codex's `tool/requestUserInput`). The host
@@ -189,9 +247,35 @@ pub enum RunEvent {
         request_id: String,
         questions: Vec<Question>,
     },
+    /// The agent's current task plan / todo list (Claude's `TodoWrite`,
+    /// Codex's plan items), replacing any prior plan for this run. The host
+    /// renders a checklist without knowing the harness's native plan tool.
+    /// The neutral plan vocabulary adapters map onto — the `acp` adapter from
+    /// ACP `plan`, and `openai-compatible` from its `todowrite` tool.
+    Plan { run_id: String, entries: Vec<PlanEntry> },
+    /// A live update to the session's display metadata — its title and/or
+    /// last-updated time — emitted mid-run when the agent (re)names the
+    /// conversation. Maps field-for-field onto ACP `session_info_update`
+    /// (`title` + `updatedAt`); lets a sessions list show a meaningful title
+    /// before the run ends. Both fields optional (a partial update).
+    SessionInfoUpdate {
+        run_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// ISO-8601 timestamp of the update, when the harness reports one
+        /// (ACP `updatedAt`). Omitted from the wire when absent.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        updated_at: Option<String>,
+    },
     /// Spawn / IO / parse failure. Terminal — followed by `Exited`.
     Error { run_id: String, message: String },
-    /// The run finished. Sent exactly once.
+    /// The run finished. Sent exactly once. Like every `RunEvent` variant it is
+    /// constructible out-of-tree: harnesses live in their own crates (the
+    /// `Registry` is open — `openai-compatible`, plus `examples/custom_harness.rs`),
+    /// so no *produced* variant is variant-`#[non_exhaustive]` — that would
+    /// close the producer door. The enum itself stays `#[non_exhaustive]`, which
+    /// protects *consumers* (a new variant just needs a `_` arm) without
+    /// blocking construction of the existing ones.
     Exited {
         run_id: String,
         exit_code: Option<i32>,
@@ -212,6 +296,10 @@ pub struct UsageInfo {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+    /// Prompt-cache tokens read this run (Claude's `cache_read_input_tokens`).
+    pub cache_read_tokens: Option<u64>,
+    /// Prompt-cache tokens written (Claude's `cache_creation_input_tokens`).
+    pub cache_write_tokens: Option<u64>,
 }
 
 /// One multiple-choice question carried by [`RunEvent::AskQuestion`]. The
@@ -239,6 +327,42 @@ pub struct QuestionOption {
     pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+/// One entry in a [`RunEvent::Plan`] — a single task the agent is tracking.
+/// Wire-out only (Serialize), like the rest of [`RunEvent`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanEntry {
+    /// The step text (the todo content).
+    pub content: String,
+    pub status: PlanEntryStatus,
+    /// Relative importance when the harness ranks steps; omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<PlanEntryPriority>,
+}
+
+/// Lifecycle of a [`PlanEntry`]. `#[non_exhaustive]` — a harness may report
+/// states beyond these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub enum PlanEntryStatus {
+    Pending,
+    InProgress,
+    Completed,
+    /// The step was abandoned (OpenCode's `cancelled` todo status).
+    Cancelled,
+}
+
+/// Relative priority of a [`PlanEntry`]. `#[non_exhaustive]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub enum PlanEntryPriority {
+    Low,
+    Medium,
+    High,
 }
 
 /// What a single harness output line decoded to. A line can yield
@@ -272,6 +396,11 @@ pub struct ParsedLine {
     /// clearing the chips, plus the parsed questions. The host renders the
     /// options as chips; the answer returns as the user's next message.
     pub ask_question: Option<(String, Vec<Question>)>,
+    /// The agent's current plan / todo list → `RunEvent::Plan`. No built-in
+    /// parser fills this yet; it's wired for adapters that will.
+    pub plan: Option<Vec<PlanEntry>>,
+    /// A live session-title update → `RunEvent::SessionInfoUpdate`.
+    pub title: Option<String>,
 }
 
 impl ParsedLine {
@@ -289,6 +418,8 @@ impl ParsedLine {
             && self.activity.is_none()
             && self.error.is_none()
             && self.ask_question.is_none()
+            && self.plan.is_none()
+            && self.title.is_none()
     }
 }
 
@@ -332,10 +463,10 @@ pub fn normalize_process_event(
 }
 
 /// Expand a decoded [`ParsedLine`] into its [`RunEvent`]s for `run_id`, in a
-/// stable order: session (the run's init) → text → thinking → tool
-/// start/end → edits → usage (end of turn) → activity → error (a terminal
-/// in-band failure, emitted last so any text/usage on the same line lands
-/// before it).
+/// stable order: session (the run's init) → session-info/title → text →
+/// thinking → tool start/end → edits → plan → usage (end of turn) → activity
+/// → error (a terminal in-band failure, emitted last so any text/usage on the
+/// same line lands before it) → ask-question.
 ///
 /// Used by [`normalize_process_event`] and by adapters that wrap the line
 /// parser in their own per-run state (e.g. codex's preamble-vs-answer state
@@ -356,6 +487,15 @@ pub fn run_events_from_parsed(run_id: &str, parsed: ParsedLine) -> Vec<RunEvent>
             model: session.model,
         });
     }
+    if let Some(title) = parsed.title {
+        out.push(RunEvent::SessionInfoUpdate {
+            run_id: run_id.to_owned(),
+            title: Some(title),
+            // No parser supplies a timestamp yet; an adapter that has one
+            // constructs SessionInfoUpdate directly.
+            updated_at: None,
+        });
+    }
     if let Some(text) = parsed.text {
         out.push(RunEvent::Text {
             run_id: run_id.to_owned(),
@@ -372,9 +512,11 @@ pub fn run_events_from_parsed(run_id: &str, parsed: ParsedLine) -> Vec<RunEvent>
         out.push(RunEvent::ToolStart {
             run_id: run_id.to_owned(),
             tool_call_id: start.tool_call_id,
-            name: start.name,
-            input: start.input,
+            title: start.name,
             tool_kind: start.tool_kind,
+            // CLI adapters don't report structured paths; ACP + openai-compatible do.
+            locations: Vec::new(),
+            raw_input: start.input,
         });
     }
     if let Some(end) = parsed.tool_end {
@@ -382,7 +524,9 @@ pub fn run_events_from_parsed(run_id: &str, parsed: ParsedLine) -> Vec<RunEvent>
             run_id: run_id.to_owned(),
             tool_call_id: end.tool_call_id,
             ok: end.ok,
-            output: end.output,
+            content: end.output,
+            raw_output: None,
+            locations: Vec::new(),
         });
     }
     if !parsed.edits.is_empty() {
@@ -391,12 +535,22 @@ pub fn run_events_from_parsed(run_id: &str, parsed: ParsedLine) -> Vec<RunEvent>
             edits: parsed.edits,
         });
     }
+    if let Some(entries) = parsed.plan {
+        out.push(RunEvent::Plan {
+            run_id: run_id.to_owned(),
+            entries,
+        });
+    }
     if let Some(usage) = parsed.usage {
         out.push(RunEvent::Usage {
             run_id: run_id.to_owned(),
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
             total_tokens: usage.total_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+            // CLI adapters don't compute cost; openai-compatible does (with rates).
+            cost_usd: None,
         });
     }
     if let Some(activity) = parsed.activity {
@@ -610,26 +764,99 @@ mod tests {
                     input_tokens: Some(10),
                     output_tokens: Some(20),
                     total_tokens: Some(30),
+                    cache_read_tokens: Some(8),
+                    cache_write_tokens: Some(2),
                 }),
                 ..ParsedLine::default()
             },
         );
         assert!(matches!(
             events.as_slice(),
-            [RunEvent::Usage { run_id, input_tokens: Some(10), output_tokens: Some(20), total_tokens: Some(30) }]
-                if run_id == "r1"
+            [RunEvent::Usage {
+                run_id,
+                input_tokens: Some(10),
+                output_tokens: Some(20),
+                total_tokens: Some(30),
+                cache_read_tokens: Some(8),
+                cache_write_tokens: Some(2),
+                cost_usd: None,
+            }] if run_id == "r1"
         ));
+        // Cache counters ride on the wire as camelCase; omitted when None.
         let json = serde_json::to_value(RunEvent::Usage {
             run_id: "r1".to_owned(),
             input_tokens: Some(10),
             output_tokens: None,
             total_tokens: Some(30),
+            cache_read_tokens: Some(8),
+            cache_write_tokens: None,
+            cost_usd: None,
         })
         .unwrap();
         assert_eq!(json["kind"], "usage");
         assert_eq!(json["inputTokens"], 10);
         assert_eq!(json["totalTokens"], 30);
+        assert_eq!(json["cacheReadTokens"], 8);
         assert!(json.get("outputTokens").is_none()); // omitted when None
+        assert!(json.get("cacheWriteTokens").is_none()); // omitted when None
+    }
+
+    #[test]
+    fn plan_normalizes_and_serializes() {
+        let events = normalize_process_event(
+            ProcessEvent::Stdout {
+                run_id: "r1".to_owned(),
+                line: "ignored".to_owned(),
+            },
+            |_| ParsedLine {
+                plan: Some(vec![
+                    PlanEntry {
+                        content: "Write the parser".to_owned(),
+                        status: PlanEntryStatus::InProgress,
+                        priority: Some(PlanEntryPriority::High),
+                    },
+                    PlanEntry {
+                        content: "Add tests".to_owned(),
+                        status: PlanEntryStatus::Pending,
+                        priority: None,
+                    },
+                ]),
+                ..ParsedLine::default()
+            },
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [RunEvent::Plan { run_id, entries }] if run_id == "r1" && entries.len() == 2
+        ));
+        let json = serde_json::to_value(RunEvent::Plan {
+            run_id: "r1".to_owned(),
+            entries: vec![PlanEntry {
+                content: "Add tests".to_owned(),
+                status: PlanEntryStatus::Pending,
+                priority: None,
+            }],
+        })
+        .unwrap();
+        assert_eq!(json["kind"], "plan");
+        assert_eq!(json["entries"][0]["content"], "Add tests");
+        assert_eq!(json["entries"][0]["status"], "pending");
+        // priority omitted when None.
+        assert!(json["entries"][0].get("priority").is_none());
+    }
+
+    #[test]
+    fn session_info_update_serializes() {
+        let json = serde_json::to_value(RunEvent::SessionInfoUpdate {
+            run_id: "r1".to_owned(),
+            title: Some("Refactor the parser".to_owned()),
+            updated_at: Some("2026-06-16T12:00:00Z".to_owned()),
+        })
+        .unwrap();
+        assert_eq!(json["kind"], "sessionInfoUpdate");
+        assert_eq!(json["runId"], "r1");
+        assert_eq!(json["title"], "Refactor the parser");
+        // Maps onto ACP `session_info_update.updatedAt`.
+        assert_eq!(json["updatedAt"], "2026-06-16T12:00:00Z");
     }
 
     #[test]
@@ -652,16 +879,17 @@ mod tests {
         );
         assert!(matches!(
             start.as_slice(),
-            [RunEvent::ToolStart { input: Some(i), .. }] if i == "{\"dir\":\"/x\"}"
+            [RunEvent::ToolStart { raw_input: Some(i), .. }] if i == "{\"dir\":\"/x\"}"
         ));
         // A ToolStart with no input omits the field on the wire (byte-identical
         // to the pre-enrichment shape).
         let json = serde_json::to_value(RunEvent::ToolStart {
             run_id: "r1".to_owned(),
             tool_call_id: "t1".to_owned(),
-            name: "ls".to_owned(),
-            input: None,
+            title: "ls".to_owned(),
             tool_kind: ToolKind::Execute,
+            locations: Vec::new(),
+            raw_input: None,
         })
         .unwrap();
         assert_eq!(json["kind"], "toolStart");
@@ -669,17 +897,19 @@ mod tests {
         // from the `kind` event discriminator (no collision).
         assert_eq!(json["toolKind"], "execute");
         assert_eq!(json["toolCallId"], "t1");
-        assert!(json.get("input").is_none());
+        assert!(json.get("rawInput").is_none());
 
         let json = serde_json::to_value(RunEvent::ToolEnd {
             run_id: "r1".to_owned(),
             tool_call_id: "t1".to_owned(),
             ok: true,
-            output: Some("done".to_owned()),
+            content: Some("done".to_owned()),
+            raw_output: None,
+            locations: Vec::new(),
         })
         .unwrap();
         assert_eq!(json["kind"], "toolEnd");
-        assert_eq!(json["output"], "done");
+        assert_eq!(json["content"], "done");
     }
 
     #[test]

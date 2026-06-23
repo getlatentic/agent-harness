@@ -192,10 +192,20 @@ pub fn parse_claude_line(line: &str) -> ParsedLine {
             let usage = obj.get("usage").and_then(Value::as_object);
             let input_tokens = usage.and_then(|u| u.get("input_tokens")).and_then(Value::as_u64);
             let output_tokens = usage.and_then(|u| u.get("output_tokens")).and_then(Value::as_u64);
+            // Claude reports prompt-cache counters alongside input/output;
+            // surface them on Usage rather than dropping them — they're the
+            // difference between a useful cost display and a misleading one.
+            let cache_read_tokens = usage
+                .and_then(|u| u.get("cache_read_input_tokens"))
+                .and_then(Value::as_u64);
+            let cache_write_tokens = usage
+                .and_then(|u| u.get("cache_creation_input_tokens"))
+                .and_then(Value::as_u64);
             if input_tokens.is_none() && output_tokens.is_none() {
                 return ParsedLine::default();
             }
-            // Claude reports input/output separately; derive the total.
+            // Claude reports input/output separately; derive the total. Cache
+            // tokens are reported separately and are NOT folded into the total.
             let total_tokens = match (input_tokens, output_tokens) {
                 (Some(i), Some(o)) => Some(i + o),
                 _ => None,
@@ -205,6 +215,8 @@ pub fn parse_claude_line(line: &str) -> ParsedLine {
                     input_tokens,
                     output_tokens,
                     total_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
                 }),
                 ..ParsedLine::default()
             }

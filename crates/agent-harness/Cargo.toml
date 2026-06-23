@@ -3,12 +3,12 @@ name = "agent-harness"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Use existing agent CLIs (Claude Code, Codex, bob) programmatically from Rust — or add your own — behind one Harness trait + a normalized run-event stream. Imported as `harness`."
+description = "Drive LLM coding agents — Claude Code, OpenAI Codex, and local Ollama / OpenAI-compatible models — from Rust behind one trait, with a normalized streaming event vocabulary. Bring your own agent too."
 license.workspace = true
 readme = "README.md"
 repository.workspace = true
-keywords = ["agent", "llm", "harness", "cli", "subprocess"]
-categories = ["command-line-utilities", "api-bindings"]
+keywords = ["llm", "ai-agent", "coding-agent", "claude", "codex"]
+categories = ["api-bindings", "command-line-utilities", "development-tools"]
 
 # The harness umbrella: the framework (trait + RunEvent + open Registry,
 # re-exporting the engine from `cli-stream`) plus the built-in bob/claude/
@@ -20,13 +20,31 @@ categories = ["command-line-utilities", "api-bindings"]
 name = "harness"
 
 [features]
-default = ["bob", "claude", "codex"]
-# The bob adapter pulls in the bob SDK (keyring / tempfile / installer);
-# gating it keeps that weight off a claude/codex-only consumer.
+# All built-in CLI/ACP adapters on by default; the unofficial `bob` adapter is
+# listed last. Slim the set with `default-features = false` + the features you
+# want (e.g. just `claude` — no keychain SDK). The local- / OpenAI-compatible
+# model runtime is the opt-in `openai-compatible` feature below (off by default;
+# it pulls a blocking HTTP client + ripgrep / HTML-md / JSON-schema deps).
+default = ["claude", "codex", "bob"]
+# The unofficial bob adapter pulls in the bob SDK (keyring / tempfile / installer).
 bob = ["dep:bob-rs"]
 # claude / codex own their CLI's login — no extra deps.
 claude = []
 codex = []
+# The ACP-client adapter: drives an external Agent Client Protocol agent
+# (OpenCode, Gemini, Goose, …) over JSON-RPC/stdio. Opt-in (off by default) —
+# it pulls the ACP crate + a small async runtime (smol) and spawns external
+# agents, so it's heavier and more specialized than the CLI/openai adapters.
+acp = ["dep:agent-client-protocol", "dep:smol", "dep:futures-lite", "dep:async-trait"]
+# models.dev catalog lookup for `list_models` (Claude→anthropic, Codex→openai):
+# one cached JSON GET via a blocking HTTP client. Opt-in — pulls `ureq`.
+models-dev = ["dep:ureq"]
+# The OpenAI-compatible / local-model runtime — the "we are the agent" archetype
+# (vs the claude/codex/acp adapters that wrap an external agent): its own tool
+# loop, sessions, skills, subagents, MCP, and permissions, driving any
+# OpenAI-compatible or Ollama model. Off by default; heavy (a blocking HTTP client
+# + ripgrep search libs + HTML→Markdown + JSON-schema). Pulls in models.dev too.
+openai-compatible = ["models-dev", "dep:ureq", "dep:ignore", "dep:globset", "dep:regex", "dep:htmd", "dep:schemars"]
 
 [dependencies]
 # The generic subprocess engine (spawn / cancel / PATH augmentation) + the
@@ -41,6 +59,42 @@ serde_json.workspace = true
 # Typed errors for the public API (HarnessError) — derive Display + the
 # std::error::Error source chain without hand-writing impls.
 thiserror.workspace = true
+# ACP-client adapter deps (optional + gated behind the `acp` feature).
+agent-client-protocol = { workspace = true, optional = true }
+smol = { workspace = true, optional = true }
+futures-lite = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+# models.dev catalog fetch (optional — gated behind `models-dev`).
+ureq = { workspace = true, optional = true }
+# `openai-compatible` runtime deps (optional, gated behind that feature): ripgrep
+# libraries for the in-process glob/grep tools, HTML→Markdown for `webfetch`, and
+# typed JSON schemas (schemars) for tool arguments.
+ignore = { workspace = true, optional = true }
+globset = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
+htmd = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }
+
+# Dev-only: the `playground` example's tiny web server (never a lib dependency).
+[dev-dependencies]
+tiny_http = "0.12"
+
+# The web playground drives a run from the browser over SSE; it needs the local
+# runtime (`openai-compatible`) + the ACP adapter (`acp`) to offer both
+# archetypes, so it only builds when those features are enabled.
+[[example]]
+name = "playground"
+required-features = ["openai-compatible", "acp"]
+
+# `run_acp` drives an ACP agent (opencode); `run_openai` drives an
+# OpenAI-compatible / local model — each needs its adapter's feature.
+[[example]]
+name = "run_acp"
+required-features = ["acp"]
+
+[[example]]
+name = "run_openai"
+required-features = ["openai-compatible"]
 
 # cargo-release stamps the single shared workspace CHANGELOG here — on the last
 # crate of the lockstep release — so the version header is inserted exactly

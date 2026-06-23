@@ -24,16 +24,19 @@ pub mod events;
 pub mod harness;
 /// The untyped raw passthrough tier, harness-agnostic (any JSONL CLI).
 pub mod raw;
+/// models.dev catalog lookup for `list_models` (opt-in `models-dev` feature).
+pub mod models_dev;
 
 pub use events::{
-    normalize_process_event, run_events_from_parsed, ByteRange, ParsedLine, Question,
-    QuestionOption, RunEvent, SessionInfo, SuggestedEdit, ToolCallEnd, ToolCallStart, ToolKind,
-    UsageInfo,
+    normalize_process_event, run_events_from_parsed, ByteRange, ParsedLine, PlanEntry,
+    PlanEntryPriority, PlanEntryStatus, Question, QuestionOption, RunEvent, SessionInfo,
+    SuggestedEdit, ToolCallEnd, ToolCallStart, ToolKind, ToolLocation, UsageInfo,
 };
 pub use raw::parse_raw_line;
 pub use harness::{
     run_login_command, BoxError, CredentialSpec, Harness, HarnessCapabilities, HarnessError,
-    HarnessInfo, HarnessModel, HarnessReadiness, InstallCallback, ReasoningEffort, RunCallback,
+    HarnessInfo, HarnessModel, HarnessReadiness, InstallCallback, InstalledModel, ModelManagement,
+    PullProgress, PullProgressAggregator, PullProgressCallback, ReasoningEffort, RunCallback,
     RunControl, RunHandle, RunMode, RunRequest, RunTuning,
 };
 // The generic subprocess engine + the install/process event shapes live in
@@ -51,6 +54,14 @@ pub mod bob;
 pub mod claude;
 #[cfg(feature = "codex")]
 pub mod codex;
+/// The ACP-client adapter (drives an external Agent Client Protocol agent:
+/// OpenCode, Gemini, Goose, …).
+#[cfg(feature = "acp")]
+pub mod acp;
+/// The OpenAI-compatible / local-model runtime ("we are the agent" — owns the
+/// loop + tool surface, unlike the CLI/ACP adapters that wrap an external agent).
+#[cfg(feature = "openai-compatible")]
+pub mod openai_compatible;
 pub mod registry;
 
 // The built-in adapters, re-exported as short names so consumers write
@@ -65,6 +76,16 @@ pub use bob_rs::BobError;
 pub use claude::{ClaudeHarness as Claude, CLAUDE_HARNESS_ID};
 #[cfg(feature = "codex")]
 pub use codex::{CodexHarness as Codex, CODEX_HARNESS_ID};
+#[cfg(feature = "acp")]
+pub use acp::{AcpHarness, AcpHarnessConfig};
+// The OpenAI-compatible / local-model runtime + its public surface (permission
+// rules, MCP config, named subagents, model pricing, sessions).
+#[cfg(feature = "openai-compatible")]
+pub use openai_compatible::{
+    AgentDef, McpPrompt, McpPromptArg, McpServer, McpTransport, ModelCost, OpenHarness,
+    OpenHarnessConfig, Permission, PermissionPrompt, PermissionRequest, PermissionRule,
+    PromptMessage, SessionRecord,
+};
 // The open registry + convenience constructors over the built-ins.
 pub use registry::{
     default_registry, harness_by_id, harness_catalog, Registry, DEFAULT_HARNESS_ID,

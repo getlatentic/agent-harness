@@ -63,8 +63,18 @@ impl Harness for ClaudeHarness {
                 supports_effort: false,
                 supports_max_turns: true,
                 supports_login: true,
+                supports_custom_instructions: false,
             },
         }
+    }
+
+    fn list_models(&self) -> Result<Vec<HarnessModel>, HarnessError> {
+        // Keep the curated aliases first (`sonnet`/`opus` track "latest" and don't
+        // churn), then append models.dev's current `anthropic` lineup (exact ids)
+        // when the `models-dev` feature is on. Offline / feature-off → just aliases.
+        let mut models = self.info().capabilities.models;
+        models.extend(crate::models_dev::provider_models("anthropic"));
+        Ok(models)
     }
 
     fn readiness(&self) -> HarnessReadiness {
@@ -135,7 +145,8 @@ impl Harness for ClaudeHarness {
     }
 
     fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
-        let RunRequest { run_id, prompt, cwd, mode, tuning, resume } = request;
+        // `attachments` ignored: Claude Code is a text CLI (no image input here).
+        let RunRequest { run_id, prompt, cwd, mode, tuning, resume, attachments: _ } = request;
         let args = build_claude_args(prompt, mode, &tuning, resume.as_deref());
         let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 

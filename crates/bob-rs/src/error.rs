@@ -44,6 +44,20 @@ pub enum BobError {
     #[error("{0}")]
     Invalid(String),
 
+    /// The Node.js runtime that would execute bob is missing or too old.
+    /// bob re-launches itself with flags that need a recent node (e.g.
+    /// `--disable-sigusr1`), so an old runtime dies with an opaque
+    /// "exited with code 9" — this preflight surfaces the real cause
+    /// (and the fix) *before* the spawn instead.
+    #[error("bob requires Node.js {minimum}+ — {detail}. Install Node {minimum} or newer (e.g. `nvm install {minimum}`), then reinstall or relaunch.")]
+    NodeIncompatible {
+        /// The minimum Node major bob supports (`BOB_MIN_NODE_VERSION`).
+        minimum: String,
+        /// What was actually found — a too-old version + its path, or
+        /// "no `node` found on PATH".
+        detail: String,
+    },
+
     /// The platform application-data directory couldn't be resolved, so the
     /// auth-state marker has nowhere to live.
     #[error("could not determine the application data directory")]

@@ -6,11 +6,14 @@
 //! module is the bob-specific layer on top — the chat-mode / approval
 //! flags, `RunBobOptions`, and injecting bob's `BOBSHELL_API_KEY`.
 
+use crate::check::semver_at_least;
 use crate::error::BobError;
 use crate::keychain::resolve_api_key;
-use cli_stream::{spawn_streaming, ProcessEvent, ProcessHandle};
+use crate::BOB_MIN_NODE_VERSION;
+use cli_stream::{resolve_program, spawn_streaming, ProcessEvent, ProcessHandle};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 // --- Wire shapes (bob-specific) -------------------------------------
 
@@ -113,9 +116,80 @@ where
 {
     let args = build_args(&opts);
     let api_key = resolve_api_key().map(|(value, _)| value).unwrap_or_default();
-    let program: PathBuf = opts.bob_executable.clone().unwrap_or_else(|| PathBuf::from("bob"));
+    // Resolve a bare `bob` to its absolute install path up front. The engine
+    // then prepends that directory to the child PATH, so bob's
+    // `#!/usr/bin/env node` re-exec picks the sibling node it was installed
+    // under — not whichever (possibly ancient) node leads the inherited PATH.
+    let program: PathBuf = resolve_program(
+        opts.bob_executable.clone().unwrap_or_else(|| PathBuf::from("bob")),
+    );
+    // Fail with the real cause ("Node 24+ required, found v20") instead of
+    // letting bob's re-exec die on a new-node-only flag as an opaque exit 9.
+    ensure_node_compatible(&program)?;
     let cwd = opts.cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     spawn_bob_raw(program, args, api_key, cwd, run_id, callback)
+}
+
+/// Which `node` will actually execute `program` (a Node-CLI script): the one
+/// sitting next to it if there is one — the engine prepends the program's
+/// own dir to the child PATH, so a sibling always wins — else the first
+/// `node` on the augmented PATH (what the `#!/usr/bin/env node` shebang
+/// would find). `None` when no node is reachable at all.
+fn node_for_program(program: &Path) -> Option<PathBuf> {
+    if let Some(dir) = program.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let sibling = dir.join("node");
+        if sibling.is_file() {
+            return Some(sibling);
+        }
+    }
+    let resolved = resolve_program(PathBuf::from("node"));
+    resolved.is_absolute().then_some(resolved)
+}
+
+/// Preflight: verify the node that will run bob meets
+/// [`BOB_MIN_NODE_VERSION`]. bob re-launches itself with flags only newer
+/// nodes accept (`--disable-sigusr1`), so an old runtime dies with an opaque
+/// "exited with code 9" — this turns that into a typed, actionable error
+/// *before* the spawn. Deliberately permissive at the edges: an unresolved
+/// bob (bare name — the spawn's own "not found" error is clearer) or a node
+/// that won't answer `--version` (broken probe shouldn't block a run that
+/// might work) both pass through.
+fn ensure_node_compatible(program: &Path) -> Result<(), BobError> {
+    if program.parent().map_or(true, |p| p.as_os_str().is_empty()) {
+        return Ok(());
+    }
+    let Some(node) = node_for_program(program) else {
+        return Err(BobError::NodeIncompatible {
+            minimum: BOB_MIN_NODE_VERSION.to_owned(),
+            detail: "no `node` found on PATH".to_owned(),
+        });
+    };
+    let Some(version) = probe_node_version(&node) else {
+        return Ok(());
+    };
+    if semver_at_least(&version, BOB_MIN_NODE_VERSION) {
+        Ok(())
+    } else {
+        Err(BobError::NodeIncompatible {
+            minimum: BOB_MIN_NODE_VERSION.to_owned(),
+            detail: format!("found {version} at {}", node.display()),
+        })
+    }
+}
+
+/// `<node> --version` → `v24.13.0`-style string, `None` on any failure.
+fn probe_node_version(node: &Path) -> Option<String> {
+    let output = Command::new(node)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!version.is_empty()).then_some(version)
 }
 
 /// Lower-level spawn for callers that have already built the argv,
@@ -214,5 +288,59 @@ mod tests {
         assert_eq!(args.get(i + 1).map(String::as_str), Some("sess-7"));
         // The prompt positional is still first.
         assert_eq!(args.first().map(String::as_str), Some("hi"));
+    }
+
+    /// Lay out a fake `<dir>/{bob,node}` toolchain where `node --version`
+    /// prints `version` — the sibling pairing `ensure_node_compatible`
+    /// actually probes. Returns the fake bob's path.
+    #[cfg(unix)]
+    fn fake_toolchain(dir: &Path, version: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let exec = std::fs::Permissions::from_mode(0o755);
+        let node = dir.join("node");
+        std::fs::write(&node, format!("#!/bin/sh\necho {version}\n")).unwrap();
+        std::fs::set_permissions(&node, exec.clone()).unwrap();
+        let bob = dir.join("bob");
+        std::fs::write(&bob, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bob, exec).unwrap();
+        bob
+    }
+
+    // The regression behind these: bob found under an nvm v24 dir was
+    // re-exec'd on the v20 node leading the inherited PATH and died with
+    // "bad option: --disable-sigusr1" → an opaque "exited with code 9".
+
+    #[cfg(unix)]
+    #[test]
+    fn node_preflight_rejects_a_too_old_sibling_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let bob = fake_toolchain(dir.path(), "v20.19.2");
+        let err = ensure_node_compatible(&bob).expect_err("v20 must be rejected");
+        match err {
+            BobError::NodeIncompatible { minimum, detail } => {
+                assert_eq!(minimum, BOB_MIN_NODE_VERSION);
+                assert!(detail.contains("v20.19.2"), "detail names the bad version: {detail}");
+            }
+            other => panic!("expected NodeIncompatible, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn node_preflight_accepts_a_satisfying_sibling_node() {
+        let dir = tempfile::tempdir().unwrap();
+        // Exactly the minimum is inclusive…
+        let bob = fake_toolchain(dir.path(), &format!("v{BOB_MIN_NODE_VERSION}"));
+        ensure_node_compatible(&bob).expect("minimum version passes");
+        // …and anything newer passes too.
+        let bob = fake_toolchain(dir.path(), "v24.13.0");
+        ensure_node_compatible(&bob).expect("newer version passes");
+    }
+
+    #[test]
+    fn node_preflight_skips_an_unresolved_bare_program() {
+        // A bare name means bob itself wasn't found — the spawn's own
+        // "not found" error is the clearer signal, so the preflight defers.
+        ensure_node_compatible(Path::new("bob")).expect("bare name passes through");
     }
 }

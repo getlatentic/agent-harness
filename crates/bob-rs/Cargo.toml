@@ -1,14 +1,16 @@
 [package]
 name = "bob-rs"
-version.workspace = true
+# Versioned independently of agent-harness (not the workspace lockstep): this SDK
+# is upstream of the framework, so it bumps only when it changes.
+version = "0.3.5"
 edition.workspace = true
 rust-version.workspace = true
 description = "Unofficial Rust SDK for the bob agent CLI — detection, install, keychain, run. Not affiliated with or endorsed by the bob maintainers."
 license.workspace = true
 readme = "README.md"
 repository.workspace = true
-keywords = ["bob", "agent", "cli", "sdk", "keychain"]
-categories = ["command-line-utilities"]
+keywords = ["bob", "ai-agent", "llm", "cli", "sdk"]
+categories = ["api-bindings", "command-line-utilities"]
 
 # Pure library. No binaries, no Tauri, no axum — those live in the
 # crates that depend on this one (`src-tauri` and `bob-api`). The

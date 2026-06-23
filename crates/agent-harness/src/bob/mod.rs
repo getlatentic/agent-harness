@@ -57,6 +57,7 @@ impl Harness for BobHarness {
                 supports_effort: false,
                 supports_max_turns: false,
                 supports_login: false,
+                supports_custom_instructions: false,
             },
         }
     }
@@ -69,7 +70,8 @@ impl Harness for BobHarness {
         let details = serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null);
         HarnessReadiness {
             harness_id: BOB_HARNESS_ID.to_owned(),
-            ready: snapshot.ready,
+            // Tool readiness only; the host owns the API key.
+            ready: snapshot.bob.installed && snapshot.node.satisfies_min,
             installed: snapshot.bob.installed,
             version: snapshot.bob.version.clone(),
             auth_configured: snapshot.auth.configured,

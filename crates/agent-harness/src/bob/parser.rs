@@ -204,11 +204,27 @@ impl BobStreamParser {
     pub fn parse_line(&mut self, line: &str) -> ParsedLine {
         let mut parsed = parse_bob_line(line);
         if let Some(content) = parsed.text.take() {
-            let (text, thinking) = self.route_thinking(&content);
+            let (visible, mut thinking) = self.route_thinking(&content);
             // Drop bob's `[using tool …]` narration echo (redundant with the
-            // structured ToolStart card; may span deltas). Applied to the
-            // post-thinking visible text only.
-            parsed.text = text.and_then(|t| self.narration_after_echo(t));
+            // structured ToolStart card; may span deltas).
+            let visible = visible.and_then(|t| self.narration_after_echo(t));
+            // bob's *answer* is always the `attempt_completion` result (verified
+            // in code AND ask mode — the assistant `message` carries only
+            // `<thinking>` + preamble prose, e.g. "I'll read … then enrich …").
+            // So an assistant message's leftover prose is narration, not the
+            // answer: fold it into the collapsed thinking trace, leaving only the
+            // attempt_completion text as the visible message. A `tool_use` /
+            // non-message line (the answer) keeps its text.
+            if line_is_assistant_message(line) {
+                if let Some(t) = visible {
+                    thinking = Some(match thinking {
+                        Some(a) => a + &t,
+                        None => t,
+                    });
+                }
+            } else {
+                parsed.text = visible;
+            }
             parsed.thinking = match (thinking, parsed.thinking.take()) {
                 (Some(a), Some(b)) => Some(a + &b),
                 (a, b) => a.or(b),
@@ -283,6 +299,22 @@ impl BobStreamParser {
         }
         Some(text)
     }
+}
+
+/// Is this stdout line bob's assistant `message` (its narration / preamble
+/// prose) — as opposed to a `tool_use` (incl. `attempt_completion`, the answer),
+/// a `tool_result`, or a lifecycle line? Used to fold the message prose into the
+/// collapsed thinking trace: bob's answer is always the `attempt_completion`
+/// result, never the message text. A cheap re-parse of the line envelope (bob's
+/// stdout is bounded, not a hot loop).
+fn line_is_assistant_message(line: &str) -> bool {
+    serde_json::from_str::<Value>(line.trim())
+        .ok()
+        .map(|v| {
+            v.get("type").and_then(Value::as_str) == Some("message")
+                && v.get("role").and_then(Value::as_str) == Some("assistant")
+        })
+        .unwrap_or(false)
 }
 
 /// Render a JSON value as a display string for a tool's `input`/`output`:
@@ -527,8 +559,8 @@ mod tests {
         });
         assert!(matches!(
             start.as_slice(),
-            [RunEvent::ToolStart { tool_call_id, name, .. }]
-                if tool_call_id == "t1" && name == "write_file"
+            [RunEvent::ToolStart { tool_call_id, title, .. }]
+                if tool_call_id == "t1" && title == "write_file"
         ));
         let end = normalize_bob_event(ProcessEvent::Stdout {
             run_id: "r1".to_owned(),
@@ -560,8 +592,9 @@ mod tests {
         let msg =
             |c: &str| serde_json::json!({"type":"message","role":"assistant","content":c}).to_string();
         assert!(parser.parse_line(&msg("[using tool write_to_file: notes/x.md]")).text.is_none());
-        // Surrounding narration still flows.
-        assert_eq!(parser.parse_line(&msg("All set.")).text.as_deref(), Some("All set."));
+        // Surrounding narration still flows — to the thinking trace (only the
+        // attempt_completion result is the visible answer).
+        assert_eq!(parser.parse_line(&msg("All set.")).thinking.as_deref(), Some("All set."));
     }
 
     #[test]
@@ -574,21 +607,24 @@ mod tests {
         assert!(parser.parse_line(&msg("[using tool read_file: a/very")).text.is_none());
         assert!(parser.parse_line(&msg("/long/path.md")).text.is_none());
         assert!(parser.parse_line(&msg("]")).text.is_none());
-        // Suppression ended; normal text resumes.
-        assert_eq!(parser.parse_line(&msg("ok")).text.as_deref(), Some("ok"));
+        // Suppression ended; narration resumes — into the thinking trace.
+        assert_eq!(parser.parse_line(&msg("ok")).thinking.as_deref(), Some("ok"));
     }
 
     #[test]
-    fn bob_stream_parser_routes_thinking_across_deltas() {
-        // bob streams reasoning as <thinking>…</thinking> with the tags
-        // arriving as their own deltas; a persistent parser routes the
-        // between-tags content to `thinking`, the rest to `text`.
+    fn message_prose_routes_to_thinking_only_attempt_completion_is_text() {
+        // Neither bob's <thinking> reasoning NOR its plain preamble prose (both
+        // ride inside assistant `message`s) is the answer — bob answers via the
+        // attempt_completion tool. So the persistent parser folds ALL message
+        // content into `thinking`, and only the attempt_completion text becomes
+        // the visible message. (The <thinking> tags arrive as their own deltas;
+        // state carries across them.)
         let mut parser = BobStreamParser::default();
         let msg = |content: &str| {
             serde_json::json!({ "type": "message", "role": "assistant", "content": content, "delta": true })
                 .to_string()
         };
-        // Opening tag (its own delta): the text after <thinking> is reasoning.
+        // Opening tag (its own delta): the content after <thinking> is reasoning.
         let open = parser.parse_line(&msg("<thinking>\n"));
         assert_eq!(open.thinking.as_deref(), Some("\n"));
         assert!(open.text.is_none());
@@ -596,14 +632,21 @@ mod tests {
         let mid = parser.parse_line(&msg("the user wants X"));
         assert_eq!(mid.thinking.as_deref(), Some("the user wants X"));
         assert!(mid.text.is_none());
-        // Close tag + trailing answer in one delta → split.
-        let close = parser.parse_line(&msg("</thinking>Hello!"));
-        assert!(close.thinking.is_none());
-        assert_eq!(close.text.as_deref(), Some("Hello!"));
-        // After closing, plain content → text.
-        let after = parser.parse_line(&msg(" more"));
-        assert_eq!(after.text.as_deref(), Some(" more"));
-        assert!(after.thinking.is_none());
+        // Close tag + trailing PROSE in one delta: the prose is narration, not
+        // the answer → it also folds into thinking, never text.
+        let close = parser.parse_line(&msg("</thinking>I'll update the file."));
+        assert_eq!(close.thinking.as_deref(), Some("I'll update the file."));
+        assert!(close.text.is_none());
+        // Further plain message prose → thinking too.
+        let more = parser.parse_line(&msg(" Working on it."));
+        assert_eq!(more.thinking.as_deref(), Some(" Working on it."));
+        assert!(more.text.is_none());
+        // Only the attempt_completion result is the visible answer.
+        let answer = parser.parse_line(
+            r#"{"type":"tool_use","tool_id":"t","tool_name":"attempt_completion","parameters":{"result":"Done."}}"#,
+        );
+        assert_eq!(answer.text.as_deref(), Some("Done."));
+        assert!(answer.thinking.is_none());
     }
 
     #[test]

@@ -50,6 +50,7 @@ impl Harness for EchoHarness {
                 supports_effort: false,
                 supports_max_turns: false,
                 supports_login: false,
+                supports_custom_instructions: false,
             },
         }
     }
@@ -189,6 +190,7 @@ fn main() -> Result<(), String> {
             mode: RunMode::Ask,
             tuning: RunTuning::default(),
             resume: None,
+            attachments: Vec::new(),
         },
         on_event,
     )

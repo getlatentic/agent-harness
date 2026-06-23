@@ -22,8 +22,8 @@ use serde_json::Value;
 
 use crate::{
     spawn_streaming, CredentialSpec, Harness, HarnessCapabilities, HarnessError, HarnessInfo,
-    HarnessReadiness, InstallCallback, InstallEvent, RunCallback, RunHandle, RunMode, RunRequest,
-    RunTuning,
+    HarnessModel, HarnessReadiness, InstallCallback, InstallEvent, RunCallback, RunHandle, RunMode,
+    RunRequest, RunTuning,
 };
 
 mod parser;
@@ -61,8 +61,16 @@ impl Harness for CodexHarness {
                 supports_effort: true,
                 supports_max_turns: false,
                 supports_login: true,
+                supports_custom_instructions: false,
             },
         }
+    }
+
+    fn list_models(&self) -> Result<Vec<HarnessModel>, HarnessError> {
+        // Codex declares no static models (ids churn → free-text entry); fill the
+        // picker from models.dev's `openai` lineup when the `models-dev` feature is
+        // on (empty otherwise → the user types an id).
+        Ok(crate::models_dev::provider_models("openai"))
     }
 
     fn readiness(&self) -> HarnessReadiness {
@@ -130,7 +138,8 @@ impl Harness for CodexHarness {
     }
 
     fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
-        let RunRequest { run_id, prompt, cwd, mode, tuning, resume } = request;
+        // `attachments` ignored: codex exec is a text CLI (no image input here).
+        let RunRequest { run_id, prompt, cwd, mode, tuning, resume, attachments: _ } = request;
         let args = build_codex_args(prompt, mode, &tuning, resume.as_deref());
         let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
@@ -216,9 +225,11 @@ fn probe_codex_signed_in() -> bool {
 /// Build the argv for a `codex exec --json` headless run. Kept pure
 /// (no spawn) so the flag mapping is unit-tested. `tuning.model` →
 /// `--model`; `tuning.effort` → `-c model_reasoning_effort="..."`
-/// (codex's config override, value parsed as TOML); Codex has no
-/// turn-cap flag, so `tuning.max_turns` is intentionally ignored.
-/// Options precede the positional prompt, as `codex exec` expects.
+/// (codex's config override, value parsed as TOML), defaulting to `low`
+/// when unset so codex's built-in tools don't reject its `minimal`
+/// default; Codex has no turn-cap flag, so `tuning.max_turns` is
+/// intentionally ignored. Options precede the positional prompt, as
+/// `codex exec` expects.
 fn build_codex_args(
     prompt: String,
     mode: RunMode,
@@ -247,10 +258,14 @@ fn build_codex_args(
         args.push("--model".to_owned());
         args.push(model.to_owned());
     }
-    if let Some(effort) = tuning.effort {
-        args.push("-c".to_owned());
-        args.push(format!("model_reasoning_effort=\"{}\"", effort.as_cli_value()));
-    }
+    // Codex's own default reasoning effort is `minimal`, which its built-in
+    // `image_gen`/`web_search` tools reject ("cannot be used with
+    // reasoning.effort 'minimal'", a 400 that breaks a default run). So when
+    // the user picks no effort, send `low` rather than leaving codex on
+    // `minimal`. Only `minimal` when explicitly chosen.
+    let effort = tuning.effort.unwrap_or(crate::ReasoningEffort::Low);
+    args.push("-c".to_owned());
+    args.push(format!("model_reasoning_effort=\"{}\"", effort.as_cli_value()));
     if matches!(mode, RunMode::Edit) {
         // Low-friction sandboxed auto-execution so Codex can apply
         // edits without interactive approval. (Exact sandbox flags
@@ -289,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_args_default_omit_model_and_effort() {
+    fn codex_args_default_omit_model_but_force_low_effort() {
         let args = build_codex_args("hi".to_owned(), RunMode::Ask, &RunTuning::default(), None);
         assert_eq!(args[0], "exec");
         assert!(!args.contains(&"resume".to_owned()));
@@ -299,10 +314,21 @@ mod tests {
         // directory …"). Independent of run mode.
         assert!(args.contains(&"--skip-git-repo-check".to_owned()));
         assert!(!args.iter().any(|a| a == "--model"));
-        assert!(!args.iter().any(|a| a == "-c"));
+        // No explicit effort → `low`, never codex's `minimal` default (which
+        // its built-in image_gen/web_search tools reject with a 400).
+        assert_eq!(flag_value(&args, "-c"), Some("model_reasoning_effort=\"low\""));
+        assert!(!args.iter().any(|a| a.contains("minimal")));
         assert!(!args.iter().any(|a| a == "--full-auto"));
         // Prompt is the trailing positional arg.
         assert_eq!(args.last().map(String::as_str), Some("hi"));
+    }
+
+    #[test]
+    fn codex_args_explicit_minimal_effort_is_honored() {
+        let tuning =
+            RunTuning { effort: Some(ReasoningEffort::Minimal), ..RunTuning::default() };
+        let args = build_codex_args("hi".to_owned(), RunMode::Ask, &tuning, None);
+        assert_eq!(flag_value(&args, "-c"), Some("model_reasoning_effort=\"minimal\""));
     }
 
     #[test]

@@ -1,6 +1,8 @@
 [package]
 name = "cli-stream"
-version.workspace = true
+# Versioned independently of agent-harness (not the workspace lockstep): this
+# foundational engine is stable + upstream, so it bumps only when it changes.
+version = "0.3.5"
 edition.workspace = true
 rust-version.workspace = true
 description = "Generic streaming subprocess engine: spawn a CLI, stream its stdout/stderr lines, cancel it (SIGTERM→SIGKILL), with PATH augmentation so packaged apps find node/CLIs."
@@ -10,10 +12,8 @@ repository.workspace = true
 keywords = ["subprocess", "process", "stream", "spawn", "cli"]
 categories = ["command-line-utilities", "os"]
 
-# Pure, leaf utility — no agent / harness / Compose knowledge. Both the
-# bob SDK (`bob-rs`) and the harness framework (`agent-harness`) depend on
-# this for process streaming; keeping it a leaf is what lets `bob-rs` stay
-# standalone without a dependency cycle.
+# Pure, standalone leaf utility — generic process streaming with no agent or
+# domain knowledge, usable on its own by anything that drives a child CLI.
 [lib]
 
 [dependencies]
@@ -27,3 +27,8 @@ thiserror.workspace = true
 # Windows uses `Child::kill()` (TerminateProcess).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+# The program/PATH resolver tests create throwaway executable files in a
+# temp dir to exercise the executable-bit filter.
+tempfile = "3"

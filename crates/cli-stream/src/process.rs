@@ -176,6 +176,12 @@ where
     // Fix: prepend the program's parent dir (where node also lives in an
     // nvm install) to the child's PATH. Added, not replaced, so a PATH
     // the user explicitly set still wins on later lookups.
+    //
+    // A bare program name is resolved to its absolute path FIRST (see
+    // `resolve_program`), so the prepended dir is the program's real home —
+    // pairing a node CLI with the exact `node` it was installed under,
+    // regardless of which node version leads the inherited PATH.
+    let program = resolve_program(program);
     let augmented_path = augment_path_for_node(&program);
 
     let mut command = Command::new(&program);
@@ -314,6 +320,52 @@ where
 /// fallback after our prepended directory.
 fn augment_path_for_node(program: &Path) -> String {
     prepend_program_dir(program, &augmented_node_path())
+}
+
+/// Resolve a bare program name (`bob`, `claude`) to its absolute path on the
+/// augmented PATH, so the spawn and the node pairing agree on *one* location.
+///
+/// Without this, a bare name splits the brain: the OS resolves the *program*
+/// against the parent process's PATH, while the child's `#!/usr/bin/env node`
+/// shebang resolves *node* against the PATH we set — and
+/// [`prepend_program_dir`] can't pair the program with its sibling node
+/// because a bare name has no parent dir. Concretely: an nvm-installed `bob`
+/// found under `v24/bin` could re-exec on a `v20` node that happened to lead
+/// the inherited PATH, and die on a v24-only flag ("exited with code 9").
+/// Resolving to the absolute path first means the program's own directory —
+/// holding the exact `node` it was installed with — is prepended and wins.
+///
+/// A program given with an explicit path is returned untouched; a bare name
+/// that can't be found is also returned untouched, so the spawn still fails
+/// with the clear "No such file" error rather than a synthetic one here.
+pub fn resolve_program(program: PathBuf) -> PathBuf {
+    if program.parent().is_some_and(|p| !p.as_os_str().is_empty()) {
+        return program; // explicit path — caller's choice wins
+    }
+    resolve_on_path(&program, &augmented_node_path()).unwrap_or(program)
+}
+
+/// Walk `path_env`'s entries for the first executable file named `name`.
+/// Pure with respect to env/spawn (filesystem only) so it's unit-testable.
+fn resolve_on_path(name: &Path, path_env: &str) -> Option<PathBuf> {
+    path_env
+        .split(':')
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| Path::new(dir).join(name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// Prepend the directory containing `program` (where `node` also lives in an
@@ -559,6 +611,37 @@ mod tests {
         let path = augmented_node_path();
         assert!(!path.is_empty());
         assert!(path.contains("/usr/bin"), "system bin must always resolve");
+    }
+
+    #[test]
+    fn resolve_program_returns_explicit_paths_untouched() {
+        // A caller-supplied path is the caller's choice — no PATH lookup.
+        let explicit = PathBuf::from("/opt/somewhere/bob");
+        assert_eq!(resolve_program(explicit.clone()), explicit);
+        let relative = PathBuf::from("./bin/bob");
+        assert_eq!(resolve_program(relative.clone()), relative);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_on_path_finds_the_first_executable_match() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("tempdir");
+        // dir_a holds a NON-executable `bob` (must be skipped); dir_b an
+        // executable one (must win even though dir_a comes first on PATH).
+        let dir_a = root.path().join("a");
+        let dir_b = root.path().join("b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        std::fs::write(dir_a.join("bob"), "#!/bin/sh\n").unwrap();
+        let exec = dir_b.join("bob");
+        std::fs::write(&exec, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let path_env = format!("{}:{}", dir_a.display(), dir_b.display());
+        assert_eq!(resolve_on_path(Path::new("bob"), &path_env), Some(exec));
+        // An unknown name resolves to nothing.
+        assert_eq!(resolve_on_path(Path::new("definitely-missing"), &path_env), None);
     }
 }
 

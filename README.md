@@ -1,98 +1,50 @@
 # agent-harness
 
-**Use existing agent CLIs — the Claude Code CLI, Codex, bob — programmatically
-from Rust, behind one interface.**
+**Drive LLM coding agents — Claude Code, OpenAI Codex, and local Ollama / any
+OpenAI-compatible model — from Rust, behind one trait.**
 
-Instead of shelling out to `claude -p …` / `codex exec …` yourself and
-hand-parsing each tool's bespoke stream format, you drive them through one
-`Harness` trait and consume a single normalized `RunEvent` stream — text,
-reasoning ("thinking"), tool start/end (with input/output), session + token
-usage, suggested edits, lifecycle — no matter which agent CLI is running
-underneath.
+Instead of shelling out to `claude -p …` / `codex exec …` and hand-parsing each
+tool's bespoke stream, you drive them through one `Harness` trait and consume a
+single normalized `RunEvent` stream — text, reasoning, tool start/end, plan,
+token usage, lifecycle — whichever agent runs underneath. Your app learns the
+event shape **once**.
 
-> "Harness" as in: you put a harness on an existing thing to *drive* it.
-> This doesn't build an agent; it gives you one uniform, **programmatic**
-> way to run the agent CLIs you already have installed and stream their
-> output.
+```toml
+agent-harness = "0.4"   # Claude Code, Codex, bob & ACP adapters
+```
 
 ## Crates
 
 | crate | what it is |
 |---|---|
-| [`agent-harness`](crates/agent-harness) | the framework — the `Harness` trait, the normalized `RunEvent` stream, an open `Registry`, and feature-gated `bob` / `claude` / `codex` adapters. Imported as **`harness`**. |
-| [`bob-rs`](crates/bob-rs) | an **unofficial** Rust SDK for the `bob` agent CLI (detection, install, OS keychain, spawn). Not affiliated with bob. |
-| [`cli-stream`](crates/cli-stream) | a generic streaming-subprocess engine — spawn a CLI, stream its stdout/stderr line-by-line, cancel it, augment `PATH` for packaged apps. Useful on its own. |
+| [`agent-harness`](crates/agent-harness) | the framework — the `Harness` trait, the normalized `RunEvent` stream, an open `Registry`, and the backend adapters: **claude / codex / bob / acp** (wrap an external agent) and **`openai-compatible`** (a full local-/OpenAI-compatible runtime that *is* the agent — the Claude Code / Codex SDK, model-agnostic). All feature-gated. Imported as **`harness`**. |
+| [`cli-stream`](crates/cli-stream) | a standalone streaming-subprocess engine — spawn a CLI, stream stdout/stderr line-by-line, cancel it. No agent knowledge; useful on its own. |
+| [`bob-rs`](crates/bob-rs) | an **unofficial**, community Rust SDK for the `bob` agent CLI. Not affiliated with bob. |
 
-The dependency arrow points up: `cli-stream` ← `bob-rs` ← `agent-harness`
-(the bob adapter wraps `bob-rs`; claude/codex use `cli-stream` directly).
+## Quickstart
 
-## Quick start
+Construct an agent, then `run_channel` streams normalized events. **Swap the
+agent, keep the loop.**
 
-### 1. Add the dependency
-
-```toml
-[dependencies]
-agent-harness = "0.1"   # the library is imported as `harness`
-```
-
-### 2. Install & sign in the CLI you'll drive
-
-A harness drives an agent CLI that must be on `PATH` and authenticated — but
-you don't have to do that by hand. `readiness()` reports `installed` /
-`auth_configured`; `install()` installs the CLI (npm for claude/codex, a
-bundled script for bob); `login()` runs the CLI's own OAuth. Full,
-compile-checked version in
-[`examples/setup.rs`](crates/agent-harness/examples/setup.rs):
-
-```rust
-let h = harness::Claude::new();
-let r = h.readiness();                                 // installed? signed in?
-if !r.installed       { h.install(log.clone())?; }     // npm i -g @anthropic-ai/claude-code
-if !r.auth_configured { h.login(log)?; }               // `claude auth login` (opens browser)
-```
-
-> **Auth is per-CLI.** `claude` / `codex` manage their own login; **bob** has
-> no `login()` — it reads `BOBSHELL_API_KEY` from the environment, else the OS
-> keychain (see [`bob-rs`](crates/bob-rs)).
->
-> **Headless / containers.** `login()` opens a browser, so it can't run where
-> there's none. Instead set the CLI's API key in the environment —
-> `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `BOBSHELL_API_KEY` — and the spawned
-> CLI inherits it. `readiness()` treats a key in the env as authenticated, so a
-> container/CI run reports ready and just works; no interactive login needed.
-
-### 3. Run a prompt
-
-Give it a prompt and stream the answer — same code whichever CLI runs underneath:
+### Claude Code
 
 ```rust
 use harness::{Claude, Harness, HarnessError, RunEvent, RunMode, RunRequest, RunTuning};
 
 fn main() -> Result<(), HarnessError> {
-    // Pick a harness. `Claude` drives the `claude` CLI (must be installed +
-    // signed in). Swap for `harness::Bob::new()` or `harness::Codex::new()`.
-    let claude = Claude::new();
-
-    // `run_channel()` starts the run and hands back its events on a channel —
-    // no callback/`Sender` plumbing to hand-write. It returns immediately;
-    // events arrive on background threads. (`run()` is still there when you
-    // want push semantics — forwarding straight onto a Tauri Channel / SSE
-    // sink from inside a callback.)
-    let (_handle, rx) = claude.run_channel(RunRequest {
+    let (_handle, events) = Claude::new().run_channel(RunRequest {
         run_id: "demo".into(),
         prompt: "In one sentence, what is a Markdown heading?".into(),
         cwd: None,                     // working dir for the agent's tool calls
         mode: RunMode::Ask,            // Ask = answer only; Edit = may edit files
         tuning: RunTuning::default(),  // optional: model / effort / max_turns
+        resume: None,                  // Some(session_id) to continue a prior run
     })?; // keep `_handle` to `.cancel()`; dropping it does NOT stop the run
 
-    // ONE normalized event stream, regardless of the backing CLI. `rx` hangs
-    // up on its own when the run ends, so this loop finishes without the
-    // handle:
-    for ev in rx {
+    for ev in events {
         match ev {
-            RunEvent::Text { delta, .. }     => print!("{delta}"),        // the answer
-            RunEvent::Thinking { delta, .. } => eprint!("{delta}"),       // model reasoning
+            RunEvent::Text { delta, .. }     => print!("{delta}"),
+            RunEvent::Thinking { delta, .. } => eprint!("{delta}"),
             RunEvent::ToolStart { name, .. } => eprintln!("\n[tool] {name}"),
             RunEvent::Error { message, .. }  => eprintln!("\n[error] {message}"),
             RunEvent::Exited { .. }          => break,
@@ -103,96 +55,63 @@ fn main() -> Result<(), HarnessError> {
 }
 ```
 
-`install` / `run` / `login` / `cancel` return `Result<_, HarnessError>` — a
-typed error you can `match` on (`Spawn` / `Install` / `Login` / `Cancel` /
-`Other`) to react to the *kind* of failure, or just stringify at your boundary
-(`.map_err(|e| e.to_string())`, e.g. inside a Tauri command).
+### OpenAI Codex
 
-Prefer to pick a harness by string id (e.g. from a config field)? Use the registry:
+Identical loop — construct `Codex` instead:
 
 ```rust
-let reg = harness::default_registry();          // the built-ins (per enabled features)
-let h = reg.by_id("claude").expect("enabled");  // "bob" / "codex" / your own
-let info = h.info();
+let (_handle, events) = harness::Codex::new().run_channel(request)?;
 ```
 
-## Extending
+### Open models — the `openai-compatible` feature
 
-Three ways to adapt the framework, by how much you're changing — all without
-forking it.
-
-### Add a new provider
-
-Implement `Harness` in **your own crate** and register it. `run()` just emits a
-normalized `RunEvent` stream, so a provider can spawn a CLI **or** call an HTTP
-API — there's no CLI requirement in the trait.
+The **`openai-compatible`** feature (`OpenHarness`) is the **agent SDK for open
+models** — the Claude Code / Codex SDK equivalent for any open-source or
+OpenAI-compatible model. It speaks the OpenAI chat API directly and runs the tool
+loop (read/glob/grep/write/edit/bash, plus webfetch/websearch/todowrite/question/
+apply_patch) in Rust — point it at Ollama, OpenRouter, vLLM, or LM Studio. It's
+the same `Harness` trait, so the loop is identical (enable it with
+`features = ["openai-compatible"]`):
 
 ```rust
-use harness::{Harness, Registry};
-
-struct Acme;
-impl Harness for Acme { /* info / readiness / install / run / credential */ }
-
-let reg = harness::default_registry().register(Acme);   // built-ins + yours
+let ollama = harness::OpenHarness::ollama();
+let (_handle, events) = ollama.run_channel(RunRequest {
+    prompt: "List the Rust files and what each does.".into(),
+    mode: RunMode::Edit,
+    tuning: RunTuning { model: Some("qwen2.5-coder".into()), ..Default::default() },
+    ..request
+})?;
 ```
 
-Reuse the pieces instead of reinventing them: `spawn_streaming` (the engine),
-then `normalize_process_event(event, your_parser)` for a stateless line parser,
-or `run_events_from_parsed` if your parser carries per-run state (the
-bob/codex shape). Full runnable example:
+> **OpenCode**, Gemini, Goose, and other [ACP](https://agentclientprotocol.com) agents work via the `acp` feature — `AcpHarness::opencode()` spawns `opencode acp` and drives it over the Agent Client Protocol.
+
+Install / sign-in is per-agent and scriptable: `readiness()` reports
+`installed` / `auth_configured`, `install()` installs the CLI, `login()` runs
+its OAuth. In headless/CI, set the agent's API key in the env
+(`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) and `readiness()` reports ready. See
+[`examples/`](crates/agent-harness/examples).
+
+## Bring your own agent
+
+`Harness::run` only emits `RunEvent`s, so an implementor can spawn a CLI **or**
+call an HTTP API. Implement it in your own crate and register it — no fork:
+
+```rust
+let registry = harness::default_registry().register(MyAgent::new());
+```
+
+Reuse the building blocks — `spawn_streaming` (the engine),
+`normalize_process_event(event, your_parser)` for a stateless parser, or
+`run_events_from_parsed` for a stateful one. Runnable example:
 [`examples/custom_harness.rs`](crates/agent-harness/examples/custom_harness.rs).
-
-### Extend an existing harness
-
-Rust favors composition over inheritance — so **wrap and delegate**: hold an
-inner harness, override the methods you want, forward the rest.
-
-```rust
-struct ClaudeWithDefaults { inner: harness::Claude }
-
-impl Harness for ClaudeWithDefaults {
-    fn info(&self) -> HarnessInfo { /* tweak the model list, etc. */ }
-    fn run(&self, req: RunRequest, cb: RunCallback) -> Result<RunHandle, HarnessError> {
-        self.inner.run(req, cb)            // reuse Claude's spawn + parser
-    }
-    // readiness / install / credential / login → forward to self.inner
-}
-```
-
-### Reinterpret the output
-
-To change what the events *mean* for your product — without touching any
-adapter — map `RunEvent`s into your own vocabulary in the consumer. (The
-Compose app does exactly this: it turns the neutral stream into its own
-three-surface chat model.) Faithful decode in the adapter, interpretation in
-the consumer — *normalize at the adapter, reinterpret in the consumer* — is the
-framework's keystone.
-
-For *full* control, drop below the neutral tier: `parse_raw_line(line)` decodes
-any harness's stdout line into untyped JSON (`serde_json::Value`), losslessly —
-so you can interpret a CLI's own events directly. It's harness-agnostic (one
-function for bob/claude/codex), and `ProcessEvent::Stdout` already hands you the
-verbatim line if you'd rather parse it yourself.
-
-## Features
-
-Each built-in adapter is gated behind a Cargo feature
-(`default = ["bob", "claude", "codex"]`). Want only the framework plus one
-adapter — and none of bob's keychain/install weight?
-
-```toml
-agent-harness = { version = "0.1", default-features = false, features = ["claude"] }
-```
 
 ## Status
 
-Early, pre-1.0 — the API may change. Built for (and used by) the Compose
-writing app, but designed to be usable standalone.
+Pre-1.0 — the API may change. Built for the Compose writing app, designed to be
+usable standalone.
 
 ## License
 
-Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE)
-at your option. Contributions are dual-licensed under the same terms.
-
-`bob-rs` is an **unofficial** community SDK and is not affiliated with,
-sponsored by, or endorsed by the maintainers of bob.
+[MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE) at your option. `bob-rs` is
+an unofficial community SDK, not affiliated with or endorsed by the bob
+maintainers.

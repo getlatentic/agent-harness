@@ -9,32 +9,59 @@
 #   * bob-rs        — UNOFFICIAL Rust SDK for the `bob` agent CLI:
 #                     detection, install, OS keychain, spawn. → cli-stream.
 #                     Not affiliated with the bob maintainers. [publishable]
-#   * agent-harness — the framework (imported as `harness`): the `Harness`
-#                     trait + the normalized `RunEvent` vocabulary + an open
-#                     `Registry`, with feature-gated bob/claude/codex adapter
-#                     modules. → cli-stream + bob-rs (optional). [publishable]
+#   * agent-harness — the framework (imported as `harness`): the `Harness` trait
+#                     + the normalized `RunEvent` vocabulary + an open `Registry`,
+#                     with feature-gated adapter modules — bob/claude/codex/acp
+#                     (each wraps an external agent) and `openai-compatible` (a
+#                     full local-/OpenAI-compatible runtime that *is* the agent).
+#                     → cli-stream + bob-rs (optional). [publishable]
 [workspace]
 resolver = "2"
 members = ["crates/cli-stream", "crates/bob-rs", "crates/agent-harness"]
 
-# Single source of truth for the version + shared publish metadata. The three
-# crates release in lockstep, so the version lives here once and each crate
-# inherits it with `version.workspace = true`. A bump (e.g. `cargo release`)
-# edits this one line instead of three drifting manifests.
+# Shared publish metadata + agent-harness's version. Only agent-harness inherits
+# `version` here (via `version.workspace = true`); cli-stream and bob-rs are
+# stable upstream crates that version independently, pinning their own `version`
+# in their manifests rather than this line.
 [workspace.package]
-version = "0.3.3"
+version = "0.4.0-alpha.1"
 edition = "2021"
 rust-version = "1.74"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/getlatentic/agent-harness"
 
-# Dependencies declared once, referenced with `<dep>.workspace = true` per
-# crate. The internal crates carry their published `version` here too, so the
-# dependency requirement bumps in lockstep with the version above — never by
-# hand-editing each consumer.
+# Dependencies declared once, referenced with `<dep>.workspace = true` per crate.
+# agent-harness depends on the cli-stream / bob-rs `0.3` line — they version
+# independently of agent-harness's 0.4.x and bump only when they actually change.
 [workspace.dependencies]
-cli-stream = { path = "crates/cli-stream", version = "0.3.3" }
-bob-rs = { path = "crates/bob-rs", version = "0.3.3" }
+cli-stream = { path = "crates/cli-stream", version = "0.3" }
+bob-rs = { path = "crates/bob-rs", version = "0.3" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Typed tool-parameter schemas for `openai-compatible`: derive `JsonSchema` on a
+# serde struct → JSON Schema for the model (the Rust equivalent of Zod/Pydantic;
+# also what `rig` and the official MCP SDK `rmcp` use). 1.x is the current line.
+schemars = "1"
 thiserror = "2"
+# Blocking HTTP for the `openai-compatible` runtime (chat API + Ollama model
+# discovery). Blocking fits its thread+callback run() model (no async runtime);
+# `json` enables send_json/into_json via serde_json. TLS is on by default
+# (rustls) so cloud OpenAI-compatible endpoints work, not just local Ollama.
+ureq = { version = "2", features = ["json"] }
+# File search for `openai-compatible`'s glob/grep tools — ripgrep's own libraries,
+# used in-process (gitignore-aware walk + glob + regex), so no `rg` binary.
+ignore = "0.4"
+globset = "0.4"
+regex = "1"
+# HTML → Markdown for `openai-compatible`'s `webfetch` markdown format
+# (Turndown-inspired, html5ever-based).
+htmd = "0.5"
+# The ACP client adapter (`acp` feature). Tracks current ACP (0.14) — the
+# role/builder `connect_with` model + v2 protocol schema that current agents
+# (opencode / Zed / Gemini) speak (nd-JSON over stdio). `smol` is the
+# runtime-agnostic single-threaded executor the connection is driven on;
+# `futures-lite` for the async BufReader.
+agent-client-protocol = "0.14"
+smol = "2"
+futures-lite = "2"
+async-trait = "0.1"

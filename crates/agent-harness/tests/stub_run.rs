@@ -39,6 +39,7 @@ impl Harness for StubHarness {
                 supports_effort: false,
                 supports_max_turns: false,
                 supports_login: false,
+                supports_custom_instructions: false,
             },
         }
     }
@@ -97,6 +98,7 @@ fn request() -> RunRequest {
         mode: RunMode::Ask,
         tuning: RunTuning::default(),
         resume: None,
+        attachments: Vec::new(),
     }
 }
 
