@@ -1,10 +1,10 @@
 //! Readiness probe for the bob CLI + its dependencies.
 //!
-//! Runs `command -v bob`, `bob --version`, `node --version`, `npm
-//! --version` through the user's login shell so nvm-installed
-//! binaries are visible (a bare `Command::new` would inherit the
-//! Tauri / axum process's environment, which doesn't source
-//! `~/.zprofile` or `~/.bashrc`).
+//! Probes `bob --version` + `node`/`npm` with the harness's augmented PATH
+//! (cli-stream's login-shell-derived PATH, sentinel-parsed and cached) so
+//! nvm/Homebrew-installed binaries resolve even from a Finder-launched GUI app.
+//! This matches the claude/codex adapters; a raw `$SHELL -l -c` is fragile
+//! without a controlling TTY (it can exit non-zero on shell-startup noise).
 //!
 //! The returned snapshot is the canonical wire shape served both
 //! by the Tauri command and the axum endpoint — keep the field
@@ -68,22 +68,26 @@ pub struct AuthProbe {
 /// cost — parallelizing would just multiply the number of bash
 /// instances spun up.
 pub fn get_readiness() -> BobReadinessSnapshot {
-    let bob_path = run_login_shell("command -v bob");
-    let bob_version_raw = run_login_shell("bob --version");
+    let bob_version_raw = probe("bob", &["--version"]);
     let bob_version = bob_version_raw.as_ref().and_then(|v| {
         // `bob --version` prints "bob 1.0.4" — take the last token.
         v.split_whitespace().last().map(|s| s.to_owned())
     });
-    let bob_installed = bob_path.is_some() && bob_version.is_some();
+    // bob answering `--version` is the real "installed" signal; resolve its
+    // absolute path (for display) only once we know it runs.
+    let bob_installed = bob_version.is_some();
+    let bob_path = bob_installed
+        .then(|| cli_stream::resolve_program(std::path::PathBuf::from("bob")))
+        .map(|path| path.to_string_lossy().into_owned());
 
-    let node_raw = run_login_shell("node --version");
+    let node_raw = probe("node", &["--version"]);
     let node_installed = node_raw.is_some();
     let node_satisfies = node_raw
         .as_deref()
         .map(|v| semver_at_least(v, BOB_MIN_NODE_VERSION))
         .unwrap_or(false);
 
-    let npm_raw = run_login_shell("npm --version");
+    let npm_raw = probe("npm", &["--version"]);
 
     // Important: this is the *boot-time* probe. We deliberately
     // use `auth_source()` (marker-file + env check, no keychain
@@ -124,18 +128,15 @@ pub fn get_readiness() -> BobReadinessSnapshot {
     }
 }
 
-/// Run a one-liner through the user's `$SHELL` with `-l -c`. The
-/// `-l` (login) flag picks up `~/.zprofile` / `~/.bash_profile`
-/// where most users source nvm. `-c` runs the command non-
-/// interactively so we don't hang waiting for a prompt.
-///
-/// Returns `None` if the command fails or prints empty stdout.
-fn run_login_shell(command: &str) -> Option<String> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_owned());
-    let output = Command::new(&shell)
-        .arg("-l")
-        .arg("-c")
-        .arg(command)
+/// Run `program args…` with the harness's augmented PATH and return its trimmed
+/// stdout, or `None` if it fails or prints nothing. `augmented_node_path()`
+/// resolves nvm/Homebrew/etc. via the user's login shell (queried once, cached,
+/// bounded) and is robust to shell-startup noise — unlike spawning `$SHELL -l
+/// -c`, whose exit status a no-TTY GUI app can't rely on.
+fn probe(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program)
+        .args(args)
+        .env("PATH", cli_stream::augmented_node_path())
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
