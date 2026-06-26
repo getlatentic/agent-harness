@@ -107,7 +107,7 @@ impl Harness for CodexHarness {
                         .to_owned(),
                 )
             },
-            details: Value::Null,
+            details: codex_resolved_details(),
         }
     }
 
@@ -155,8 +155,9 @@ impl Harness for CodexHarness {
         // threads, so the parser is held behind an `Arc<Mutex>` — the same
         // shape as bob's.
         let parser = Arc::new(Mutex::new(CodexStreamParser::new()));
+        let program = tuning.binary_path.clone().unwrap_or_else(|| PathBuf::from("codex"));
         let handle = spawn_streaming(
-            PathBuf::from("codex"),
+            program,
             args,
             Vec::new(),
             cwd,
@@ -188,6 +189,30 @@ impl Harness for CodexHarness {
         // `codex login` runs the CLI's OAuth flow (opens the browser).
         crate::run_login_command("codex", &["login"], on_event)
     }
+}
+
+/// Resolve the `codex` binary and classify its install kind for the readiness
+/// `details`, mirroring the Claude adapter — so the Runtimes UI can surface
+/// "npm — can go stale / Update to native" instead of a bare, ambiguous
+/// "Update". Reuses the shared resolve/classify in `crate::claude::resolve`.
+fn codex_resolved_details() -> Value {
+    let path = crate::augmented_node_path();
+    let Some(resolved) = crate::claude::resolve::resolve_on_path("codex", &path) else {
+        return Value::Null;
+    };
+    let mut details = serde_json::Map::new();
+    details.insert(
+        "resolved_path".to_owned(),
+        Value::String(resolved.to_string_lossy().into_owned()),
+    );
+    if let Ok(home) = std::env::var("HOME") {
+        let kind = crate::claude::resolve::classify(&resolved, std::path::Path::new(&home), None);
+        details.insert(
+            "install_kind".to_owned(),
+            Value::String(kind.as_str().to_owned()),
+        );
+    }
+    Value::Object(details)
 }
 
 fn probe_version(program: &str) -> Option<String> {
