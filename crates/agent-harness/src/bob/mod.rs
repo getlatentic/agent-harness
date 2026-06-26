@@ -108,7 +108,7 @@ impl Harness for BobHarness {
             },
             max_coins: 30,
             cwd: request.cwd,
-            bob_executable: None,
+            bob_executable: request.tuning.binary_path.clone(),
             // Host passthrough — the same RunTuning.extra_args the claude/codex
             // adapters honor, so a client applies a flag uniformly across all
             // three harnesses (bob appends it to its own argv).

@@ -13,7 +13,7 @@
 //! The stdout wire format and its decode into [`crate::RunEvent`]s live in
 //! [`parser`] ([`parse_claude_line`]).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::Value;
@@ -25,6 +25,9 @@ use crate::{
 };
 
 mod parser;
+// Shared with the Codex adapter so it can report its install-kind too. (The
+// binary resolve + classify logic is harness-agnostic; it lives here for now.)
+pub(crate) mod resolve;
 pub use parser::parse_claude_line;
 
 /// Registry id for the Claude Code harness.
@@ -111,22 +114,45 @@ impl Harness for ClaudeHarness {
                         .to_owned(),
                 )
             },
-            details: Value::Null,
+            details: resolved_details(),
         }
     }
 
     fn install(&self, on_event: InstallCallback) -> Result<(), HarnessError> {
-        // npm global install. Blocking (matches the `install`
-        // contract); we capture output and forward it as install
-        // events. Streaming live progress is a future refinement.
-        (*on_event)(InstallEvent::Step {
-            text: "Installing Claude Code via npm…".to_owned(),
-        });
-        let output = Command::new("npm")
-            .args(["install", "-g", "@anthropic-ai/claude-code"])
-            .env("PATH", crate::augmented_node_path())
-            .output()
-            .map_err(|e| HarnessError::install(format!("failed to run npm: {e}")))?;
+        // Claude Code ships as a native, Developer-ID-signed, self-updating
+        // binary (`~/.local/bin/claude`); the npm `@anthropic-ai/claude-code`
+        // package is frozen at 1.0.x and must never be (re)installed. If a
+        // `claude` is already on PATH (e.g. an old npm one), migrate it to the
+        // native build via `claude install`; otherwise bootstrap the native
+        // installer. Blocking (matches the `install` contract); output is
+        // forwarded as install events.
+        let path = crate::augmented_node_path();
+        let output = if resolve::resolve_on_path("claude", &path).is_some() {
+            (*on_event)(InstallEvent::Step {
+                text: "Migrating Claude Code to the native installer…".to_owned(),
+            });
+            Command::new("claude")
+                .arg("install")
+                .env("PATH", &path)
+                .output()
+                .map_err(|e| HarnessError::install(format!("failed to run claude install: {e}")))?
+        } else {
+            (*on_event)(InstallEvent::Step {
+                text: "Downloading the Claude Code installer…".to_owned(),
+            });
+            let script = download_install_script(&path)?;
+            (*on_event)(InstallEvent::Step {
+                text: "Running the Claude Code installer…".to_owned(),
+            });
+            // Run the downloaded script with `bash <file>` — NOT a `curl | bash`
+            // pipe (the single most EDR-flagged pattern); download-then-execute
+            // gives endpoint security a file to inspect first.
+            Command::new("bash")
+                .arg(script.path())
+                .env("PATH", &path)
+                .output()
+                .map_err(|e| HarnessError::install(format!("failed to run installer: {e}")))?
+        };
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             (*on_event)(InstallEvent::Stdout {
                 text: line.to_owned(),
@@ -153,8 +179,9 @@ impl Harness for ClaudeHarness {
         // No env injected — Claude Code uses its own auth. PATH
         // augmentation inside `spawn_streaming` ensures `node` is
         // found for a Finder-launched .app.
+        let program = tuning.binary_path.clone().unwrap_or_else(|| PathBuf::from("claude"));
         let handle = spawn_streaming(
-            PathBuf::from("claude"),
+            program,
             args,
             Vec::new(),
             cwd,
@@ -210,6 +237,30 @@ fn probe_claude_signed_in() -> bool {
     output.status.success() && !stdout.trim().is_empty()
 }
 
+/// Build readiness `details` carrying where `claude` resolves on the augmented
+/// PATH and how it was installed (native / npm-global / homebrew / bundled /
+/// unknown). Attached as a `serde_json::Value` object so it rides the existing
+/// `HarnessReadiness.details` without a struct change. `details.resolved_path`
+/// is absent when the binary can't be located despite a successful
+/// `--version` (e.g. a PATH entry the resolver can't read) — the host renders
+/// version + status regardless.
+fn resolved_details() -> Value {
+    let path = crate::augmented_node_path();
+    let Some(resolved) = resolve::resolve_on_path("claude", &path) else {
+        return Value::Null;
+    };
+    let mut details = serde_json::Map::new();
+    details.insert(
+        "resolved_path".to_owned(),
+        Value::String(resolved.to_string_lossy().into_owned()),
+    );
+    if let Ok(home) = std::env::var("HOME") {
+        let kind = resolve::classify(&resolved, std::path::Path::new(&home), None);
+        details.insert("install_kind".to_owned(), Value::String(kind.as_str().to_owned()));
+    }
+    Value::Object(details)
+}
+
 /// Build the argv for a `claude -p` headless run. Kept pure (no
 /// spawn) so the flag mapping is unit-tested. `tuning.model` →
 /// `--model`, `tuning.max_turns` → `--max-turns`; Claude Code has no
@@ -262,6 +313,77 @@ fn build_claude_args(
 fn extra_args_sets(extra_args: &[String], flag: &str) -> bool {
     let with_eq = format!("{flag}=");
     extra_args.iter().any(|a| a == flag || a.starts_with(&with_eq))
+}
+
+/// The official Claude Code bootstrap script. A `GET` 302-redirects to
+/// `downloads.claude.ai/.../bootstrap.sh`, which installs the native binary.
+const CLAUDE_INSTALL_URL: &str = "https://claude.ai/install.sh";
+
+/// Download the native-installer bootstrap to a temp file via `curl -fsSL`
+/// (TLS-verified, follows the 302), returning a guard that deletes the file on
+/// drop. Downloading to a file — rather than piping `curl … | bash` — lets EDR
+/// inspect the script before it runs. Errors if curl fails or the script is
+/// empty (a redirect/transport failure that left no body), so we never hand
+/// `bash` an empty file and report a spurious success.
+fn download_install_script(path: &str) -> Result<TempScript, HarnessError> {
+    let script = TempScript::new()
+        .map_err(|e| HarnessError::install(format!("could not create a temp file: {e}")))?;
+    let output = Command::new("curl")
+        .args(["-fsSL", CLAUDE_INSTALL_URL, "-o"])
+        .arg(script.path())
+        .env("PATH", path)
+        .output()
+        .map_err(|e| HarnessError::install(format!("failed to run curl: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(HarnessError::install(format!(
+            "downloading {CLAUDE_INSTALL_URL} failed: {}",
+            stderr.trim()
+        )));
+    }
+    let empty = std::fs::metadata(script.path()).map(|m| m.len() == 0).unwrap_or(true);
+    if empty {
+        return Err(HarnessError::install(format!(
+            "{CLAUDE_INSTALL_URL} returned an empty installer script"
+        )));
+    }
+    Ok(script)
+}
+
+/// A uniquely-named temp file deleted when dropped — holds the downloaded
+/// installer for the duration of the `bash <file>` run. A tiny RAII guard so
+/// the `claude` feature needn't pull a tempfile dependency.
+struct TempScript {
+    path: PathBuf,
+}
+
+impl TempScript {
+    fn new() -> std::io::Result<Self> {
+        // Process id + a monotonic counter keep concurrent installs from
+        // colliding without needing a randomness dependency.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "claude-install-{}-{}.sh",
+            std::process::id(),
+            n
+        ));
+        // Create it now so the file exists with restrictive defaults before curl
+        // writes to it.
+        std::fs::File::create(&path)?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempScript {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 /// Run `<program> --version`, returning the trimmed stdout on

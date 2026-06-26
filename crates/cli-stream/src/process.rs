@@ -117,6 +117,17 @@ impl ProcessHandle {
     pub fn was_cancelled(&self) -> bool {
         self.inner.cancelled.load(Ordering::SeqCst)
     }
+
+    /// The child's OS process id while it's alive, or `None` once it has been
+    /// reaped (the `Child` is taken on exit). Lets an embedder record the pid
+    /// so a child orphaned by a hard crash can be killed on the next launch.
+    pub fn pid(&self) -> Option<u32> {
+        self.inner
+            .child
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(Child::id))
+    }
 }
 
 /// Spawn an arbitrary streaming child process — the generic engine behind

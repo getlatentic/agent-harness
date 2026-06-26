@@ -137,6 +137,13 @@ pub trait RunControl: Send + Sync {
     fn cancel(&self) -> Result<(), HarnessError>;
     /// Whether [`cancel`](RunControl::cancel) was called.
     fn was_cancelled(&self) -> bool;
+    /// The OS process id of the underlying child while it's alive, for a
+    /// process-backed run. `None` for adapters with no child process (a
+    /// direct-model run aborts an HTTP stream, not a process) — so an embedder
+    /// can record live pids and reap a child a hard crash orphaned.
+    fn pid(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// Boxed [`RunControl`] returned by [`Harness::run`].
@@ -151,6 +158,9 @@ impl RunControl for ProcessHandle {
     }
     fn was_cancelled(&self) -> bool {
         ProcessHandle::was_cancelled(self)
+    }
+    fn pid(&self) -> Option<u32> {
+        ProcessHandle::pid(self)
     }
 }
 
@@ -225,6 +235,11 @@ pub struct RunTuning {
     /// its base system prompt; other adapters currently ignore it (a CLI mapping
     /// such as Claude's `--append-system-prompt` can opt in later). `None` → none.
     pub extra_instructions: Option<String>,
+    /// Absolute path to the agent's executable, overriding PATH resolution of
+    /// the bare CLI name. `None` → resolve by name on PATH. CLI adapters
+    /// (claude/codex/bob) spawn this path instead of their default program; the
+    /// `openai-compatible` adapter spawns no process and ignores it.
+    pub binary_path: Option<std::path::PathBuf>,
 }
 
 /// A non-text input attached to a run — currently an image. Multimodal adapters
