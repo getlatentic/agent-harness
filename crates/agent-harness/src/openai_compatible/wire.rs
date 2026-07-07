@@ -9,6 +9,7 @@
 //! loop turns them into a [`crate::RunEvent::Error`].
 
 use std::io::{BufRead, BufReader};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -649,7 +650,9 @@ mod tests {
             &cancel,
             |_| {},
         );
-        assert_eq!(seen, 2, "one chunk consumed, the next poll saw the flag");
-        assert_eq!(msg.content.as_deref(), Some("c0"));
+        // The flag is polled before each pulled line is processed: exactly one
+        // pull happens, its chunk is discarded, and the read ends.
+        assert_eq!(seen, 1, "the poll after the first pull saw the flag");
+        assert!(msg.content.as_deref().unwrap_or("").is_empty());
     }
 }

@@ -381,7 +381,7 @@ mod tests {
             r#"{"message":{"role":"assistant","content":""},"done":true,"prompt_eval_count":10,"eval_count":5}"#.to_string(),
         ];
         let mut text = String::new();
-        let (msg, usage) = drain_native_stream(lines.into_iter(), Some("think"), |f| {
+        let (msg, usage) = drain_native_stream(lines.into_iter(), Some("think"), &AtomicBool::new(false), |f| {
             if let Fragment::Text(t) = f {
                 text.push_str(t);
             }
@@ -405,7 +405,7 @@ mod tests {
             r#"{"message":{"role":"assistant","content":"Hi <think>plan</think>answer"},"done":true}"#.to_string(),
         ];
         let (mut text, mut reasoning) = (String::new(), String::new());
-        let (msg, _) = drain_native_stream(lines.into_iter(), Some("think"), |f| match f {
+        let (msg, _) = drain_native_stream(lines.into_iter(), Some("think"), &AtomicBool::new(false), |f| match f {
             Fragment::Text(t) => text.push_str(t),
             Fragment::Reasoning(r) => reasoning.push_str(r),
         })
@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn native_stream_surfaces_error_line() {
         let lines = vec![r#"{"error":"model not found"}"#.to_string()];
-        let err = drain_native_stream(lines.into_iter(), None, |_| {}).unwrap_err();
+        let err = drain_native_stream(lines.into_iter(), None, &AtomicBool::new(false), |_| {}).unwrap_err();
         assert_eq!(err, "model not found");
     }
 
@@ -546,7 +546,7 @@ mod tests {
             |_| {},
         );
         let (msg, _) = out.expect("early stop is not an error");
-        assert_eq!(seen, 2);
-        assert_eq!(msg.content.as_deref(), Some("c0"));
+        assert_eq!(seen, 1, "the poll after the first pull saw the flag");
+        assert!(msg.content.as_deref().unwrap_or("").is_empty());
     }
 }
