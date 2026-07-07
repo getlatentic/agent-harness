@@ -203,6 +203,7 @@ pub(crate) fn post_chat_stream(
     messages: &[ChatMessage],
     tools: &[Value],
     extras: RequestExtras,
+    cancel: &AtomicBool,
     on_delta: impl FnMut(Fragment),
 ) -> Result<(ChatMessage, Option<Usage>), String> {
     let url = format!("{base}/v1/chat/completions");
@@ -229,7 +230,7 @@ pub(crate) fn post_chat_stream(
         req.send_json(body.clone()).map_err(Box::new)
     })?;
     let reader = BufReader::new(resp.into_reader());
-    Ok(drain_stream(reader.lines().map_while(Result::ok), extras.reasoning_tag, on_delta))
+    Ok(drain_stream(reader.lines().map_while(Result::ok), extras.reasoning_tag, cancel, on_delta))
 }
 
 /// Optional request shaping beyond messages + tools, bundled so `post_chat_stream`
@@ -286,6 +287,7 @@ fn base64_encode(data: &[u8]) -> String {
 fn drain_stream(
     lines: impl Iterator<Item = String>,
     reasoning_tag: Option<&str>,
+    cancel: &AtomicBool,
     mut on_delta: impl FnMut(Fragment),
 ) -> (ChatMessage, Option<Usage>) {
     let mut content = String::new();
@@ -293,6 +295,11 @@ fn drain_stream(
     let mut usage = None;
     let mut think = ThinkSplitter::new(reasoning_tag);
     for line in lines {
+        // Stop-button responsiveness (#115): end the read now; dropping the
+        // reader hangs up, telling the server to stop generating.
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
         let Some(data) = line.strip_prefix("data:").map(str::trim) else {
             continue;
         };
@@ -517,7 +524,7 @@ mod tests {
             "data: [DONE]".to_string(),
         ];
         let (mut text, mut reasoning) = (String::new(), String::new());
-        let (msg, _) = drain_stream(lines.into_iter(), Some("think"), |f| match f {
+        let (msg, _) = drain_stream(lines.into_iter(), Some("think"), &AtomicBool::new(false), |f| match f {
             Fragment::Text(t) => text.push_str(t),
             Fragment::Reasoning(r) => reasoning.push_str(r),
         });
@@ -534,7 +541,7 @@ mod tests {
             "data: [DONE]".to_string(),
         ];
         let mut text = String::new();
-        let (msg, _) = drain_stream(lines.into_iter(), None, |f| {
+        let (msg, _) = drain_stream(lines.into_iter(), None, &AtomicBool::new(false), |f| {
             if let Fragment::Text(t) = f {
                 text.push_str(t);
             }
@@ -579,7 +586,7 @@ mod tests {
         ];
         let mut text = String::new();
         let mut reasoning = String::new();
-        let (msg, usage) = drain_stream(lines.into_iter(), Some("think"), |f| match f {
+        let (msg, usage) = drain_stream(lines.into_iter(), Some("think"), &AtomicBool::new(false), |f| match f {
             Fragment::Text(t) => text.push_str(t),
             Fragment::Reasoning(r) => reasoning.push_str(r),
         });
@@ -600,7 +607,7 @@ mod tests {
             String::new(),
             r#"data: {"choices":[{"delta":{"content":"hi"}}]}"#.to_string(),
         ];
-        let (msg, usage) = drain_stream(lines.into_iter(), Some("think"), |_| {});
+        let (msg, usage) = drain_stream(lines.into_iter(), Some("think"), &AtomicBool::new(false), |_| {});
         assert_eq!(msg.content.as_deref(), Some("hi"));
         assert!(usage.is_none());
     }
@@ -622,5 +629,27 @@ mod tests {
         assert!(status_is_retryable(429), "rate limit retries");
         assert!(status_is_retryable(500) && status_is_retryable(503), "5xx retries");
         assert!(!status_is_retryable(400) && !status_is_retryable(401) && !status_is_retryable(404), "4xx is terminal");
+    }
+
+    #[test]
+    fn drain_stream_stops_within_one_chunk_of_cancel() {
+        // #115: the Stop button sets this flag; the drain must quit reading
+        // immediately instead of riding out the whole generation.
+        let cancel = AtomicBool::new(false);
+        let lines: Vec<String> = (0..100)
+            .map(|i| format!(r#"data: {{"choices":[{{"delta":{{"content":"c{i}"}}}}]}}"#))
+            .collect();
+        let mut seen = 0;
+        let (msg, _) = drain_stream(
+            lines.into_iter().inspect(|_| {
+                seen += 1;
+                cancel.store(true, Ordering::SeqCst);
+            }),
+            None,
+            &cancel,
+            |_| {},
+        );
+        assert_eq!(seen, 2, "one chunk consumed, the next poll saw the flag");
+        assert_eq!(msg.content.as_deref(), Some("c0"));
     }
 }

@@ -273,7 +273,7 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
         // Summarize old turns into a marker if the windowed request would near
         // the limit (the full transcript on disk is untouched), then build the
         // windowed view to send.
-        compact_if_needed(&cfg, &mut transcript, &system_prompt, &on_event, rid);
+        compact_if_needed(&cfg, &mut transcript, &system_prompt, &on_event, rid, &cancel);
         let mut sent = window(&system_prompt, &transcript);
         if cfg.mode == RunMode::Ask {
             sent.push(ChatMessage::user(READ_ONLY_REMINDER));
@@ -302,6 +302,7 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
                 &tool_defs,
                 num_ctx,
                 extras,
+                &cancel,
                 |fragment| emit_fragment(&on_event, rid, fragment),
             ),
             None => wire::post_chat_stream(
@@ -311,6 +312,7 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
                 &sent,
                 &tool_defs,
                 extras,
+                &cancel,
                 |fragment| emit_fragment(&on_event, rid, fragment),
             ),
         };
@@ -318,6 +320,12 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
             Ok(pair) => pair,
             Err(message) => return finish_error(&on_event, rid, message),
         };
+        // A cancel that fired MID-STREAM returns a truncated turn — exit as
+        // cancelled before it can masquerade as a successful answer (#115).
+        if cancel.load(Ordering::SeqCst) {
+            (*on_event)(RunEvent::Exited { run_id: rid.to_owned(), exit_code: None, cancelled: true });
+            return;
+        }
 
         // Clone the calls out before moving the assistant turn into history
         // (the history must keep the tool_calls so the model sees its own
@@ -568,11 +576,11 @@ fn emit_fragment(on_event: &RunCallback, rid: &str, fragment: wire::Fragment) {
 /// the right endpoint (native Ollama when `ollama_num_ctx` is set, else OpenAI
 /// `/v1`). Used where streaming isn't needed: compaction summaries and subagent
 /// turns. `model` may differ from `cfg.model` (subagents can override it).
-fn chat_once(cfg: &LoopConfig, model: &str, messages: &[ChatMessage], tools: &[Value]) -> Result<ChatMessage, String> {
+fn chat_once(cfg: &LoopConfig, model: &str, messages: &[ChatMessage], tools: &[Value], cancel: &AtomicBool) -> Result<ChatMessage, String> {
     match cfg.ollama_num_ctx {
         Some(num_ctx) => {
             let (msg, _usage) =
-                ollama::post_chat_stream(&cfg.base_url, model, messages, tools, num_ctx, wire::RequestExtras::default(), |_| {})?;
+                ollama::post_chat_stream(&cfg.base_url, model, messages, tools, num_ctx, wire::RequestExtras::default(), cancel, |_| {})?;
             Ok(msg)
         }
         None => {
@@ -597,6 +605,8 @@ fn compact_if_needed(
     system_prompt: &str,
     on_event: &RunCallback,
     rid: &str,
+
+    cancel: &AtomicBool,
 ) {
     let Some(limit) = cfg.context_tokens.map(|n| n as usize) else {
         return;
@@ -622,7 +632,7 @@ fn compact_if_needed(
     let head = window(system_prompt, &transcript[..boundary]);
     let flattened = flatten_for_summary(&head[1..]); // drop the system prompt
     let request = vec![ChatMessage::user(format!("{SUMMARY_PROMPT}\n\n{flattened}"))];
-    let summary = chat_once(cfg, &cfg.model, &request, &[]).ok().and_then(|m| m.content);
+    let summary = chat_once(cfg, &cfg.model, &request, &[], cancel).ok().and_then(|m| m.content);
     let Some(summary) = summary.filter(|s| !s.trim().is_empty()) else {
         return;
     };
@@ -669,7 +679,7 @@ impl tools::ModelClient for Model<'_> {
             messages.push(ChatMessage::system(s));
         }
         messages.push(ChatMessage::user(user));
-        let msg = chat_once(self.cfg, &self.cfg.model, &messages, &[])?;
+        let msg = chat_once(self.cfg, &self.cfg.model, &messages, &[], cancel)?;
         Ok(msg.content.unwrap_or_default())
     }
 }
@@ -734,9 +744,9 @@ fn run_subagent(
         if cancel.load(Ordering::SeqCst) {
             return Err("cancelled".to_owned());
         }
-        compact_if_needed(parent, &mut transcript, &system_prompt, on_event, &parent.run_id);
+        compact_if_needed(parent, &mut transcript, &system_prompt, on_event, &parent.run_id, cancel);
         let sent = window(&system_prompt, &transcript);
-        let msg = chat_once(parent, model, &sent, &tool_defs)?;
+        let msg = chat_once(parent, model, &sent, &tool_defs, cancel)?;
         if let Some(text) = msg.content.as_deref().filter(|t| !t.is_empty()) {
             final_text = text.to_owned();
         }

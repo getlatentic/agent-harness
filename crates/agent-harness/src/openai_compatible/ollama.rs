@@ -39,6 +39,7 @@ pub(crate) fn post_chat_stream(
     tools: &[Value],
     num_ctx: u64,
     extras: RequestExtras,
+    cancel: &AtomicBool,
     on_delta: impl FnMut(Fragment),
 ) -> Result<(ChatMessage, Option<Usage>), String> {
     let url = format!("{base}/api/chat");
@@ -59,7 +60,7 @@ pub(crate) fn post_chat_stream(
     }
     let resp = send_with_retry(&url, || ureq::post(&url).send_json(body.clone()).map_err(Box::new))?;
     let reader = BufReader::new(resp.into_reader());
-    drain_native_stream(reader.lines().map_while(Result::ok), extras.reasoning_tag, on_delta)
+    drain_native_stream(reader.lines().map_while(Result::ok), extras.reasoning_tag, cancel, on_delta)
 }
 
 /// Translate our OpenAI-shaped [`ChatMessage`]s into native request messages.
@@ -118,6 +119,7 @@ fn native_format(response_format: &Value) -> Option<Value> {
 fn drain_native_stream(
     lines: impl Iterator<Item = String>,
     reasoning_tag: Option<&str>,
+    cancel: &AtomicBool,
     mut on_delta: impl FnMut(Fragment),
 ) -> Result<(ChatMessage, Option<Usage>), String> {
     let mut content = String::new();
@@ -125,6 +127,12 @@ fn drain_native_stream(
     let mut usage = None;
     let mut think = ThinkSplitter::new(reasoning_tag);
     for line in lines {
+        // Stop-button responsiveness: a set flag ends the read NOW — dropping
+        // the reader hangs up the connection, which tells the server to stop
+        // generating (#115; mirrors drain_pull_stream).
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -518,5 +526,27 @@ mod tests {
         let cancel = AtomicBool::new(true);
         let err = drain_pull_stream(lines.into_iter(), &cancel, &mut |_| {}).unwrap_err();
         assert_eq!(err, "Download cancelled.");
+    }
+
+    #[test]
+    fn drain_native_stream_stops_within_one_chunk_of_cancel() {
+        // #115 — same contract as the OpenAI-shape drain.
+        let cancel = AtomicBool::new(false);
+        let lines: Vec<String> = (0..100)
+            .map(|i| format!(r#"{{"message":{{"role":"assistant","content":"c{i}"}},"done":false}}"#))
+            .collect();
+        let mut seen = 0;
+        let out = drain_native_stream(
+            lines.into_iter().inspect(|_| {
+                seen += 1;
+                cancel.store(true, Ordering::SeqCst);
+            }),
+            None,
+            &cancel,
+            |_| {},
+        );
+        let (msg, _) = out.expect("early stop is not an error");
+        assert_eq!(seen, 2);
+        assert_eq!(msg.content.as_deref(), Some("c0"));
     }
 }
