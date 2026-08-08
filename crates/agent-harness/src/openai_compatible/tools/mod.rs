@@ -129,6 +129,15 @@ fn builtins() -> Vec<Box<dyn Tool>> {
     ]
 }
 
+/// Whether [`ToolSet::defs`] builds the tool list for the main agent or a `task`
+/// subagent — a subagent's set drops the opt-out tools (`task`, `question`), so
+/// it can neither spawn its own children nor stop to ask the user.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentContext {
+    Main,
+    Subagent,
+}
+
 /// The tools a run offers + dispatches: the built-ins plus any from connected
 /// MCP servers. Built once per run and shared with subagents, so a dynamic tool
 /// source (MCP) slots in beside the static built-ins behind one type — no
@@ -144,7 +153,11 @@ impl ToolSet {
     /// production builds the set via [`ToolSet::new`].
     #[cfg(test)]
     pub(crate) fn builtin() -> Self {
-        Self { tools: builtins(), permissions: Vec::new(), permission_prompt: None }
+        Self {
+            tools: builtins(),
+            permissions: Vec::new(),
+            permission_prompt: None,
+        }
     }
 
     /// The built-ins plus MCP-provided tools, gated by `permissions` (with
@@ -157,7 +170,11 @@ impl ToolSet {
     ) -> Self {
         let mut tools = builtins();
         tools.extend(mcp);
-        Self { tools, permissions, permission_prompt }
+        Self {
+            tools,
+            permissions,
+            permission_prompt,
+        }
     }
 
     /// The OpenAI `tools` array offered to the model: the read-only tools always,
@@ -168,7 +185,8 @@ impl ToolSet {
     /// mutating call as a backstop against a hallucinated name. Also drops the
     /// model's apply_patch ⇄ edit/write swap and, in a subagent, the opt-outs
     /// (`task`, `question`).
-    pub(crate) fn defs(&self, mode: RunMode, model: &str, subagent: bool) -> Vec<Value> {
+    pub(crate) fn defs(&self, mode: RunMode, model: &str, context: AgentContext) -> Vec<Value> {
+        let subagent = matches!(context, AgentContext::Subagent);
         self.tools
             .iter()
             .filter(|t| t.offered(mode, model))
@@ -187,7 +205,10 @@ impl ToolSet {
     /// (read → context pill, write/edit → file-op, bash → command) without a name
     /// table. Unknown → [`ToolKind::Other`].
     pub(crate) fn kind(&self, name: &str) -> ToolKind {
-        self.tools.iter().find(|t| t.id() == name).map_or(ToolKind::Other, |t| t.kind())
+        self.tools
+            .iter()
+            .find(|t| t.id() == name)
+            .map_or(ToolKind::Other, |t| t.kind())
     }
 
     /// Execute one tool call. `ctx.mode` is re-checked so a model that
@@ -235,16 +256,28 @@ impl ToolSet {
                     crate::openai_compatible::Permission::Deny => Some(format!(
                         "`{}` denied by a permission rule{}",
                         tool.id(),
-                        rule.pattern.as_deref().map(|p| format!(" (matched `{p}`)")).unwrap_or_default()
+                        rule.pattern
+                            .as_deref()
+                            .map(|p| format!(" (matched `{p}`)"))
+                            .unwrap_or_default()
                     )),
                     // Defer to the host's prompt (blocking); absent prompt → deny.
                     crate::openai_compatible::Permission::Ask => {
-                        let request =
-                            crate::openai_compatible::PermissionRequest { tool: tool.id().to_owned(), subject: subject.clone() };
-                        if self.permission_prompt.as_ref().is_some_and(|prompt| prompt(&request)) {
+                        let request = crate::openai_compatible::PermissionRequest {
+                            tool: tool.id().to_owned(),
+                            subject: subject.clone(),
+                        };
+                        if self
+                            .permission_prompt
+                            .as_ref()
+                            .is_some_and(|prompt| prompt(&request))
+                        {
                             None
                         } else {
-                            Some(format!("`{}` denied (permission prompt declined or unset)", tool.id()))
+                            Some(format!(
+                                "`{}` denied (permission prompt declined or unset)",
+                                tool.id()
+                            ))
                         }
                     }
                 };
@@ -273,7 +306,12 @@ pub(crate) trait SubagentRunner {
 /// `&dyn`. Distinct from [`SubagentRunner`], which spawns a whole tool-using
 /// child agent; this is a single prompt→text call.
 pub(crate) trait ModelClient {
-    fn complete(&self, system: Option<&str>, user: &str, cancel: &AtomicBool) -> Result<String, String>;
+    fn complete(
+        &self,
+        system: Option<&str>,
+        user: &str,
+        cancel: &AtomicBool,
+    ) -> Result<String, String>;
 }
 
 /// Per-run context for executing a tool call: where the run operates, what it
@@ -313,14 +351,29 @@ pub(crate) struct ToolOutcome {
 
 impl ToolOutcome {
     fn ok(output: impl Into<String>) -> Self {
-        Self { ok: true, output: output.into(), stop: false, events: Vec::new() }
+        Self {
+            ok: true,
+            output: output.into(),
+            stop: false,
+            events: Vec::new(),
+        }
     }
     fn err(output: impl Into<String>) -> Self {
-        Self { ok: false, output: output.into(), stop: false, events: Vec::new() }
+        Self {
+            ok: false,
+            output: output.into(),
+            stop: false,
+            events: Vec::new(),
+        }
     }
     /// A successful result that also ends the run after this turn.
     fn stop(output: impl Into<String>) -> Self {
-        Self { ok: true, output: output.into(), stop: true, events: Vec::new() }
+        Self {
+            ok: true,
+            output: output.into(),
+            stop: true,
+            events: Vec::new(),
+        }
     }
     /// Attach side events for the loop to emit.
     fn with_events(mut self, events: Vec<RunEvent>) -> Self {
@@ -343,6 +396,13 @@ pub(crate) enum Keep {
     HeadAndTail,
 }
 
+/// A single end of an output — which one [`take_end`] keeps.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum End {
+    Head,
+    Tail,
+}
+
 /// Cap a tool's output when it exceeds the output caps, spilling the full text to
 /// a scratch file so the omitted span stays reachable via `read` rather than
 /// forcing a narrower re-run. `keep` chooses which end(s) to retain (the start
@@ -356,20 +416,43 @@ fn truncate_output(output: String, keep: Keep) -> String {
     let spilled = spill_output(&output);
     let lines: Vec<&str> = output.lines().collect();
     match keep {
-        Keep::Head => take_end(&lines, total_lines, MAX_OUTPUT_LINES, MAX_OUTPUT_BYTES, false, &spilled),
-        Keep::Tail => take_end(&lines, total_lines, MAX_OUTPUT_LINES, MAX_OUTPUT_BYTES, true, &spilled),
+        Keep::Head => take_end(
+            &lines,
+            total_lines,
+            MAX_OUTPUT_LINES,
+            MAX_OUTPUT_BYTES,
+            End::Head,
+            &spilled,
+        ),
+        Keep::Tail => take_end(
+            &lines,
+            total_lines,
+            MAX_OUTPUT_LINES,
+            MAX_OUTPUT_BYTES,
+            End::Tail,
+            &spilled,
+        ),
         Keep::HeadAndTail => take_both_ends(&lines, total_lines, &spilled),
     }
 }
 
-/// Keep the head (`from_back = false`) or tail (`true`) of `lines` within the
-/// line/byte caps, then append a note pointing at the spill file (or advising a
-/// narrower command when the spill failed).
-fn take_end(lines: &[&str], total_lines: usize, max_lines: usize, max_bytes: usize, from_back: bool, spilled: &Option<String>) -> String {
+/// Keep one `end` of `lines` within the line/byte caps, then append a note
+/// pointing at the spill file (or advising a narrower command when the spill
+/// failed).
+fn take_end(
+    lines: &[&str],
+    total_lines: usize,
+    max_lines: usize,
+    max_bytes: usize,
+    end: End,
+    spilled: &Option<String>,
+) -> String {
     let mut chosen: Vec<&str> = Vec::new();
     let mut bytes = 0usize;
-    let ordered: Box<dyn Iterator<Item = &&str>> =
-        if from_back { Box::new(lines.iter().rev()) } else { Box::new(lines.iter()) };
+    let ordered: Box<dyn Iterator<Item = &&str>> = match end {
+        End::Tail => Box::new(lines.iter().rev()),
+        End::Head => Box::new(lines.iter()),
+    };
     for line in ordered {
         if chosen.len() >= max_lines || bytes + line.len() + 1 > max_bytes {
             break;
@@ -377,17 +460,16 @@ fn take_end(lines: &[&str], total_lines: usize, max_lines: usize, max_bytes: usi
         bytes += line.len() + 1;
         chosen.push(line);
     }
-    if from_back {
+    if end == End::Tail {
         chosen.reverse();
     }
     let omitted = total_lines.saturating_sub(chosen.len());
     let mut body = chosen.join("\n");
     body.push('\n');
     let note = truncation_note(omitted, spilled);
-    if from_back {
-        format!("{note}\n{body}")
-    } else {
-        format!("{body}{note}")
+    match end {
+        End::Tail => format!("{note}\n{body}"),
+        End::Head => format!("{body}{note}"),
     }
 }
 
@@ -416,7 +498,11 @@ fn take_both_ends(lines: &[&str], total_lines: usize, spilled: &Option<String>) 
 
 /// Take lines from `iter` until the line or byte budget is hit, preserving the
 /// iterator's order in the returned vec.
-fn collect_within<'a>(iter: impl Iterator<Item = &'a &'a str>, max_lines: usize, max_bytes: usize) -> Vec<&'a str> {
+fn collect_within<'a>(
+    iter: impl Iterator<Item = &'a &'a str>,
+    max_lines: usize,
+    max_bytes: usize,
+) -> Vec<&'a str> {
     let mut chosen = Vec::new();
     let mut bytes = 0usize;
     for line in iter {
@@ -451,7 +537,9 @@ fn middle_marker(omitted: usize, spilled: &Option<String>) -> String {
             "[… {omitted} line(s) omitted from the middle. Full output saved to {path} — \
              read it with the `read` tool (offset/limit) for the gap. …]"
         ),
-        None => format!("[… {omitted} line(s) omitted from the middle; narrow the command for the gap. …]"),
+        None => format!(
+            "[… {omitted} line(s) omitted from the middle; narrow the command for the gap. …]"
+        ),
     }
 }
 
@@ -461,7 +549,9 @@ fn middle_marker(omitted: usize, spilled: &Option<String>) -> String {
 fn spill_output(output: &str) -> Option<String> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join("openai-compatible").join("tool-output");
+    let dir = std::env::temp_dir()
+        .join("openai-compatible")
+        .join("tool-output");
     std::fs::create_dir_all(&dir).ok()?;
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -496,7 +586,8 @@ fn schema_for<T: JsonSchema>() -> Value {
 /// Deserialize a tool call's arguments into its typed params, turning a decode
 /// failure into a tool error fed back to the model (rather than killing the run).
 fn parse_args<T: DeserializeOwned>(args: &Value) -> Result<T, ToolOutcome> {
-    serde_json::from_value(args.clone()).map_err(|e| ToolOutcome::err(format!("invalid arguments: {e}")))
+    serde_json::from_value(args.clone())
+        .map_err(|e| ToolOutcome::err(format!("invalid arguments: {e}")))
 }
 
 /// OpenCode's model gate: gpt-5-class OpenAI models are offered `apply_patch`
@@ -581,12 +672,25 @@ mod tests {
     /// Run a tool through the public dispatch with a fresh (un-cancelled) context.
     fn run(name: &str, args: Value, cwd: &Path, mode: RunMode) -> ToolOutcome {
         let cancel = AtomicBool::new(false);
-        ToolSet::builtin().execute(name, &args, &ToolCtx { cwd, mode, cancel: &cancel, run_id: "t", call_id: "c", skills: &[], subagent: None, model: None })
+        ToolSet::builtin().execute(
+            name,
+            &args,
+            &ToolCtx {
+                cwd,
+                mode,
+                cancel: &cancel,
+                run_id: "t",
+                call_id: "c",
+                skills: &[],
+                subagent: None,
+                model: None,
+            },
+        )
     }
 
     fn names(mode: RunMode, model: &str) -> Vec<String> {
         ToolSet::builtin()
-            .defs(mode, model, false)
+            .defs(mode, model, AgentContext::Main)
             .iter()
             .map(|t| t["function"]["name"].as_str().unwrap().to_owned())
             .collect()
@@ -604,7 +708,17 @@ mod tests {
         let ask = names(RunMode::Ask, "qwen2.5-coder");
         let edit = names(RunMode::Edit, "qwen2.5-coder");
         // Read-only tools are offered in both modes.
-        for t in ["read", "glob", "grep", "list", "webfetch", "todowrite", "question", "skill", "summarize"] {
+        for t in [
+            "read",
+            "glob",
+            "grep",
+            "list",
+            "webfetch",
+            "todowrite",
+            "question",
+            "skill",
+            "summarize",
+        ] {
             assert!(ask.contains(&t.to_string()), "{t} offered in Ask");
             assert!(edit.contains(&t.to_string()), "{t} offered in Edit");
         }
@@ -633,7 +747,11 @@ mod tests {
         std::fs::write(dir.join("b.rs"), "y").unwrap();
         let out = run("list", json!({}), &dir, RunMode::Ask);
         assert!(out.ok, "{}", out.output);
-        assert!(out.output.contains("sub/"), "directory marked with /: {}", out.output);
+        assert!(
+            out.output.contains("sub/"),
+            "directory marked with /: {}",
+            out.output
+        );
         assert!(out.output.contains("a.txt") && out.output.contains("b.rs"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -647,7 +765,13 @@ mod tests {
 
     #[test]
     fn permission_rule_denies_matching_calls() {
-        let tools = ToolSet::new(vec![], vec![crate::openai_compatible::PermissionRule::deny_matching("bash", "rm -rf")], None);
+        let tools = ToolSet::new(
+            vec![],
+            vec![crate::openai_compatible::PermissionRule::deny_matching(
+                "bash", "rm -rf",
+            )],
+            None,
+        );
         let cancel = AtomicBool::new(false);
         let ctx = ToolCtx {
             cwd: Path::new("/tmp"),
@@ -661,7 +785,11 @@ mod tests {
         };
         // The matching command is refused *before* executing (rm never runs).
         let denied = tools.execute("bash", &json!({ "command": "rm -rf /tmp/x" }), &ctx);
-        assert!(!denied.ok && denied.output.contains("denied"), "{}", denied.output);
+        assert!(
+            !denied.ok && denied.output.contains("denied"),
+            "{}",
+            denied.output
+        );
         // A non-matching command is allowed through and runs.
         let ok = tools.execute("bash", &json!({ "command": "echo hi" }), &ctx);
         assert!(ok.ok, "{}", ok.output);
@@ -682,13 +810,38 @@ mod tests {
         };
         // Prompt denies any command mentioning "secret", allows the rest.
         let prompt: crate::openai_compatible::PermissionPrompt =
-            std::sync::Arc::new(|r: &crate::openai_compatible::PermissionRequest| !r.subject.as_deref().unwrap_or("").contains("secret"));
-        let tools = ToolSet::new(vec![], vec![crate::openai_compatible::PermissionRule::ask("bash")], Some(prompt));
-        assert!(!tools.execute("bash", &json!({ "command": "cat secret.txt" }), &ctx).ok, "secret → denied");
-        assert!(tools.execute("bash", &json!({ "command": "echo hi" }), &ctx).ok, "echo → allowed");
+            std::sync::Arc::new(|r: &crate::openai_compatible::PermissionRequest| {
+                !r.subject.as_deref().unwrap_or("").contains("secret")
+            });
+        let tools = ToolSet::new(
+            vec![],
+            vec![crate::openai_compatible::PermissionRule::ask("bash")],
+            Some(prompt),
+        );
+        assert!(
+            !tools
+                .execute("bash", &json!({ "command": "cat secret.txt" }), &ctx)
+                .ok,
+            "secret → denied"
+        );
+        assert!(
+            tools
+                .execute("bash", &json!({ "command": "echo hi" }), &ctx)
+                .ok,
+            "echo → allowed"
+        );
         // An `Ask` rule with no prompt set denies (safe default).
-        let no_prompt = ToolSet::new(vec![], vec![crate::openai_compatible::PermissionRule::ask("bash")], None);
-        assert!(!no_prompt.execute("bash", &json!({ "command": "echo hi" }), &ctx).ok, "no prompt → denied");
+        let no_prompt = ToolSet::new(
+            vec![],
+            vec![crate::openai_compatible::PermissionRule::ask("bash")],
+            None,
+        );
+        assert!(
+            !no_prompt
+                .execute("bash", &json!({ "command": "echo hi" }), &ctx)
+                .ok,
+            "no prompt → denied"
+        );
     }
 
     #[test]
@@ -704,8 +857,11 @@ mod tests {
 
     #[test]
     fn schemas_are_typed_and_normalized() {
-        let defs = ToolSet::builtin().defs(RunMode::Edit, "qwen2.5-coder", false);
-        let read = defs.iter().find(|d| d["function"]["name"] == "read").unwrap();
+        let defs = ToolSet::builtin().defs(RunMode::Edit, "qwen2.5-coder", AgentContext::Main);
+        let read = defs
+            .iter()
+            .find(|d| d["function"]["name"] == "read")
+            .unwrap();
         let params = &read["function"]["parameters"];
         // schemars metadata is stripped — just the schema the model needs.
         assert!(params.get("$schema").is_none());
@@ -717,17 +873,31 @@ mod tests {
         assert!(params["properties"]["offset"].is_object());
         let required = params["required"].as_array().unwrap();
         assert!(required.iter().any(|r| r == "path"), "path is required");
-        assert!(!required.iter().any(|r| r == "offset"), "Option field is not required");
+        assert!(
+            !required.iter().any(|r| r == "offset"),
+            "Option field is not required"
+        );
         // Field descriptions come from the struct's doc comments.
-        let desc = params["properties"]["path"]["description"].as_str().unwrap_or("");
-        assert!(desc.contains("relative"), "doc-comment description carried through: {desc:?}");
+        let desc = params["properties"]["path"]["description"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            desc.contains("relative"),
+            "doc-comment description carried through: {desc:?}"
+        );
     }
 
     #[test]
     fn safe_join_refuses_traversal_and_absolute() {
         let cwd = Path::new("/work");
-        assert_eq!(safe_join(cwd, "a/b.txt"), Some(PathBuf::from("/work/a/b.txt")));
-        assert_eq!(safe_join(cwd, "./a.txt"), Some(PathBuf::from("/work/a.txt")));
+        assert_eq!(
+            safe_join(cwd, "a/b.txt"),
+            Some(PathBuf::from("/work/a/b.txt"))
+        );
+        assert_eq!(
+            safe_join(cwd, "./a.txt"),
+            Some(PathBuf::from("/work/a.txt"))
+        );
         assert_eq!(safe_join(cwd, "../escape"), None);
         assert_eq!(safe_join(cwd, "a/../../escape"), None);
         assert_eq!(safe_join(cwd, "/etc/passwd"), None);
@@ -737,7 +907,12 @@ mod tests {
     fn read_is_line_numbered_with_offset_and_limit() {
         let dir = scratch("read");
         std::fs::write(dir.join("f.txt"), "alpha\nbravo\ncharlie\ndelta\n").unwrap();
-        let out = run("read", json!({ "path": "f.txt", "offset": 2, "limit": 2 }), &dir, RunMode::Ask);
+        let out = run(
+            "read",
+            json!({ "path": "f.txt", "offset": 2, "limit": 2 }),
+            &dir,
+            RunMode::Ask,
+        );
         assert!(out.ok);
         assert!(out.output.contains("2: bravo"));
         assert!(out.output.contains("3: charlie"));
@@ -751,13 +926,28 @@ mod tests {
         let dir = scratch("edit");
         let f = dir.join("c.txt");
         std::fs::write(&f, "x = 1\nx = 1\n").unwrap();
-        let amb = run("edit", json!({ "path": "c.txt", "old_string": "x = 1", "new_string": "x = 2" }), &dir, RunMode::Edit);
+        let amb = run(
+            "edit",
+            json!({ "path": "c.txt", "old_string": "x = 1", "new_string": "x = 2" }),
+            &dir,
+            RunMode::Edit,
+        );
         assert!(!amb.ok);
         assert!(amb.output.contains("not unique"));
-        let all = run("edit", json!({ "path": "c.txt", "old_string": "x = 1", "new_string": "x = 2", "replace_all": true }), &dir, RunMode::Edit);
+        let all = run(
+            "edit",
+            json!({ "path": "c.txt", "old_string": "x = 1", "new_string": "x = 2", "replace_all": true }),
+            &dir,
+            RunMode::Edit,
+        );
         assert!(all.ok, "{}", all.output);
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "x = 2\nx = 2\n");
-        let miss = run("edit", json!({ "path": "c.txt", "old_string": "nope", "new_string": "y" }), &dir, RunMode::Edit);
+        let miss = run(
+            "edit",
+            json!({ "path": "c.txt", "old_string": "nope", "new_string": "y" }),
+            &dir,
+            RunMode::Edit,
+        );
         assert!(!miss.ok);
         assert!(miss.output.contains("not found"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -776,7 +966,10 @@ mod tests {
         );
         assert!(out.ok, "{}", out.output);
         assert!(out.output.contains("whitespace-tolerant"));
-        assert_eq!(std::fs::read_to_string(&f).unwrap(), "fn main() {\n    let x = 2;\n}\n");
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "fn main() {\n    let x = 2;\n}\n"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -784,17 +977,30 @@ mod tests {
     fn bash_runs_reports_exit_and_times_out() {
         use std::time::{Duration, Instant};
         let dir = scratch("bash");
-        let ok = run("bash", json!({ "command": "printf hi" }), &dir, RunMode::Edit);
+        let ok = run(
+            "bash",
+            json!({ "command": "printf hi" }),
+            &dir,
+            RunMode::Edit,
+        );
         assert!(ok.ok, "{}", ok.output);
         assert_eq!(ok.output, "hi");
         let bad = run("bash", json!({ "command": "exit 3" }), &dir, RunMode::Edit);
         assert!(!bad.ok);
         assert!(bad.output.contains("exit 3"));
         let started = Instant::now();
-        let slow = run("bash", json!({ "command": "sleep 5", "timeout": 150 }), &dir, RunMode::Edit);
+        let slow = run(
+            "bash",
+            json!({ "command": "sleep 5", "timeout": 150 }),
+            &dir,
+            RunMode::Edit,
+        );
         assert!(!slow.ok);
         assert!(slow.output.contains("timed out"));
-        assert!(started.elapsed() < Duration::from_secs(2), "should not have waited for the full sleep");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "should not have waited for the full sleep"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -802,7 +1008,20 @@ mod tests {
     fn bash_honors_cancel() {
         let dir = scratch("bash-cancel");
         let cancel = AtomicBool::new(true); // already cancelled
-        let out = ToolSet::builtin().execute("bash", &json!({ "command": "sleep 5" }), &ToolCtx { cwd: &dir, mode: RunMode::Edit, cancel: &cancel, run_id: "t", call_id: "c", skills: &[], subagent: None, model: None });
+        let out = ToolSet::builtin().execute(
+            "bash",
+            &json!({ "command": "sleep 5" }),
+            &ToolCtx {
+                cwd: &dir,
+                mode: RunMode::Edit,
+                cancel: &cancel,
+                run_id: "t",
+                call_id: "c",
+                skills: &[],
+                subagent: None,
+                model: None,
+            },
+        );
         assert!(!out.ok);
         assert!(out.output.contains("cancelled"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -831,7 +1050,12 @@ mod tests {
         let dir = scratch("grep");
         std::fs::write(dir.join("a.rs"), "fn foo() {}\nfn bar() {}\n").unwrap();
         std::fs::write(dir.join("b.txt"), "fn foo() {}\n").unwrap();
-        let out = run("grep", json!({ "pattern": "fn \\w+", "include": "*.rs" }), &dir, RunMode::Ask);
+        let out = run(
+            "grep",
+            json!({ "pattern": "fn \\w+", "include": "*.rs" }),
+            &dir,
+            RunMode::Ask,
+        );
         assert!(out.ok, "{}", out.output);
         assert!(out.output.contains("a.rs:1: fn foo"));
         assert!(out.output.contains("a.rs:2: fn bar"));
@@ -839,7 +1063,12 @@ mod tests {
         let none = run("grep", json!({ "pattern": "zzzznope" }), &dir, RunMode::Ask);
         assert!(none.ok);
         assert!(none.output.contains("no matches"));
-        let bad = run("grep", json!({ "pattern": "[unclosed" }), &dir, RunMode::Ask);
+        let bad = run(
+            "grep",
+            json!({ "pattern": "[unclosed" }),
+            &dir,
+            RunMode::Ask,
+        );
         assert!(!bad.ok);
         assert!(bad.output.contains("invalid regex"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -884,14 +1113,21 @@ mod tests {
         assert!(out.ok, "{}", out.output);
         assert!(out.stop, "question ends the run to await the answer");
         assert!(
-            out.events.iter().any(|e| matches!(e, RunEvent::AskQuestion { .. })),
+            out.events
+                .iter()
+                .any(|e| matches!(e, RunEvent::AskQuestion { .. })),
             "emits AskQuestion"
         );
     }
 
     #[test]
     fn webfetch_rejects_a_non_http_url() {
-        let out = run("webfetch", json!({ "url": "ftp://example.com/x" }), Path::new("/tmp"), RunMode::Ask);
+        let out = run(
+            "webfetch",
+            json!({ "url": "ftp://example.com/x" }),
+            Path::new("/tmp"),
+            RunMode::Ask,
+        );
         assert!(!out.ok);
         assert!(out.output.contains("valid http"));
     }
@@ -899,13 +1135,22 @@ mod tests {
     #[test]
     fn apply_patch_swaps_with_edit_write_for_gpt5() {
         let gpt5 = names(RunMode::Edit, "gpt-5");
-        assert!(gpt5.contains(&"apply_patch".to_string()), "gpt-5 gets apply_patch");
+        assert!(
+            gpt5.contains(&"apply_patch".to_string()),
+            "gpt-5 gets apply_patch"
+        );
         assert!(!gpt5.contains(&"edit".to_string()), "edit hidden for gpt-5");
-        assert!(!gpt5.contains(&"write".to_string()), "write hidden for gpt-5");
+        assert!(
+            !gpt5.contains(&"write".to_string()),
+            "write hidden for gpt-5"
+        );
         // gpt-4 and `oss` are excluded from the swap; local models too.
         for m in ["gpt-4o", "qwen2.5-coder", "gpt-oss"] {
             let offered = names(RunMode::Edit, m);
-            assert!(!offered.contains(&"apply_patch".to_string()), "{m} does not get apply_patch");
+            assert!(
+                !offered.contains(&"apply_patch".to_string()),
+                "{m} does not get apply_patch"
+            );
             assert!(offered.contains(&"edit".to_string()), "{m} keeps edit");
         }
     }
@@ -932,10 +1177,21 @@ mod tests {
             "*** End Patch",
         ]
         .join("\n");
-        let out = run("apply_patch", json!({ "patchText": patch }), &dir, RunMode::Edit);
+        let out = run(
+            "apply_patch",
+            json!({ "patchText": patch }),
+            &dir,
+            RunMode::Edit,
+        );
         assert!(out.ok, "{}", out.output);
-        assert_eq!(std::fs::read_to_string(dir.join("new.txt")).unwrap(), "hello\nworld\n");
-        assert_eq!(std::fs::read_to_string(dir.join("keep.txt")).unwrap(), "alpha\nBETA\ngamma\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("new.txt")).unwrap(),
+            "hello\nworld\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("keep.txt")).unwrap(),
+            "alpha\nBETA\ngamma\n"
+        );
         assert!(!dir.join("gone.txt").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -949,14 +1205,26 @@ mod tests {
             description: Some("how to deploy".into()),
             body: "Run the deploy script.".into(),
         }];
-        let ctx =
-            ToolCtx { cwd: Path::new("/tmp"), mode: RunMode::Ask, cancel: &cancel, run_id: "t", call_id: "c", skills: &skills, subagent: None, model: None };
+        let ctx = ToolCtx {
+            cwd: Path::new("/tmp"),
+            mode: RunMode::Ask,
+            cancel: &cancel,
+            run_id: "t",
+            call_id: "c",
+            skills: &skills,
+            subagent: None,
+            model: None,
+        };
         let out = ToolSet::builtin().execute("skill", &json!({ "name": "deploy" }), &ctx);
         assert!(out.ok, "{}", out.output);
         assert!(out.output.contains("Run the deploy script."));
         let miss = ToolSet::builtin().execute("skill", &json!({ "name": "nope" }), &ctx);
         assert!(!miss.ok);
-        assert!(miss.output.contains("deploy"), "lists available: {}", miss.output);
+        assert!(
+            miss.output.contains("deploy"),
+            "lists available: {}",
+            miss.output
+        );
     }
 
     #[test]
@@ -967,13 +1235,19 @@ mod tests {
         // …but a subagent's set omits them (no nesting, no user to answer)
         // while keeping the file/shell tools.
         let sub: Vec<String> = ToolSet::builtin()
-            .defs(RunMode::Edit, "qwen2.5-coder", true)
+            .defs(RunMode::Edit, "qwen2.5-coder", AgentContext::Subagent)
             .iter()
             .map(|t| t["function"]["name"].as_str().unwrap().to_owned())
             .collect();
         assert!(!sub.contains(&"task".to_string()), "no nested task");
-        assert!(!sub.contains(&"question".to_string()), "no question in a subagent");
-        assert!(sub.contains(&"read".to_string()) && sub.contains(&"edit".to_string()), "keeps file tools");
+        assert!(
+            !sub.contains(&"question".to_string()),
+            "no question in a subagent"
+        );
+        assert!(
+            sub.contains(&"read".to_string()) && sub.contains(&"edit".to_string()),
+            "keeps file tools"
+        );
     }
 
     #[test]
@@ -1002,13 +1276,24 @@ mod tests {
             subagent: Some(&echo),
             model: None,
         };
-        let out = ToolSet::builtin().execute("task", &json!({ "description": "do it", "prompt": "the work" }), &ctx);
+        let out = ToolSet::builtin().execute(
+            "task",
+            &json!({ "description": "do it", "prompt": "the work" }),
+            &ctx,
+        );
         assert!(out.ok, "{}", out.output);
         assert!(out.output.contains("did: the work"));
 
         // Without a runner (e.g. inside a subagent), task refuses.
-        let ctx2 = ToolCtx { subagent: None, ..ctx };
-        let no = ToolSet::builtin().execute("task", &json!({ "description": "x", "prompt": "y" }), &ctx2);
+        let ctx2 = ToolCtx {
+            subagent: None,
+            ..ctx
+        };
+        let no = ToolSet::builtin().execute(
+            "task",
+            &json!({ "description": "x", "prompt": "y" }),
+            &ctx2,
+        );
         assert!(!no.ok);
         assert!(no.output.contains("not available"));
     }
@@ -1028,21 +1313,35 @@ mod tests {
             "*** End Patch",
         ]
         .join("\n");
-        let out = run("apply_patch", json!({ "patchText": patch }), &dir, RunMode::Edit);
+        let out = run(
+            "apply_patch",
+            json!({ "patchText": patch }),
+            &dir,
+            RunMode::Edit,
+        );
         assert!(out.ok, "{}", out.output);
-        assert_eq!(std::fs::read_to_string(dir.join("f.rs")).unwrap(), "fn main() {\n    let x = 2;\n}\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.rs")).unwrap(),
+            "fn main() {\n    let x = 2;\n}\n"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn long_tool_output_is_truncated_to_the_head() {
         // Short output is untouched (regardless of direction).
-        assert_eq!(truncate_output("a\nb\nc".to_string(), Keep::Head), "a\nb\nc");
+        assert_eq!(
+            truncate_output("a\nb\nc".to_string(), Keep::Head),
+            "a\nb\nc"
+        );
         // Past the line cap → trimmed to the head + a note.
         let big: String = (0..5000).map(|i| format!("line {i}\n")).collect();
         let out = truncate_output(big, Keep::Head);
         assert!(out.contains("truncated"), "has a truncation note");
-        assert!(out.lines().count() <= MAX_OUTPUT_LINES + 2, "trimmed near the line cap");
+        assert!(
+            out.lines().count() <= MAX_OUTPUT_LINES + 2,
+            "trimmed near the line cap"
+        );
         assert!(out.starts_with("line 0\n"), "keeps the head");
         assert!(!out.contains("line 4999"), "drops the tail");
     }
@@ -1053,8 +1352,15 @@ mod tests {
         let big: String = (0..5000).map(|i| format!("line {i}\n")).collect();
         let out = truncate_output(big, Keep::Tail);
         assert!(out.contains("truncated"), "has a truncation note");
-        assert!(out.lines().count() <= MAX_OUTPUT_LINES + 2, "trimmed near the line cap");
-        assert!(out.trim_end().ends_with("line 4999"), "keeps the tail: {:?}", &out[out.len().saturating_sub(40)..]);
+        assert!(
+            out.lines().count() <= MAX_OUTPUT_LINES + 2,
+            "trimmed near the line cap"
+        );
+        assert!(
+            out.trim_end().ends_with("line 4999"),
+            "keeps the tail: {:?}",
+            &out[out.len().saturating_sub(40)..]
+        );
         assert!(!out.contains("line 0\n"), "drops the head");
     }
 
@@ -1066,10 +1372,20 @@ mod tests {
         big.push_str("error: command failed\n(exit 1)\n");
         let out = truncate_output(big, Keep::HeadAndTail);
         assert!(out.contains("info line 0"), "keeps the head");
-        assert!(out.contains("error: command failed") && out.contains("(exit 1)"), "keeps the trailing diagnostic: {:?}", &out[out.len().saturating_sub(60)..]);
-        assert!(out.contains("omitted from the middle"), "marks the gap in the middle");
+        assert!(
+            out.contains("error: command failed") && out.contains("(exit 1)"),
+            "keeps the trailing diagnostic: {:?}",
+            &out[out.len().saturating_sub(60)..]
+        );
+        assert!(
+            out.contains("omitted from the middle"),
+            "marks the gap in the middle"
+        );
         assert!(!out.contains("info line 2500"), "the middle is dropped");
-        assert!(out.lines().count() <= MAX_OUTPUT_LINES + 3, "within the line budget (+ marker)");
+        assert!(
+            out.lines().count() <= MAX_OUTPUT_LINES + 3,
+            "within the line budget (+ marker)"
+        );
     }
 
     #[test]
@@ -1080,9 +1396,15 @@ mod tests {
         let cmd = "for i in $(seq 1 5000); do echo info line $i; done; echo 'BOOM the real error'; exit 7";
         let out = run("bash", json!({ "command": cmd }), &dir, RunMode::Edit);
         assert!(!out.ok, "non-zero exit is an error");
-        assert!(out.output.contains("BOOM the real error"), "the trailing error survives truncation");
+        assert!(
+            out.output.contains("BOOM the real error"),
+            "the trailing error survives truncation"
+        );
         assert!(out.output.contains("exit 7"), "the exit framing survives");
-        assert!(out.output.contains("omitted from the middle"), "middle elided, ends kept");
+        assert!(
+            out.output.contains("omitted from the middle"),
+            "middle elided, ends kept"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1092,7 +1414,12 @@ mod tests {
         let f = dir.join("abs.txt");
         std::fs::write(&f, "absolute content\n").unwrap();
         // cwd is unrelated to the file — read still finds it by absolute path.
-        let out = run("read", json!({ "path": f.to_str().unwrap() }), Path::new("/nonexistent-cwd"), RunMode::Ask);
+        let out = run(
+            "read",
+            json!({ "path": f.to_str().unwrap() }),
+            Path::new("/nonexistent-cwd"),
+            RunMode::Ask,
+        );
         assert!(out.ok, "{}", out.output);
         assert!(out.output.contains("absolute content"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1111,14 +1438,29 @@ mod tests {
         assert!(out.ok, "{}", out.output);
         // Trimmed to roughly the byte cap (+ one line + footer), far below the
         // ~1.5 MB the line cap alone would have let through.
-        assert!(out.output.len() <= MAX_OUTPUT_BYTES + 2 * 1024, "stays near the byte cap: {} bytes", out.output.len());
-        assert!(out.output.contains("output capped at"), "byte-cap footer: {}", &out.output[out.output.len().saturating_sub(120)..]);
-        assert!(out.output.contains("offset="), "tells the model how to page on");
+        assert!(
+            out.output.len() <= MAX_OUTPUT_BYTES + 2 * 1024,
+            "stays near the byte cap: {} bytes",
+            out.output.len()
+        );
+        assert!(
+            out.output.contains("output capped at"),
+            "byte-cap footer: {}",
+            &out.output[out.output.len().saturating_sub(120)..]
+        );
+        assert!(
+            out.output.contains("offset="),
+            "tells the model how to page on"
+        );
         // A single line that alone exceeds the budget still makes progress (it's
         // char-truncated, then emitted — the loop never stalls empty).
         std::fs::write(&f, format!("{}\n", "y".repeat(60 * 1024))).unwrap();
         let one = run("read", json!({ "path": "wide.txt" }), &dir, RunMode::Ask);
-        assert!(one.ok && one.output.starts_with("1: yyy"), "emits the one huge line: {}", &one.output[..40.min(one.output.len())]);
+        assert!(
+            one.ok && one.output.starts_with("1: yyy"),
+            "emits the one huge line: {}",
+            &one.output[..40.min(one.output.len())]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
