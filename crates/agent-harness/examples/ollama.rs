@@ -1,9 +1,13 @@
-//! Drive an **OpenAI-compatible / local model** with the built-in runtime
-//! ([`OpenHarness`], the `openai-compatible` feature) — it *owns* the agent loop
-//! and tool surface, no external CLI to wrap, and emits the same [`RunEvent`]s.
+//! **Ollama** — a local model on the built-in runtime ([`OpenHarness`], the
+//! `openai-compatible` feature). There is no CLI to wrap here: this crate owns
+//! the agent loop and the tool surface, and emits the same [`RunEvent`]s.
+//!
+//! Ollama is the one provider with a native path. It uses `/api/*` rather than
+//! `/v1`, so the context window is set correctly and models can be pulled.
+//! Every other provider is plain configuration — see `openrouter.rs`.
 //!
 //! ```text
-//! cargo run --example run_openai --features openai-compatible
+//! cargo run --example ollama --features openai-compatible
 //! # needs `ollama serve` and at least one pulled model
 //! # pick one explicitly with OLLAMA_MODEL=llama3.2:1b
 //! ```

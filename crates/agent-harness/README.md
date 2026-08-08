@@ -163,22 +163,24 @@ The subprocess engine is a separate crate:
 
 ## Examples
 
-Run with `cargo run --example <name>`.
+One per harness. Run with `cargo run --example <name>`.
 
-| example | what it shows | features |
+| example | harness | features |
 |---|---|---|
-| `run_prompt` | Claude Code | default |
-| `run_acp` | an ACP agent (`opencode`) | `acp` |
-| `run_openai` | an open or local model | `openai-compatible` |
+| `claude` | Claude Code | default |
+| `codex` | OpenAI Codex | default |
+| `acp` | OpenCode over ACP | `acp` |
+| `gemini` | Gemini CLI over ACP | `acp` |
+| `ollama` | a local model on Ollama | `openai-compatible` |
+| `openrouter` | a hosted model on OpenRouter | `openai-compatible models-dev` |
+| `llama_cpp` | a local `llama-server` | `openai-compatible` |
+| `tool_call` | the agent loop calling tools and reading the results | `openai-compatible` |
 | `setup` | readiness, install hints, and sign-in | default |
 | `custom_harness` | your own agent | default |
 | `playground` | a browser UI that streams a live run over SSE | `openai-compatible acp` |
 
-## Status
-
-In active development. The API can still change. See the
-[changelog](https://github.com/getlatentic/agent-harness/blob/main/CHANGELOG.md)
-for breaking changes and how to migrate.
+`claude` and `codex` differ by one line. `ollama`, `openrouter`, and
+`llama_cpp` differ only in configuration — no provider has its own adapter.
 
 ## License
 

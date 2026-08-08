@@ -3,17 +3,14 @@
 //! harness — agent-harness spawns the agent and relays its session.
 //!
 //! ```text
-//! cargo run --example run_acp --features acp   # needs `opencode` on PATH
+//! cargo run --example acp --features acp   # needs `opencode` on PATH
 //! ```
 
 use harness::{AcpHarness, Harness, HarnessError, RunEvent, RunMode, RunRequest, RunTuning};
 
 fn main() -> Result<(), HarnessError> {
     // OpenCode over ACP — spawns `opencode acp` and relays its session stream.
-    // Point at any other ACP agent with `AcpHarness::custom`, e.g.:
-    //   AcpHarness::custom(AcpHarnessConfig { id: "gemini".into(),
-    //       display_name: "Gemini".into(), command: "gemini".into(),
-    //       args: vec!["--experimental-acp".into()] })
+    // Any other ACP agent works the same way — see `gemini.rs`.
     let agent = AcpHarness::opencode();
 
     let (_handle, rx) = agent.run_channel(RunRequest {

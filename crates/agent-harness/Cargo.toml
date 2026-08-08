@@ -81,14 +81,35 @@ tiny_http = "0.12"
 name = "playground"
 required-features = ["openai-compatible", "acp"]
 
-# `run_acp` drives an ACP agent (opencode); `run_openai` drives an
-# OpenAI-compatible / local model — each needs its adapter's feature.
+# One example per harness. The default-feature ones (claude, codex, setup,
+# custom_harness) need no entry; these do, because they only build with their
+# adapter's feature enabled.
+
+# ACP agents.
 [[example]]
-name = "run_acp"
+name = "acp"
 required-features = ["acp"]
 
 [[example]]
-name = "run_openai"
+name = "gemini"
+required-features = ["acp"]
+
+# The built-in runtime, one entry per provider. They differ only in
+# configuration — that is the point of having them side by side.
+[[example]]
+name = "ollama"
+required-features = ["openai-compatible"]
+
+[[example]]
+name = "openrouter"
+required-features = ["openai-compatible", "models-dev"]
+
+[[example]]
+name = "llama_cpp"
+required-features = ["openai-compatible"]
+
+[[example]]
+name = "tool_call"
 required-features = ["openai-compatible"]
 
 # cargo-release stamps the single shared workspace CHANGELOG here — on the last

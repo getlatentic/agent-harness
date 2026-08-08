@@ -52,7 +52,17 @@ for event in events {
 ```
 
 To use Codex, an ACP agent, or a local model, change the constructor. The loop
-does not change.
+does not change. There is a runnable example for each:
+
+```sh
+cargo run --example claude       # Claude Code
+cargo run --example codex        # OpenAI Codex
+cargo run --example acp      --features acp                 # OpenCode
+cargo run --example gemini   --features acp                 # Gemini CLI
+cargo run --example ollama   --features openai-compatible   # a local model
+cargo run --example llama_cpp --features openai-compatible  # llama-server
+cargo run --example tool_call --features openai-compatible  # tools, end to end
+```
 
 Full documentation, features, and provider setup:
 **[`crates/agent-harness`](crates/agent-harness)** ·
