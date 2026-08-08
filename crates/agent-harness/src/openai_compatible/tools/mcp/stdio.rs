@@ -6,7 +6,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
@@ -47,7 +47,7 @@ impl StdioConnection {
         env: &[(String, String)],
         cwd: &Path,
     ) -> Result<StdioConnection, String> {
-        let mut child = Command::new(command)
+        let mut child = crate::hidden_command(command)
             .args(args)
             .envs(env.iter().map(|(k, v)| (k.clone(), v.clone())))
             .current_dir(cwd)

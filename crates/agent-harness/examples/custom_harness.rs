@@ -23,7 +23,7 @@ use std::sync::{mpsc::sync_channel, Arc, Mutex};
 
 use harness::{
     run_events_from_parsed, spawn_streaming, CredentialSpec, Harness, HarnessCapabilities,
-    HarnessError, HarnessInfo, HarnessReadiness, InstallCallback, ParsedLine, ProcessEvent,
+    HarnessError, HarnessInfo, HarnessReadiness, ParsedLine, ProcessEvent,
     RunCallback, RunEvent, RunHandle, RunMode, RunRequest, RunTuning, Registry, SessionInfo,
 };
 use serde_json::Value;
@@ -41,7 +41,7 @@ impl Harness for EchoHarness {
             display_name: "Echo".to_owned(),
             description: "A toy harness that echoes the prompt — a template for your own."
                 .to_owned(),
-            requires_install: false,
+            install_hint: None,
             capabilities: HarnessCapabilities {
                 credential_required: false,
                 previews_edits: false,
@@ -65,10 +65,6 @@ impl Harness for EchoHarness {
             error: None,
             details: Value::Null,
         }
-    }
-
-    fn install(&self, _on_event: InstallCallback) -> Result<(), HarnessError> {
-        Ok(()) // nothing to install
     }
 
     fn credential(&self) -> CredentialSpec {

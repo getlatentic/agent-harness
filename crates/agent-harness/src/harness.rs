@@ -443,6 +443,32 @@ pub struct HarnessCapabilities {
     pub supports_custom_instructions: bool,
 }
 
+/// Where a user gets a harness that isn't on the machine yet.
+///
+/// This crate discovers and runs agents; it never installs them. A harness
+/// that depends on an external CLI says so here and the host renders it, so
+/// "not installed" is a next step rather than a dead end.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallHint {
+    /// Where to get it. Always present — every agent has a home page, while
+    /// only some have a one-liner that works on every platform.
+    pub url: String,
+    /// A copy-pasteable command, when one exists for every supported platform.
+    pub command: Option<String>,
+}
+
+impl InstallHint {
+    pub fn url(url: impl Into<String>) -> Self {
+        Self { url: url.into(), command: None }
+    }
+
+    pub fn with_command(mut self, command: impl Into<String>) -> Self {
+        self.command = Some(command.into());
+        self
+    }
+}
+
 /// Static metadata for the harness picker.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -450,8 +476,9 @@ pub struct HarnessInfo {
     pub id: String,
     pub display_name: String,
     pub description: String,
-    /// True if the harness needs a one-time [`Harness::install`].
-    pub requires_install: bool,
+    /// How the user installs this harness themselves. `None` when there is
+    /// nothing to install — a hosted endpoint, or an agent they already supply.
+    pub install_hint: Option<InstallHint>,
     /// Declarative capabilities — what the harness supports, so the UI
     /// and run-gating never special-case its id.
     pub capabilities: HarnessCapabilities,
@@ -469,10 +496,6 @@ pub trait Harness: Send + Sync {
     /// Probe availability / version / auth. May shell out; callers
     /// should treat it as blocking and run it off the UI thread.
     fn readiness(&self) -> HarnessReadiness;
-
-    /// Stream a one-time install. Harnesses that need no install
-    /// (e.g. a hosted-API adapter) return `Ok(())` immediately.
-    fn install(&self, on_event: InstallCallback) -> Result<(), HarnessError>;
 
     /// Start a run, streaming events through `on_event`. Returns a
     /// handle immediately; work continues on background threads.
@@ -540,11 +563,11 @@ pub trait Harness: Send + Sync {
     }
 
     /// Trigger the harness's own interactive sign-in (its CLI's OAuth),
-    /// streaming progress as [`InstallEvent`]s — the same subprocess
-    /// stream shape as [`install`](Harness::install). The flow opens the
-    /// user's browser; this blocks until the login process exits, then
-    /// `Done { ok }` reports success. Default: unsupported — harnesses
-    /// that Compose authenticates itself (bob, via its API key) keep it.
+    /// streaming progress as [`InstallEvent`]s. The flow opens the user's
+    /// browser; this blocks until the login process exits, then
+    /// `Done { ok }` reports success. This is the agent authenticating
+    /// itself — distinct from installing it, which the host's user does.
+    /// Default: unsupported, for harnesses the host authenticates by key.
     fn login(&self, _on_event: InstallCallback) -> Result<(), HarnessError> {
         Err(HarnessError::login(
             "This harness does not support interactive sign-in.",
@@ -770,9 +793,6 @@ mod tests {
         }
         fn readiness(&self) -> HarnessReadiness {
             unreachable!("not exercised by run_channel")
-        }
-        fn install(&self, _on_event: InstallCallback) -> Result<(), HarnessError> {
-            Ok(())
         }
         fn run(
             &self,

@@ -12,17 +12,16 @@
 //!
 //! The stdout wire format and its decode — including the stateful
 //! [`CodexStreamParser`] that resolves codex's preamble-vs-answer
-//! ambiguity — live in [`parser`].
+//! ambiguity — live in `parser`.
 
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
 use crate::{
-    spawn_streaming, CredentialSpec, Harness, HarnessCapabilities, HarnessError, HarnessInfo,
-    HarnessModel, HarnessReadiness, InstallCallback, InstallEvent, RunCallback, RunHandle, RunMode,
+    spawn_streaming, CredentialSpec, Harness, HarnessCapabilities, HarnessError, HarnessInfo, InstallHint,
+    HarnessModel, HarnessReadiness, InstallCallback, RunCallback, RunHandle, RunMode,
     RunRequest, RunTuning,
 };
 
@@ -48,7 +47,10 @@ impl Harness for CodexHarness {
             id: CODEX_HARNESS_ID.to_owned(),
             display_name: "Codex".to_owned(),
             description: "OpenAI's Codex agent CLI. Uses your existing Codex login.".to_owned(),
-            requires_install: true,
+            install_hint: Some(
+                InstallHint::url("https://developers.openai.com/codex")
+                    .with_command("npm install -g @openai/codex"),
+            ),
             capabilities: HarnessCapabilities {
                 // Codex owns its own login and edits files directly.
                 // Model names change often, so allow free-text entry
@@ -109,32 +111,6 @@ impl Harness for CodexHarness {
             },
             details: codex_resolved_details(),
         }
-    }
-
-    fn install(&self, on_event: InstallCallback) -> Result<(), HarnessError> {
-        (*on_event)(InstallEvent::Step {
-            text: "Installing Codex via npm…".to_owned(),
-        });
-        let output = Command::new("npm")
-            .args(["install", "-g", "@openai/codex"])
-            .env("PATH", crate::augmented_node_path())
-            .output()
-            .map_err(|e| HarnessError::install(format!("failed to run npm: {e}")))?;
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            (*on_event)(InstallEvent::Stdout {
-                text: line.to_owned(),
-            });
-        }
-        for line in String::from_utf8_lossy(&output.stderr).lines() {
-            (*on_event)(InstallEvent::Stderr {
-                text: line.to_owned(),
-            });
-        }
-        (*on_event)(InstallEvent::Done {
-            exit_code: output.status.code(),
-            ok: output.status.success(),
-        });
-        Ok(())
     }
 
     fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
@@ -219,7 +195,7 @@ fn probe_version(program: &str) -> Option<String> {
     // Augment PATH so a packaged `.app` (minimal launchd PATH) can find a
     // CLI installed via nvm / Homebrew / official installer — otherwise an
     // installed CLI is mis-reported as "not installed".
-    let output = Command::new(program)
+    let output = crate::hidden_command(program)
         .arg("--version")
         .env("PATH", crate::augmented_node_path())
         .output()
@@ -239,7 +215,7 @@ fn probe_version(program: &str) -> Option<String> {
 /// Lets [`CodexHarness::readiness`] distinguish installed from signed-in
 /// (so the picker can offer "Sign in").
 fn probe_codex_signed_in() -> bool {
-    Command::new("codex")
+    crate::hidden_command("codex")
         .args(["login", "status"])
         .env("PATH", crate::augmented_node_path())
         .output()
@@ -316,7 +292,8 @@ mod tests {
     fn codex_info_and_credential() {
         let h = CodexHarness::new();
         assert_eq!(h.info().id, CODEX_HARNESS_ID);
-        assert!(h.info().requires_install);
+        let hint = h.info().install_hint.expect("Codex is a CLI the user installs");
+        assert_eq!(hint.command.as_deref(), Some("npm install -g @openai/codex"));
         assert!(!h.credential().required);
     }
 

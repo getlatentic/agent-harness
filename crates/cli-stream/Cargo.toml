@@ -2,7 +2,7 @@
 name = "cli-stream"
 # Versioned independently of agent-harness (not the workspace lockstep): this
 # foundational engine is stable + upstream, so it bumps only when it changes.
-version = "0.3.6"
+version = "0.3.7"
 edition.workspace = true
 rust-version.workspace = true
 description = "Generic streaming subprocess engine: spawn a CLI, stream its stdout/stderr lines, cancel it (SIGTERM→SIGKILL), with PATH augmentation so packaged apps find node/CLIs."

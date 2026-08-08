@@ -2,7 +2,7 @@
 //! [`crate::RunEvent`] vocabulary, via [`parse_claude_line`].
 //!
 //! Wire format reference (verified against the official headless docs,
-//! https://code.claude.com/docs/en/headless): with `--output-format
+//! <https://code.claude.com/docs/en/headless>): with `--output-format
 //! stream-json --verbose --include-partial-messages`, streamed text arrives as
 //! `stream_event` lines whose `event.delta.type == "text_delta"`; reasoning as
 //! `thinking_delta`. A tool call starts as `content_block_start` with a

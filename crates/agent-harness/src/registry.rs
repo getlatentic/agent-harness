@@ -4,7 +4,7 @@
 //! adapters for hosts that just want "all of them".
 //!
 //! This is the extensibility seam: a third party adds a provider by
-//! implementing [`Harness`](crate::Harness) in their own crate and calling
+//! implementing [`Harness`] in their own crate and calling
 //! [`Registry::register`] — no fork of this crate required.
 
 use crate::{Harness, HarnessInfo, HarnessReadiness};
@@ -131,7 +131,7 @@ pub fn harness_catalog() -> Vec<HarnessInfo> {
 mod tests {
     use super::*;
     use crate::{
-        CredentialSpec, HarnessCapabilities, HarnessReadiness, InstallCallback, RunCallback,
+        CredentialSpec, HarnessCapabilities, HarnessReadiness, RunCallback,
         RunHandle, RunRequest,
     };
 
@@ -173,7 +173,7 @@ mod tests {
                 id: "acme".to_owned(),
                 display_name: "Acme".to_owned(),
                 description: "A custom third-party harness.".to_owned(),
-                requires_install: false,
+                install_hint: None,
                 capabilities: HarnessCapabilities {
                     credential_required: false,
                     previews_edits: false,
@@ -196,9 +196,6 @@ mod tests {
                 error: None,
                 details: serde_json::Value::Null,
             }
-        }
-        fn install(&self, _on_event: InstallCallback) -> Result<(), crate::HarnessError> {
-            Ok(())
         }
         fn run(
             &self,

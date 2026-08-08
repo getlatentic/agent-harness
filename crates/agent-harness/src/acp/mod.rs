@@ -19,7 +19,6 @@
 //! [`AcpAgent`]: agent_client_protocol::AcpAgent
 
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +29,7 @@ use smol::Timer;
 
 use crate::{
     CredentialSpec, Harness, HarnessCapabilities, HarnessError, HarnessInfo, HarnessModel,
-    HarnessReadiness, InstallCallback, RunCallback, RunControl, RunEvent, RunHandle, RunMode,
+    HarnessReadiness, InstallHint, RunCallback, RunControl, RunEvent, RunHandle, RunMode,
     RunRequest,
 };
 
@@ -47,6 +46,8 @@ pub struct AcpHarness {
     command: String,
     /// … and the args that put it in ACP mode (e.g. `["acp"]`).
     args: Vec<String>,
+    /// Where the user gets this agent when `command` isn't on PATH.
+    install_hint: Option<InstallHint>,
     /// How this vendor exposes launch-time model selection — ACP itself carries
     /// no model, so listing + selecting a model happen out-of-band. `None` → a
     /// generic ACP agent: no model list, and the per-run model
@@ -81,6 +82,9 @@ pub struct AcpHarnessConfig {
     pub command: String,
     /// Args that launch it in ACP mode (e.g. `["--experimental-acp"]`).
     pub args: Vec<String>,
+    /// Where the user gets this agent. `None` leaves the picker saying only
+    /// that the command is missing.
+    pub install_hint: Option<InstallHint>,
 }
 
 impl AcpHarness {
@@ -95,6 +99,7 @@ impl AcpHarness {
             display_name: "OpenCode".to_owned(),
             command: "opencode".to_owned(),
             args: vec!["acp".to_owned()],
+            install_hint: Some(InstallHint::url("https://github.com/sst/opencode")),
         });
         harness.model_control = Some(ModelControl {
             list_subcommand: vec!["models".to_owned()],
@@ -108,13 +113,14 @@ impl AcpHarness {
     /// that launch it as an ACP server over stdio, with named fields so the call
     /// site reads clearly.
     pub fn custom(config: AcpHarnessConfig) -> Self {
-        let AcpHarnessConfig { id, display_name, command, args } = config;
+        let AcpHarnessConfig { id, display_name, command, args, install_hint } = config;
         Self {
             id,
             description: format!("{display_name} via the Agent Client Protocol."),
             display_name,
             command,
             args,
+            install_hint,
             model_control: None,
         }
     }
@@ -126,8 +132,7 @@ impl Harness for AcpHarness {
             id: self.id.clone(),
             display_name: self.display_name.clone(),
             description: self.description.clone(),
-            // The ACP agent is user-provided; we don't install it.
-            requires_install: false,
+            install_hint: self.install_hint.clone(),
             capabilities: HarnessCapabilities {
                 credential_required: false,
                 previews_edits: false,
@@ -162,11 +167,6 @@ impl Harness for AcpHarness {
             },
             details: Value::Null,
         }
-    }
-
-    fn install(&self, _on_event: InstallCallback) -> Result<(), HarnessError> {
-        // No install — the ACP agent is provided by the user.
-        Ok(())
     }
 
     fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
@@ -220,7 +220,7 @@ impl Harness for AcpHarness {
         let Some(mc) = &self.model_control else {
             return Ok(Vec::new());
         };
-        let output = Command::new(&self.command)
+        let output = crate::hidden_command(&self.command)
             .args(&mc.list_subcommand)
             .env("PATH", crate::augmented_node_path())
             .output()
@@ -250,7 +250,7 @@ impl Harness for AcpHarness {
 /// exits without a spawn error. Augmented PATH so a packaged `.app` finds a
 /// CLI installed via nvm / Homebrew / etc.
 fn probe_command(command: &str) -> bool {
-    Command::new(command)
+    crate::hidden_command(command)
         .arg("--version")
         .env("PATH", crate::augmented_node_path())
         .output()
@@ -446,6 +446,7 @@ mod tests {
             display_name: "X".to_owned(),
             command: "definitely-not-a-real-command".to_owned(),
             args: vec!["acp".to_owned()],
+            install_hint: None,
         });
         assert!(harness.list_models().expect("ok").is_empty());
         let caps = harness.info().capabilities;

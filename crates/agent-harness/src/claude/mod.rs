@@ -11,16 +11,15 @@
 //! not store or inject a key — `credential().required` is `false`.
 //!
 //! The stdout wire format and its decode into [`crate::RunEvent`]s live in
-//! [`parser`] ([`parse_claude_line`]).
+//! `parser` (`parse_claude_line`).
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 
 use serde_json::Value;
 
 use crate::{
     normalize_process_event, spawn_streaming, CredentialSpec, Harness, HarnessCapabilities,
-    HarnessError, HarnessInfo, HarnessModel, HarnessReadiness, InstallCallback, InstallEvent,
+    HarnessError, HarnessInfo, HarnessModel, HarnessReadiness, InstallCallback, InstallHint,
     RunCallback, RunHandle, RunMode, RunRequest, RunTuning,
 };
 
@@ -50,7 +49,10 @@ impl Harness for ClaudeHarness {
             display_name: "Claude Code".to_owned(),
             description: "Anthropic's Claude Code agent CLI. Uses your existing Claude Code login."
                 .to_owned(),
-            requires_install: true,
+            install_hint: Some(
+                InstallHint::url("https://code.claude.com/docs")
+                    .with_command("curl -fsSL https://claude.ai/install.sh | bash"),
+            ),
             capabilities: HarnessCapabilities {
                 // Claude Code owns its own login; it edits files
                 // directly (no previews). Curated model aliases (no
@@ -118,58 +120,6 @@ impl Harness for ClaudeHarness {
         }
     }
 
-    fn install(&self, on_event: InstallCallback) -> Result<(), HarnessError> {
-        // Claude Code ships as a native, Developer-ID-signed, self-updating
-        // binary (`~/.local/bin/claude`); the npm `@anthropic-ai/claude-code`
-        // package is frozen at 1.0.x and must never be (re)installed. If a
-        // `claude` is already on PATH (e.g. an old npm one), migrate it to the
-        // native build via `claude install`; otherwise bootstrap the native
-        // installer. Blocking (matches the `install` contract); output is
-        // forwarded as install events.
-        let path = crate::augmented_node_path();
-        let output = if resolve::resolve_on_path("claude", &path).is_some() {
-            (*on_event)(InstallEvent::Step {
-                text: "Migrating Claude Code to the native installer…".to_owned(),
-            });
-            Command::new("claude")
-                .arg("install")
-                .env("PATH", &path)
-                .output()
-                .map_err(|e| HarnessError::install(format!("failed to run claude install: {e}")))?
-        } else {
-            (*on_event)(InstallEvent::Step {
-                text: "Downloading the Claude Code installer…".to_owned(),
-            });
-            let script = download_install_script(&path)?;
-            (*on_event)(InstallEvent::Step {
-                text: "Running the Claude Code installer…".to_owned(),
-            });
-            // Run the downloaded script with `bash <file>` — NOT a `curl | bash`
-            // pipe (the single most EDR-flagged pattern); download-then-execute
-            // gives endpoint security a file to inspect first.
-            Command::new("bash")
-                .arg(script.path())
-                .env("PATH", &path)
-                .output()
-                .map_err(|e| HarnessError::install(format!("failed to run installer: {e}")))?
-        };
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            (*on_event)(InstallEvent::Stdout {
-                text: line.to_owned(),
-            });
-        }
-        for line in String::from_utf8_lossy(&output.stderr).lines() {
-            (*on_event)(InstallEvent::Stderr {
-                text: line.to_owned(),
-            });
-        }
-        (*on_event)(InstallEvent::Done {
-            exit_code: output.status.code(),
-            ok: output.status.success(),
-        });
-        Ok(())
-    }
-
     fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
         // `attachments` ignored: Claude Code is a text CLI (no image input here).
         let RunRequest { run_id, prompt, cwd, mode, tuning, resume, attachments: _ } = request;
@@ -220,7 +170,7 @@ impl Harness for ClaudeHarness {
 /// unexpected. Lets [`ClaudeHarness::readiness`] distinguish installed
 /// from signed-in.
 fn probe_claude_signed_in() -> bool {
-    let Ok(output) = Command::new("claude")
+    let Ok(output) = crate::hidden_command("claude")
         .args(["auth", "status"])
         .env("PATH", crate::augmented_node_path())
         .output()
@@ -315,84 +265,13 @@ fn extra_args_sets(extra_args: &[String], flag: &str) -> bool {
     extra_args.iter().any(|a| a == flag || a.starts_with(&with_eq))
 }
 
-/// The official Claude Code bootstrap script. A `GET` 302-redirects to
-/// `downloads.claude.ai/.../bootstrap.sh`, which installs the native binary.
-const CLAUDE_INSTALL_URL: &str = "https://claude.ai/install.sh";
-
-/// Download the native-installer bootstrap to a temp file via `curl -fsSL`
-/// (TLS-verified, follows the 302), returning a guard that deletes the file on
-/// drop. Downloading to a file — rather than piping `curl … | bash` — lets EDR
-/// inspect the script before it runs. Errors if curl fails or the script is
-/// empty (a redirect/transport failure that left no body), so we never hand
-/// `bash` an empty file and report a spurious success.
-fn download_install_script(path: &str) -> Result<TempScript, HarnessError> {
-    let script = TempScript::new()
-        .map_err(|e| HarnessError::install(format!("could not create a temp file: {e}")))?;
-    let output = Command::new("curl")
-        .args(["-fsSL", CLAUDE_INSTALL_URL, "-o"])
-        .arg(script.path())
-        .env("PATH", path)
-        .output()
-        .map_err(|e| HarnessError::install(format!("failed to run curl: {e}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(HarnessError::install(format!(
-            "downloading {CLAUDE_INSTALL_URL} failed: {}",
-            stderr.trim()
-        )));
-    }
-    let empty = std::fs::metadata(script.path()).map(|m| m.len() == 0).unwrap_or(true);
-    if empty {
-        return Err(HarnessError::install(format!(
-            "{CLAUDE_INSTALL_URL} returned an empty installer script"
-        )));
-    }
-    Ok(script)
-}
-
-/// A uniquely-named temp file deleted when dropped — holds the downloaded
-/// installer for the duration of the `bash <file>` run. A tiny RAII guard so
-/// the `claude` feature needn't pull a tempfile dependency.
-struct TempScript {
-    path: PathBuf,
-}
-
-impl TempScript {
-    fn new() -> std::io::Result<Self> {
-        // Process id + a monotonic counter keep concurrent installs from
-        // colliding without needing a randomness dependency.
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "claude-install-{}-{}.sh",
-            std::process::id(),
-            n
-        ));
-        // Create it now so the file exists with restrictive defaults before curl
-        // writes to it.
-        std::fs::File::create(&path)?;
-        Ok(Self { path })
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TempScript {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
 /// Run `<program> --version`, returning the trimmed stdout on
 /// success. Used by readiness to detect the CLI on PATH.
 fn probe_version(program: &str) -> Option<String> {
     // Augment PATH so a packaged `.app` (minimal launchd PATH) can find a
     // CLI installed via nvm / Homebrew / official installer — otherwise an
     // installed CLI is mis-reported as "not installed".
-    let output = Command::new(program)
+    let output = crate::hidden_command(program)
         .arg("--version")
         .env("PATH", crate::augmented_node_path())
         .output()
@@ -417,7 +296,8 @@ mod tests {
     fn claude_info_and_credential() {
         let h = ClaudeHarness::new();
         assert_eq!(h.info().id, CLAUDE_HARNESS_ID);
-        assert!(h.info().requires_install);
+        let hint = h.info().install_hint.expect("Claude Code is a CLI the user installs");
+        assert!(hint.command.is_some_and(|c| c.contains("claude.ai/install.sh")));
         // Claude manages its own auth — Compose doesn't require a key.
         assert!(!h.credential().required);
     }

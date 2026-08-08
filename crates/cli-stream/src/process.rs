@@ -197,7 +197,7 @@ where
     let program = resolve_program(program);
     let augmented_path = augment_path_for_node(&program);
 
-    let mut command = Command::new(&program);
+    let mut command = hidden_command(&program);
     command
         .args(&args)
         .current_dir(&cwd)
@@ -341,6 +341,26 @@ where
 /// directory containing the program — where `node`, `npm`, and friends
 /// usually live in an nvm install. The user's existing PATH stays as a
 /// fallback after our prepended directory.
+/// A [`Command`] that never opens a console window on Windows.
+///
+/// A GUI host (a Tauri app, an IDE) spawning a console-subsystem CLI gets a
+/// black console flashed on screen for every agent run and every `--version`
+/// probe. `CREATE_NO_WINDOW` suppresses it. Use this in place of
+/// `Command::new` for anything a desktop app spawns; it is a plain
+/// `Command::new` on every other platform, so call sites stay `cfg`-free.
+pub fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    #[allow(unused_mut)]
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // https://learn.microsoft.com/windows/win32/procthread/process-creation-flags
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 fn augment_path_for_node(program: &Path) -> String {
     prepend_program_dir(program, &augmented_node_path())
 }
@@ -351,7 +371,7 @@ fn augment_path_for_node(program: &Path) -> String {
 /// Without this, a bare name splits the brain: the OS resolves the *program*
 /// against the parent process's PATH, while the child's `#!/usr/bin/env node`
 /// shebang resolves *node* against the PATH we set — and
-/// [`prepend_program_dir`] can't pair the program with its sibling node
+/// `prepend_program_dir` can't pair the program with its sibling node
 /// because a bare name has no parent dir. Concretely: an nvm-installed `bob`
 /// found under `v24/bin` could re-exec on a `v20` node that happened to lead
 /// the inherited PATH, and die on a v24-only flag ("exited with code 9").
@@ -570,6 +590,23 @@ fn hardcoded_node_dirs() -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Issue #35: a GUI host spawning a console-subsystem CLI flashed a console
+    /// window on Windows for every run and every `--version` probe. The flag is
+    /// Windows-only, so what's portable to assert is that the constructor is a
+    /// drop-in for `Command::new` — it still runs, and still captures output.
+    #[test]
+    fn hidden_command_runs_like_a_plain_command() {
+        let program = if cfg!(windows) { "cmd" } else { "echo" };
+        let args: &[&str] = if cfg!(windows) {
+            &["/C", "echo", "ok"]
+        } else {
+            &["ok"]
+        };
+        let out = hidden_command(program).args(args).output().unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ok");
+    }
+
     use super::*;
 
     #[test]

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use harness::{
     normalize_process_event, spawn_streaming, CredentialSpec, Harness, HarnessCapabilities,
-    HarnessError, HarnessInfo, HarnessReadiness, InstallCallback, ParsedLine, RunCallback,
+    HarnessError, HarnessInfo, HarnessReadiness, ParsedLine, RunCallback,
     RunEvent, RunHandle, RunMode, RunRequest, RunTuning,
 };
 
@@ -30,7 +30,7 @@ impl Harness for StubHarness {
             id: "stub".to_owned(),
             display_name: "Stub".to_owned(),
             description: "integration-test stub harness".to_owned(),
-            requires_install: false,
+            install_hint: None,
             capabilities: HarnessCapabilities {
                 credential_required: false,
                 previews_edits: false,
@@ -54,10 +54,6 @@ impl Harness for StubHarness {
             error: None,
             details: serde_json::Value::Null,
         }
-    }
-
-    fn install(&self, _on_event: InstallCallback) -> Result<(), HarnessError> {
-        Ok(())
     }
 
     fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {

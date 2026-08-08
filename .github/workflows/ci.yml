@@ -37,6 +37,41 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features --verbose
 
+  # The fake-Ollama tests in `tests/ollama_route.rs` run on all three platforms
+  # in the matrix above and pin our side of the contract. This job covers what a
+  # stand-in cannot: the real vendor drifting. Advisory — a model pull is a
+  # network dependency, and Ollama shipping a change shouldn't redden an
+  # unrelated PR. Read it, don't gate on it.
+  ollama-live:
+    name: ollama (live)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      # ~400 MB, CPU-fast, and tool-capable — small enough to pull per run.
+      OLLAMA_TEST_MODEL: qwen2.5:0.5b
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ollama-live
+      - name: Linux system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Install and start Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          # Poll rather than sleep — the server is up when /api/tags answers.
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:11434/api/tags >/dev/null && break
+            sleep 1
+          done
+          curl -sf http://localhost:11434/api/tags >/dev/null || { echo "ollama did not start"; exit 1; }
+      - name: Pull the test model
+        run: ollama pull "$OLLAMA_TEST_MODEL"
+      - name: Live route test
+        run: cargo test --all-features --test ollama_route -- --ignored --nocapture
+
   lint:
     name: clippy
     runs-on: ubuntu-latest

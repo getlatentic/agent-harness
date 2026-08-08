@@ -87,13 +87,13 @@ enum BashEnd {
 fn shell_command(command: &str) -> Command {
     #[cfg(unix)]
     {
-        let mut c = Command::new("sh");
+        let mut c = crate::hidden_command("sh");
         c.arg("-c").arg(command);
         c
     }
     #[cfg(windows)]
     {
-        let mut c = Command::new("cmd");
+        let mut c = crate::hidden_command("cmd");
         c.arg("/C").arg(command);
         c
     }
