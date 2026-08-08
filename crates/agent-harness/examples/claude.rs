@@ -1,14 +1,15 @@
-//! Run a prompt against a harness and stream the normalized events.
+//! **Claude Code** — run a prompt and stream the normalized events.
 //!
-//! `cargo run --example run_prompt`
-//! (requires the `claude` CLI installed + signed in; swap `Claude` for
-//! `Codex` to drive a different agent).
+//! ```text
+//! cargo run --example claude   # needs the `claude` CLI, installed + signed in
+//! ```
+//!
+//! Every other example uses this same loop. Only the constructor changes.
 
 use harness::{Claude, Harness, HarnessError, RunEvent, RunMode, RunRequest, RunTuning};
 
 fn main() -> Result<(), HarnessError> {
-    // Pick a harness. `Claude` drives the `claude` CLI (must be installed +
-    // signed in). Swap for `harness::Codex::new()`.
+    // Drives the `claude` CLI. See `codex.rs` for the same loop, one line apart.
     let claude = Claude::new();
 
     // `run_channel()` starts the run and hands back the events on a channel,

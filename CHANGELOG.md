@@ -1,16 +1,73 @@
 # Changelog
 
-Notable changes to this workspace — `cli-stream`, `bob-rs`, and `agent-harness`
-— recorded together (they're versioned in lockstep). Format loosely follows
+Notable changes to this workspace — `cli-stream` and `agent-harness` —
+recorded together. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com). All three are on crates.io.
 Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
-Targeting **0.4.0** — the first release with breaking changes to `RunEvent`.
-Consumers pinned to `^0.3` are unaffected until they bump to `"0.4"`.
+## [0.4.0] - 2026-08-08
+
+`agent-harness` 0.4.0 and `cli-stream` 0.3.7.
+
+The first non-alpha release since 0.3.5. It removes the `bob` adapter and
+takes installation out of the framework. Read **Migration from 0.3** before
+you upgrade. Consumers pinned to `^0.3` are not affected until they bump.
+
+### Migration from 0.3
+
+Four changes need an edit in your code.
+
+**1. `Harness::install` is gone.** The framework no longer installs agents.
+Delete your `install` implementation. To tell a user where to get an agent,
+read `info().install_hint`:
+
+```rust
+if !harness.readiness().installed {
+    if let Some(hint) = harness.info().install_hint {
+        println!("Get it from {}", hint.url);
+        if let Some(command) = hint.command {
+            println!("  {command}");
+        }
+    }
+}
+```
+
+**2. `HarnessInfo.requires_install` is now `install_hint`.** Replace
+`requires_install: false` with `install_hint: None`. Replace
+`requires_install: true` with a hint that says where the agent comes from:
+
+```rust
+install_hint: Some(InstallHint::url("https://example.dev/docs")
+    .with_command("npm install -g example-cli")),
+```
+
+Test for a missing agent with `info().install_hint.is_some()` where you used
+to test `requires_install`.
+
+**3. `AcpHarnessConfig` has a new `install_hint` field.** Add
+`install_hint: None`, or use `..Default::default()`.
+
+**4. The `bob` adapter and the `bob` feature are gone.** Remove the feature
+from your `Cargo.toml`. Use `claude`, `codex`, `acp`, or
+`openai-compatible` instead.
 
 ### Changed
+
+- **BREAKING — `Harness::install` removed.** This crate discovers and runs
+  agents. It does not install them. Installing is a decision about a user's
+  machine, so it belongs to the host and its user. `login()` stays: that is
+  the agent authenticating itself, not us installing it.
+- **BREAKING — `HarnessInfo.requires_install: bool` replaced by
+  `install_hint: Option<InstallHint>`.** A boolean could only say "this needs
+  installing" and stop. `InstallHint` carries a `url` and an optional
+  `command`, so a host can show a next step. This also fixed a dead end:
+  `AcpHarness` reported `requires_install: false` while it did need its CLI,
+  so a missing OpenCode read "Not installed" with nowhere to go.
+- **BREAKING — `AcpHarnessConfig` gained `install_hint`.** Set it to `None`
+  for an agent the user supplies themselves.
+- **BREAKING — the `bob` adapter and its feature are removed.**
 - **BREAKING — `RunEvent::Usage` gained `cache_read_tokens`,
   `cache_write_tokens`, and `cost_usd`** (`cache_*` are `Option<u64>`, `cost_usd`
   is `Option<f64>`; camelCase, omitted from the wire when `None`). Prompt-cache
@@ -37,6 +94,28 @@ Consumers pinned to `^0.3` are unaffected until they bump to `"0.4"`.
   the tool's `path` argument; ACP passes through whatever the agent sends.
 
 ### Added
+
+- **`OpenHarness::ollama_at(base_url)`** — Ollama on another host, port, or in
+  a container. `ollama()` hardcoded `localhost:11434`, so an Ollama-flavoured
+  harness could not point anywhere else.
+- **`cli_stream::hidden_command(program)`** — a `Command` that does not open a
+  console window on Windows. Re-exported as `harness::hidden_command`.
+- **End-to-end tests for the run path.** `tests/ollama_route.rs` drives a fake
+  Ollama on all platforms. It checks that discovery never falls back to `/v1`,
+  that `num_ctx` above 4096 is sent, and that a tool result returns to the
+  model. `tests/openai_v1_live.rs` runs the `/v1` path against real providers.
+- **A `ollama-live` CI job.** It installs Ollama, pulls a small model, and runs
+  the live test. It is advisory, so vendor changes do not block a pull request.
+
+### Fixed
+
+- **Windows: no console window when an agent runs (#35).** Nine spawn sites
+  used a bare `Command::new`. A GUI host flashed a console window on every
+  agent run, every version probe, every MCP server, and every `bash` tool call.
+  They now use `hidden_command`, which sets `CREATE_NO_WINDOW`.
+- **Every rustdoc warning cleared.** A broken `Bob` intra-doc link would have
+  rendered dead on docs.rs.
+
 - **ACP agents can be given a launch-time model.** ACP carries no model, so
   `AcpHarness` selects one *out-of-band*: `AcpHarness::opencode()` lists models
   via `opencode models` (so `list_models()` is populated instead of empty) and

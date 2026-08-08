@@ -1,8 +1,8 @@
 # Contributing
 
-Thanks for your interest. This is a small, pre-1.0 workspace of three crates —
-`cli-stream` (generic subprocess engine) ← `bob-rs` (unofficial bob SDK) ←
-`agent-harness` (the framework). The dependency arrow only ever points up.
+Thanks for your interest. This is a small workspace of two crates —
+`cli-stream` (a generic subprocess engine) ← `agent-harness` (the framework).
+The dependency arrow only ever points up.
 
 ## Build & check
 

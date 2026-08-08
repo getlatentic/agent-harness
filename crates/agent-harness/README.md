@@ -1,33 +1,59 @@
 # agent-harness
 
-Drive **LLM coding agents — Claude Code, OpenAI Codex, bob, and any ACP agent —
-from Rust** behind one trait, with a single normalized streaming event
-vocabulary. Any OpenAI-compatible model — local Ollama or a hosted endpoint —
-runs on the built-in **`openai-compatible`** runtime (`OpenHarness`), which owns
-the agent loop in Rust. Bring your own agent too.
+**Use popular coding agents from your Rust code.**
 
-Imported as `harness`. One `Harness` trait, one `RunEvent` stream: your app
-learns the event shape **once** and never grows a per-agent parser — adding an
-agent is "write a parser into `RunEvent`," not "teach the UI another format."
+Claude Code, OpenAI Codex, OpenCode, and any OpenAI-compatible model. Call them
+from your program instead of opening a terminal. You do not shell out, and you
+do not parse each agent's own output format. Every agent returns the same event
+stream, so adding an agent means writing a parser into `RunEvent` — not
+teaching your UI another format.
+
+Imported as `harness`.
 
 ```toml
-# Pre-release: pin the exact version — cargo won't auto-select a pre-release.
-agent-harness = "0.4.0-alpha.1"   # default: the Claude Code / Codex / bob adapters
-
-# Add the opt-in backends — ACP agents (opencode / Gemini) + the local /
-# OpenAI-compatible runtime:
-agent-harness = { version = "0.4.0-alpha.1", features = ["acp", "openai-compatible"] }
-
-# Or slim it to one adapter — no keychain SDK, no HTTP client:
-agent-harness = { version = "0.4.0-alpha.1", default-features = false, features = ["claude"] }
+agent-harness = "0.4"
 ```
 
-## Quickstart
+## Highlights
 
-Construct an agent, then `run_channel` streams normalized `RunEvent`s. **Swap
-the agent, keep the loop** — that's the whole point.
+- **No terminal.** Run an agent from your code and read its output as typed
+  events, not scraped text.
+- **Every agent looks the same.** Text, reasoning, tool calls, plans, token
+  usage, and lifecycle all arrive as `RunEvent`.
+- **Swap agents without rewriting.** Change the constructor. Your loop stays.
+- **A built-in agent for open models.** The `openai-compatible` feature is not a
+  wrapper. It speaks the chat API and runs the tool loop in Rust.
+- **Add your own agent.** Implement `Harness` in your own crate and register it.
+  No fork.
+- **Stable wire format.** `RunEvent` serializes to camelCase JSON, so HTTP, SSE,
+  and IPC transports all emit the same shape.
 
-### Claude Code
+## Features
+
+The CLI adapters are on by default. Everything else is opt-in, so the core
+crate stays small.
+
+```toml
+# Claude Code and Codex
+agent-harness = "0.4"
+
+# Add ACP agents and the built-in agent for open models
+agent-harness = { version = "0.4", features = ["acp", "openai-compatible"] }
+
+# Or take just one adapter
+agent-harness = { version = "0.4", default-features = false, features = ["claude"] }
+```
+
+| feature | what it adds |
+|---|---|
+| `claude`, `codex` | the CLI adapters (default) |
+| `acp` | any [Agent Client Protocol](https://agentclientprotocol.com) agent — OpenCode, Gemini, Goose |
+| `openai-compatible` | the built-in agent for open models. Pulls an HTTP client and search libraries. |
+| `models-dev` | live model lists from the [models.dev](https://models.dev) catalog |
+
+## Getting started
+
+Build an agent. Call `run_channel`. Read events.
 
 ```rust
 use harness::{Claude, Harness, RunEvent, RunMode, RunRequest, RunTuning};
@@ -35,11 +61,11 @@ use harness::{Claude, Harness, RunEvent, RunMode, RunRequest, RunTuning};
 let (_handle, events) = Claude::new().run_channel(RunRequest {
     run_id: "1".into(),
     prompt: "Summarize the README in one sentence.".into(),
+    attachments: Vec::new(),
     cwd: None,
     mode: RunMode::Ask,
     tuning: RunTuning::default(),
     resume: None,
-    attachments: Vec::new(),
 })?;
 
 for event in events {
@@ -49,73 +75,113 @@ for event in events {
 }
 ```
 
-### OpenAI Codex
+Keep `_handle` if you want to stop the run. Dropping it does not cancel.
 
-Identical loop — construct `Codex` instead:
+To use Codex instead, change one line:
 
 ```rust
 let (_handle, events) = harness::Codex::new().run_channel(request)?;
 ```
 
-### Open models — the `openai-compatible` feature
+## Open models
 
-The claude/codex/acp adapters *wrap* an external agent. An OpenAI-compatible
-model has none to wrap, so the **`openai-compatible`** feature ships a runtime
-that *is* the agent — it speaks the OpenAI chat API and owns the tool loop
-(read/write/edit/bash/glob/grep + webfetch/websearch/todos/skills/subagents/MCP)
-in Rust, behind this same `Harness` trait. Think the **Claude Code / Codex SDK**,
-but for any open-source or OpenAI-compatible model (Ollama, OpenRouter, vLLM, …):
-
-```toml
-agent-harness = { version = "0.4", features = ["openai-compatible"] }
-```
+The CLI adapters wrap an external agent. An open model has no agent to wrap,
+so the `openai-compatible` feature ships one. It calls the chat API and runs
+the tool loop in Rust: `read`, `glob`, `grep`, `list`, `write`, `edit`,
+`bash`, `webfetch`, `websearch`, `todowrite`, `question`, and `apply_patch`.
+It also handles sessions, skills, subagents, and MCP servers.
 
 ```rust
-let ollama = harness::OpenHarness::ollama();   // or ::custom(OpenHarnessConfig { id, display_name, base_url, .. })
+let ollama = harness::OpenHarness::ollama();
 let (_handle, events) = ollama.run_channel(request)?;
 ```
 
-Off by default (it pulls a blocking HTTP client + search libs), so the core crate
-stays lean — same `RunEvent` loop, no CLI required.
+A provider is configuration, not code. Point the same type at any
+OpenAI-compatible endpoint:
 
-> **OpenCode**, Gemini, Goose, and other [ACP](https://agentclientprotocol.com) agents work via the `acp` feature — `AcpHarness::opencode()` spawns `opencode acp` and drives it over the Agent Client Protocol.
+```rust
+use harness::{OpenHarness, OpenHarnessConfig};
+
+let openrouter = OpenHarness::custom(OpenHarnessConfig {
+    id: "openrouter".into(),
+    display_name: "OpenRouter".into(),
+    base_url: "https://openrouter.ai/api".into(),
+    api_key_env: Some("OPENROUTER_API_KEY".into()),
+    ..Default::default()
+});
+```
+
+Ollama is the one exception. It uses its native `/api/*` endpoints, so the
+context window is set correctly and local models can be pulled and deleted.
+Use `ollama_at(url)` when your server is not on the default port.
+
+## Setup and sign-in
+
+`readiness()` reports what is on the machine: `installed`, `auth_configured`,
+and a version.
+
+This crate does not install agents. When one is missing, `info().install_hint`
+says where to get it.
+
+```rust
+if !harness.readiness().installed {
+    if let Some(hint) = harness.info().install_hint {
+        println!("Get it from {}", hint.url);
+        if let Some(command) = hint.command {
+            println!("  {command}");
+        }
+    }
+}
+```
+
+`login()` runs an agent's own sign-in flow, which opens a browser. In CI, set
+the agent's API key in the environment instead. Then `readiness()` reports
+ready.
 
 ## Bring your own agent
 
-`Harness` only emits `RunEvent`s, so an implementor can spawn a CLI **or** call
-an HTTP API — both fit. Register it alongside the built-ins; nothing to fork:
+`Harness` only emits `RunEvent`s. Your implementation can spawn a CLI or call
+an HTTP API. Register it next to the built-ins:
 
 ```rust
 let registry = harness::Registry::new()
     .register(harness::Claude::new())
-    .register(MyAgent::new());            // your own `impl Harness`
+    .register(MyAgent::new());
 ```
 
-`RunEvent` derives `Serialize` with stable camelCase field names, so any
-transport (HTTP/SSE, an IPC channel) emits identical JSON.
+## What the trait gives you
 
-## What you get
-
-- **`Harness` trait** — `info` / `readiness` / `install` / `run` / `credential`
-  / `login` / `list_models`. Object-safe (`Box<dyn Harness>`).
-- **`RunEvent`** — text, thinking, tool start/end, plan, usage (with cache
-  tokens), suggested edits, questions, lifecycle. Aligned with the [Agent
+- **`Harness`** — `info`, `readiness`, `run`, `credential`, `login`,
+  `list_models`. Object-safe, so `Box<dyn Harness>` works.
+- **`RunEvent`** — text, thinking, tool start and end, plan, usage with cache
+  tokens, suggested edits, questions, and lifecycle. It follows the [Agent
   Client Protocol](https://agentclientprotocol.com) vocabulary.
-- **Open `Registry`** — compose built-ins and your own providers.
+- **`Registry`** — an open set. Built-ins and your own agents sit together.
 
-The subprocess engine is the standalone
-[`cli-stream`](https://crates.io/crates/cli-stream) crate.
+The subprocess engine is a separate crate:
+[`cli-stream`](https://crates.io/crates/cli-stream).
 
 ## Examples
 
-Runnable demos (`cargo run --example <name>`):
+One per harness. Run with `cargo run --example <name>`.
 
-- **`run_prompt`** — Claude Code (default features).
-- **`run_acp`** — an ACP agent (`opencode`); add `--features acp`.
-- **`run_openai`** — an OpenAI-compatible / local model; add `--features openai-compatible`.
-- **`playground`** — a browser UI that streams a live run over SSE for any
-  backend; add `--features "openai-compatible acp"`.
+| example | harness | features |
+|---|---|---|
+| `claude` | Claude Code | default |
+| `codex` | OpenAI Codex | default |
+| `acp` | OpenCode over ACP | `acp` |
+| `gemini` | Gemini CLI over ACP | `acp` |
+| `ollama` | a local model on Ollama | `openai-compatible` |
+| `openrouter` | a hosted model on OpenRouter | `openai-compatible models-dev` |
+| `llama_cpp` | a local `llama-server` | `openai-compatible` |
+| `tool_call` | the agent loop calling tools and reading the results | `openai-compatible` |
+| `setup` | readiness, install hints, and sign-in | default |
+| `custom_harness` | your own agent | default |
+| `playground` | a browser UI that streams a live run over SSE | `openai-compatible acp` |
+
+`claude` and `codex` differ by one line. `ollama`, `openrouter`, and
+`llama_cpp` differ only in configuration — no provider has its own adapter.
 
 ## License
 
-MIT OR Apache-2.0.
+MIT or Apache-2.0, at your option.
