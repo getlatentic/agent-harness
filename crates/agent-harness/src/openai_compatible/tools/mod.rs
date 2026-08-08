@@ -1417,7 +1417,12 @@ mod tests {
         // End-to-end through dispatch: a real over-cap `bash` run keeps its tail
         // (where the exit line lives) — the head-only cap would have lost it.
         let dir = scratch("bash-trunc");
-        let cmd = "for i in $(seq 1 5000); do echo info line $i; done; echo 'BOOM the real error'; exit 7";
+        // Spelled per shell: `$(seq)` is sh-only, `for /L` is cmd-only.
+        let cmd = if cfg!(windows) {
+            "for /L %i in (1,1,5000) do @echo info line %i & echo BOOM the real error & exit 7"
+        } else {
+            "for i in $(seq 1 5000); do echo info line $i; done; echo 'BOOM the real error'; exit 7"
+        };
         let out = run("bash", json!({ "command": cmd }), &dir, RunMode::Edit);
         assert!(!out.ok, "non-zero exit is an error");
         assert!(
