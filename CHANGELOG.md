@@ -425,7 +425,7 @@ from your `Cargo.toml`. Use `claude`, `codex`, `acp`, or
   Homebrew), cached once, with a hardcoded fallback.
 - The harness-agnostic raw tier `parse_raw_line`, the open `Registry`, and the
   `custom_harness` example (compose your own harness from the published pieces).
-- **`Harness::run_channel()`** — a provided method that starts a run and returns
+- **`Harness::run()`** — a provided method that starts a run and returns
   its `RunEvent`s on an `mpsc` receiver, so callers can `for ev in rx { … }`
   instead of hand-writing the `Arc::new(move |ev| tx.send(ev))` callback. The
   receiver hangs up on its own when the run ends. `run()` stays for push
@@ -433,7 +433,7 @@ from your `Cargo.toml`. Use `claude`, `codex`, `acp`, or
 - A local quality gate, `scripts/check.sh` (clippy `-D warnings` + test + build +
   feature-gate builds + `cargo deny` when installed), and a `deny.toml`.
 - **Testable docs + real-I/O coverage.** Runnable/`no_run` doctests on the
-  headline APIs (`spawn_streaming`, `Harness::run_channel`, `HarnessError`,
+  headline APIs (`spawn_streaming`, `Harness::run`, `HarnessError`,
   `Registry`) so the documented code can't drift from the API; a stub-process
   integration test (`tests/stub_run.rs`) that drives a real `sh` child through
   the full spawn → stream → normalize → channel/cancel path; and an

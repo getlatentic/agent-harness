@@ -46,7 +46,7 @@ fn main() -> Result<(), HarnessError> {
     };
     eprintln!("[model] {chosen}");
 
-    let (_handle, rx) = model.run_channel(RunRequest {
+    let (_handle, rx) = model.run(RunRequest {
         run_id: "demo".into(),
         prompt: "In one sentence, what is an OpenAI-compatible API?".into(),
         mode: RunMode::Ask, // Ask = read-only tools; Edit = + write/edit/bash

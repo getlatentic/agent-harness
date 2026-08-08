@@ -35,7 +35,7 @@ fn main() -> Result<(), String> {
     });
 
     eprintln!("── running {id} ──");
-    let _handle = h.run(
+    let _handle = h.start(
         RunRequest {
             run_id: "verify".into(),
             prompt,

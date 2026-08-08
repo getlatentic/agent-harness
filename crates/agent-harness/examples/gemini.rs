@@ -34,15 +34,7 @@ fn main() -> Result<(), HarnessError> {
         return Ok(());
     }
 
-    let (_handle, rx) = gemini.run_channel(RunRequest {
-        run_id: "demo".into(),
-        prompt: "In one sentence, what is the Agent Client Protocol?".into(),
-        // Ask means "do not change my files". For an ACP agent it works by
-        // denying permission requests, so it only covers calls the agent asks
-        // about. Gemini reads files and searches the web without asking,
-        // because it considers those safe. See RunMode's docs.,
-        ..Default::default()
-    })?;
+    let (_handle, rx) = gemini.run(RunRequest::new("demo", "In one sentence, what is the Agent Client Protocol?"))?;
 
     for ev in rx {
         match ev {

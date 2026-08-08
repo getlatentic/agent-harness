@@ -169,7 +169,7 @@ impl Harness for AcpHarness {
         }
     }
 
-    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
+    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
         // resume (session/load) is a follow-up; this first cut runs a fresh
         // session. `attachments` ignored: a text prompt only.
         let RunRequest { run_id, prompt, cwd, mode, tuning, resume: _, attachments: _ } = request;

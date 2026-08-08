@@ -53,20 +53,20 @@ agent-harness = { version = "0.4", default-features = false, features = ["claude
 
 ## Getting started
 
-Build an agent. Call `run_channel`. Read events.
+Build an agent. Call `run`. Read events.
 
-(`run_channel` hands back a receiver to loop over. The trait's own `run` takes
-a callback instead — reach for it when you are forwarding events straight onto
-a socket or channel and an intermediate hop would be waste.)
+(`run` hands back a receiver to loop over. `start` takes a callback instead —
+reach for it when you are forwarding events straight onto a socket and an
+intermediate hop would be waste. An adapter implements only `start`; every
+harness gets `run` for free.)
 
 ```rust
 use harness::{Claude, Harness, RunEvent, RunRequest};
 
-let (_handle, events) = Claude::new().run_channel(RunRequest {
-    run_id: "demo".into(),
-    prompt: "In one sentence, what is a Markdown heading?".into(),
-    ..Default::default()
-})?;
+let (_handle, events) = Claude::new().run(RunRequest::new(
+    "demo",
+    "In one sentence, what is a Markdown heading?",
+))?;
 
 for event in events {
     match event {
@@ -77,16 +77,17 @@ for event in events {
 }
 ```
 
-Everything not named has a default: no working directory, `RunMode::Ask`
-(answer only — `Edit` lets it write files), no resumed session, no
-attachments.
+`RunRequest::new` takes the two fields a run needs; the rest default — no
+working directory, `RunMode::Ask` (answer only; `Edit` lets it write files), no
+resumed session, no attachments. Override any of them with
+`RunRequest { mode: RunMode::Edit, ..RunRequest::new(id, prompt) }`.
 
 Keep `_handle` if you want to stop the run. Dropping it does not cancel.
 
 To use Codex instead, change one line:
 
 ```rust
-let (_handle, events) = harness::Codex::new().run_channel(request)?;
+let (_handle, events) = harness::Codex::new().run(request)?;
 ```
 
 ## Open models
@@ -99,7 +100,7 @@ It also handles sessions, skills, subagents, and MCP servers.
 
 ```rust
 let ollama = harness::OpenHarness::ollama();
-let (_handle, events) = ollama.run_channel(request)?;
+let (_handle, events) = ollama.run(request)?;
 ```
 
 A provider is configuration, not code. Point the same type at any

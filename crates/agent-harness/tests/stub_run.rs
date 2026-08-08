@@ -1,7 +1,7 @@
 //! End-to-end I/O test of the framework's run path against a **real stub
 //! process** — no mocking of the OS. A minimal [`Harness`] spawns `sh -c …`
 //! through the engine, and we assert the normalized [`RunEvent`] stream that
-//! comes back over [`Harness::run_channel`]. This exercises the whole public
+//! comes back over [`Harness::run`]. This exercises the whole public
 //! chain — spawn → stream stdout → parse → normalize → channel close — plus
 //! the cancel path, with actual process I/O rather than an in-memory mock.
 //!
@@ -56,7 +56,7 @@ impl Harness for StubHarness {
         }
     }
 
-    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
+    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
         let handle = spawn_streaming(
             PathBuf::from("sh"),
             vec!["-c".to_owned(), self.script.clone()],
@@ -103,7 +103,7 @@ fn streams_normalized_events_then_closes() {
     let harness = StubHarness {
         script: "printf '%s\\n' alpha beta".to_owned(),
     };
-    let (_handle, rx) = harness.run_channel(request()).expect("run_channel");
+    let (_handle, rx) = harness.run(request()).expect("run");
 
     // Draining to completion proves the channel closed on its own when the
     // real process exited.
@@ -139,7 +139,7 @@ fn run_id_is_threaded_onto_every_event() {
     let harness = StubHarness {
         script: "printf '%s\\n' one".to_owned(),
     };
-    let (_handle, rx) = harness.run_channel(request()).expect("run_channel");
+    let (_handle, rx) = harness.run(request()).expect("run");
     for ev in rx {
         let id = match &ev {
             RunEvent::Started { run_id }
@@ -152,17 +152,17 @@ fn run_id_is_threaded_onto_every_event() {
 }
 
 #[test]
-fn cancel_flows_through_run_channel_and_flags_exited() {
+fn cancel_flows_through_run_and_flags_exited() {
     // A long sleeper we cancel almost immediately. Cancelling via the
     // RunHandle must terminate the real child and surface as
-    // Exited(cancelled=true) on the run_channel receiver. (Promptness of the
+    // Exited(cancelled=true) on the run receiver. (Promptness of the
     // SIGTERM→SIGKILL is covered by cli-stream's own lifecycle test; here we
     // assert the cancel *path through the framework* works and the flag rides
     // the normalized stream.)
     let harness = StubHarness {
         script: "exec sleep 5".to_owned(),
     };
-    let (handle, rx) = harness.run_channel(request()).expect("run_channel");
+    let (handle, rx) = harness.run(request()).expect("run");
 
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(150));

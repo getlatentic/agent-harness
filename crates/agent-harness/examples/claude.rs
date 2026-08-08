@@ -12,21 +12,15 @@ fn main() -> Result<(), HarnessError> {
     // Drives the `claude` CLI. See `codex.rs` for the same loop, one line apart.
     let claude = Claude::new();
 
-    // `run_channel()` starts the run and hands back the events on a channel,
+    // `run()` starts the run and hands back the events on a channel,
     // so there's no callback/`Sender` plumbing to write by hand. It returns
-    // immediately; events arrive on background threads. (`run()` is still
-    // there for push semantics — forwarding straight onto a Tauri Channel or
-    // SSE sink from inside a callback.)
-    let (_handle, rx) = claude.run_channel(RunRequest {
-        run_id: "demo".into(),
-        prompt: "In one sentence, what is a Markdown heading?".into(),
-        // The rest have defaults worth knowing: no `cwd` (the agent's tools
-        // run where the process does), `mode: RunMode::Ask` (answer only —
-        // `Edit` lets it write files), no `resume` (pass a session id to
-        // continue a prior run), and no `attachments` (images, for multimodal
-        // models). `tuning` carries model, effort and turn cap.
-        ..Default::default()
-    })?; // keep `_handle` to `.cancel()`; dropping it does NOT stop the run
+    // immediately; events arrive on background threads. (`start()` is the push
+    // form — forwarding straight onto a Tauri Channel or SSE sink from inside a
+    // callback, where a channel would be a wasted hop.)
+    //
+    // Keep `_handle` to `.cancel()`; dropping it does NOT stop the run.
+    let prompt = "In one sentence, what is a Markdown heading?";
+    let (_handle, rx) = claude.run(RunRequest::new("demo", prompt))?;
 
     // ONE normalized event stream, regardless of the backing CLI. `rx` hangs
     // up on its own when the run ends, so this loop terminates without

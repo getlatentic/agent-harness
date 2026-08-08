@@ -590,7 +590,7 @@ impl Harness for OpenHarness {
         }
     }
 
-    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
+    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
         let RunRequest { run_id, prompt, cwd, mode, tuning, resume, attachments } = request;
         let model = tuning
             .model

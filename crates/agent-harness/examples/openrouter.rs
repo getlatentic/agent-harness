@@ -36,7 +36,7 @@ fn main() -> Result<(), HarnessError> {
     let model = std::env::var("OPENROUTER_MODEL").unwrap_or_else(|_| "openai/gpt-oss-120b".into());
     eprintln!("[model] {model}");
 
-    let (_handle, rx) = openrouter.run_channel(RunRequest {
+    let (_handle, rx) = openrouter.run(RunRequest {
         run_id: "demo".into(),
         prompt: "In one sentence, what is an OpenAI-compatible API?".into(),
         tuning: RunTuning { model: Some(model), ..Default::default() },

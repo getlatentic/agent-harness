@@ -13,14 +13,7 @@ fn main() -> Result<(), HarnessError> {
     // Any other ACP agent works the same way — see `gemini.rs`.
     let agent = AcpHarness::opencode();
 
-    let (_handle, rx) = agent.run_channel(RunRequest {
-        run_id: "demo".into(),
-        prompt: "In one sentence, what is the Agent Client Protocol?".into(),
-        // ACP carries no model; opencode takes a launch-time one out-of-band.
-        // Set `tuning.model` (e.g. "opencode/big-pickle") and it's written to a
-        // temp config at spawn. `default()` ⇒ the agent's own default.,
-        ..Default::default()
-    })?;
+    let (_handle, rx) = agent.run(RunRequest::new("demo", "In one sentence, what is the Agent Client Protocol?"))?;
 
     // One normalized stream, whichever ACP agent produced it.
     for ev in rx {

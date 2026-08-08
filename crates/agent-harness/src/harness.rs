@@ -304,6 +304,27 @@ pub struct RunRequest {
     pub resume: Option<String>,
 }
 
+impl RunRequest {
+    /// The two fields a run cannot do without. Everything else takes its
+    /// default, and `..` supplies the rest when you want more:
+    ///
+    /// ```
+    /// use harness::{RunMode, RunRequest};
+    /// let edit = RunRequest {
+    ///     mode: RunMode::Edit,
+    ///     ..RunRequest::new("run-1", "Tidy the introduction.")
+    /// };
+    /// assert_eq!(edit.run_id, "run-1");
+    /// ```
+    ///
+    /// Taking `impl Into<String>` keeps `.into()` out of the call site. A
+    /// string literal is the overwhelmingly common argument and should not
+    /// have to announce itself.
+    pub fn new(run_id: impl Into<String>, prompt: impl Into<String>) -> Self {
+        Self { run_id: run_id.into(), prompt: prompt.into(), ..Default::default() }
+    }
+}
+
 /// Where a harness's secret lives in the OS keychain, and how to
 /// label it in the UI. Lets the front-end ask for the right
 /// credential per harness without hard-coding any one harness's slot.
@@ -523,7 +544,7 @@ pub trait Harness: Send + Sync {
 
     /// Start a run, streaming events through `on_event`. Returns a
     /// handle immediately; work continues on background threads.
-    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError>;
+    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError>;
 
     /// The credential this harness needs.
     fn credential(&self) -> CredentialSpec;
@@ -614,18 +635,18 @@ pub trait Harness: Send + Sync {
     /// [`RunControl`] — so it is safe to drain `rx` to completion while
     /// still holding the handle for a possible [`cancel`](RunControl::cancel).)
     ///
-    /// Prefer [`run`](Harness::run) directly when you need push semantics —
+    /// Prefer [`start`](Harness::start) when you need push semantics —
     /// e.g. forwarding straight onto a Tauri `Channel` or an SSE sink from
     /// inside the callback — where an intermediate channel is just an extra
-    /// hop. This is a provided method (not overridable surface): adapters
-    /// implement only `run`, and every harness — built-in or third-party —
-    /// gets `run_channel` for free.
+    /// hop. This is a provided method (not overridable surface): an adapter
+    /// implements only [`start`](Harness::start), and every harness — built-in
+    /// or third-party — gets `run` for free.
     ///
     /// ```no_run
     /// use harness::{Claude, Harness, RunEvent, RunMode, RunRequest, RunTuning};
     ///
     /// # fn main() -> Result<(), harness::HarnessError> {
-    /// let (_handle, rx) = Claude::new().run_channel(RunRequest {
+    /// let (_handle, rx) = Claude::new().run(RunRequest {
     ///     run_id: "demo".into(),
     ///     prompt: "Explain Markdown headings in one sentence.".into(),
     ///     ..Default::default()
@@ -640,12 +661,12 @@ pub trait Harness: Send + Sync {
     /// # Ok(())
     /// # }
     /// ```
-    fn run_channel(
+    fn run(
         &self,
         request: RunRequest,
     ) -> Result<(RunHandle, mpsc::Receiver<RunEvent>), HarnessError> {
         let (tx, rx) = mpsc::channel();
-        let handle = self.run(
+        let handle = self.start(
             request,
             Arc::new(move |event| {
                 // A hung-up receiver (consumer stopped early) is not an
@@ -801,7 +822,7 @@ mod tests {
     /// A minimal in-memory harness whose `run()` pushes a fixed event
     /// sequence straight to the callback, synchronously, then returns —
     /// dropping its only `RunCallback` clone. That's exactly the ownership
-    /// shape `run_channel` relies on, with no subprocess to spawn, so it
+    /// shape `run` relies on, with no subprocess to spawn, so it
     /// pins down the contract: events are forwarded, and the receiver hangs
     /// up on its own once the run's callback ownership ends.
     struct MockHarness {
@@ -809,12 +830,12 @@ mod tests {
     }
     impl Harness for MockHarness {
         fn info(&self) -> HarnessInfo {
-            unreachable!("not exercised by run_channel")
+            unreachable!("not exercised by run")
         }
         fn readiness(&self) -> HarnessReadiness {
-            unreachable!("not exercised by run_channel")
+            unreachable!("not exercised by run")
         }
-        fn run(
+        fn start(
             &self,
             _request: RunRequest,
             on_event: RunCallback,
@@ -827,7 +848,7 @@ mod tests {
             Ok(Box::new(NoopControl))
         }
         fn credential(&self) -> CredentialSpec {
-            unreachable!("not exercised by run_channel")
+            unreachable!("not exercised by run")
         }
     }
 
@@ -844,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn run_channel_forwards_every_event_then_closes() {
+    fn run_forwards_every_event_then_closes() {
         let harness = MockHarness {
             events: vec![
                 RunEvent::Text {
@@ -858,7 +879,7 @@ mod tests {
                 },
             ],
         };
-        let (_handle, rx) = harness.run_channel(demo_request()).expect("run_channel ok");
+        let (_handle, rx) = harness.run(demo_request()).expect("run ok");
         // Draining to completion *terminates* — proof the channel closed
         // without us dropping the handle.
         let collected: Vec<RunEvent> = rx.into_iter().collect();
@@ -879,9 +900,9 @@ mod tests {
     }
 
     #[test]
-    fn run_channel_receiver_closes_even_with_no_events() {
+    fn run_receiver_closes_even_with_no_events() {
         let harness = MockHarness { events: Vec::new() };
-        let (_handle, rx) = harness.run_channel(demo_request()).expect("run_channel ok");
+        let (_handle, rx) = harness.run(demo_request()).expect("run ok");
         assert_eq!(rx.into_iter().count(), 0); // closes immediately, doesn't hang
     }
 

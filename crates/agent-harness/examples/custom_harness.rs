@@ -76,7 +76,7 @@ impl Harness for EchoHarness {
         }
     }
 
-    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
+    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
         // A real harness spawns its CLI here. We spawn `printf` to emit two
         // JSON lines: an init (→ Session) and the answer (→ Text).
         let answer = format!(r#"{{"text":"echo: {}"}}"#, request.prompt.replace('"', "'"));
@@ -178,12 +178,8 @@ fn main() -> Result<(), String> {
     let on_event: RunCallback = Arc::new(move |ev| {
         let _ = tx.send(ev);
     });
-    let _handle = h.run(
-        RunRequest {
-            run_id: "demo".into(),
-            prompt: "hello".into(),
-            ..Default::default()
-        },
+    let _handle = h.start(
+        RunRequest::new("demo", "hello"),
         on_event,
     )
     .map_err(|e| e.to_string())?;

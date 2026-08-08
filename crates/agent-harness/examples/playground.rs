@@ -9,7 +9,7 @@
 //!                                     #   ollama serve && ollama pull qwen2.5-coder
 //! ```
 //!
-//! It drives [`OpenHarness::ollama`] and bridges `run_channel`'s
+//! It drives [`OpenHarness::ollama`] and bridges `run`'s
 //! receiver straight to the browser. A run defaults to a throwaway scratch dir
 //! (so Edit mode can't touch your files) and denies the most destructive shell
 //! commands. This is a dev/test tool (it pulls `tiny_http`, a dev-dependency) —
@@ -118,7 +118,7 @@ fn build_harness(params: &HashMap<String, String>) -> Box<dyn Harness> {
 /// harness, so archetype A (`OpenHarness`) and archetype B
 /// (`AcpHarness`) share one path.
 fn respond_stream(harness: &dyn Harness, req: RunRequest, request: tiny_http::Request) {
-    match harness.run_channel(req) {
+    match harness.run(req) {
         Ok((_handle, rx)) => {
             let headers = vec![
                 header("Content-Type", "text/event-stream"),

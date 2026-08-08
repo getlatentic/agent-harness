@@ -37,7 +37,7 @@ fn main() -> Result<(), HarnessError> {
     // Watch for `RunEvent::Error` below instead.
     eprintln!("[endpoint] {base_url}");
 
-    let (_handle, rx) = llama.run_channel(RunRequest {
+    let (_handle, rx) = llama.run(RunRequest {
         run_id: "demo".into(),
         prompt: "In one sentence, what is llama.cpp?".into(),
         // Whatever the server loaded. llama.cpp ignores this and serves its

@@ -52,7 +52,7 @@ fn exercise(provider: &str, base_url: &str, key_env: &str, model: &str) {
     let done = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&done);
     let _handle = harness
-        .run(
+        .start(
             RunRequest {
                 run_id: format!("live-{provider}"),
                 prompt: "Reply with the single word: pong".to_owned(),

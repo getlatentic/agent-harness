@@ -27,20 +27,20 @@ cargo add agent-harness
 
 ## Example
 
-Build an agent. Call `run_channel`. Read events until the run exits.
+Build an agent. Call `run`. Read events until the run exits.
 
-(`run_channel` hands back a receiver to loop over. The trait's own `run` takes
-a callback instead — reach for it when you are forwarding events straight onto
-a socket or channel and an intermediate hop would be waste.)
+(`run` hands back a receiver to loop over. `start` takes a callback instead —
+reach for it when you are forwarding events straight onto a socket and an
+intermediate hop would be waste. An adapter implements only `start`; every
+harness gets `run` for free.)
 
 ```rust
 use harness::{Claude, Harness, RunEvent, RunRequest};
 
-let (_handle, events) = Claude::new().run_channel(RunRequest {
-    run_id: "demo".into(),
-    prompt: "In one sentence, what is a Markdown heading?".into(),
-    ..Default::default()
-})?;
+let (_handle, events) = Claude::new().run(RunRequest::new(
+    "demo",
+    "In one sentence, what is a Markdown heading?",
+))?;
 
 for event in events {
     match event {
@@ -51,9 +51,10 @@ for event in events {
 }
 ```
 
-Everything not named has a default: no working directory, `RunMode::Ask`
-(answer only — `Edit` lets it write files), no resumed session, no
-attachments.
+`RunRequest::new` takes the two fields a run needs; the rest default — no
+working directory, `RunMode::Ask` (answer only; `Edit` lets it write files), no
+resumed session, no attachments. Override any of them with
+`RunRequest { mode: RunMode::Edit, ..RunRequest::new(id, prompt) }`.
 
 To use Codex, an ACP agent, or a local model, change the constructor. The loop
 does not change. There is a runnable example for each:

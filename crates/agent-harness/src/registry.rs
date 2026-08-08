@@ -197,7 +197,7 @@ mod tests {
                 details: serde_json::Value::Null,
             }
         }
-        fn run(
+        fn start(
             &self,
             _req: RunRequest,
             _on_event: RunCallback,

@@ -37,7 +37,7 @@ fn main() -> Result<(), HarnessError> {
     };
     eprintln!("[model] {model}\n");
 
-    let (_handle, rx) = agent.run_channel(RunRequest {
+    let (_handle, rx) = agent.run(RunRequest {
         run_id: "tools".into(),
         prompt: "List the files in the current directory, then say how many there are.".into(),
         // The tools run here. Point it anywhere you do not mind being read.

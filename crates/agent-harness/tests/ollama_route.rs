@@ -93,7 +93,7 @@ fn collect(harness: &dyn Harness, prompt: &str) -> Vec<RunEvent> {
     let done = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&done);
     let handle = harness
-        .run(
+        .start(
             RunRequest {
                 run_id: "test-run".to_owned(),
                 prompt: prompt.to_owned(),
@@ -240,7 +240,7 @@ fn live_ollama_streams_a_real_completion() {
     let done = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&done);
     let _handle = harness
-        .run(
+        .start(
             RunRequest {
                 run_id: "live".to_owned(),
                 prompt: "Reply with the single word: pong".to_owned(),

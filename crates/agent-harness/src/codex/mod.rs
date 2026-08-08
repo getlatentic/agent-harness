@@ -113,7 +113,7 @@ impl Harness for CodexHarness {
         }
     }
 
-    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
+    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
         // `attachments` ignored: codex exec is a text CLI (no image input here).
         let RunRequest { run_id, prompt, cwd, mode, tuning, resume, attachments: _ } = request;
         let args = build_codex_args(prompt, mode, &tuning, resume.as_deref());

@@ -12,13 +12,7 @@ use harness::{Codex, Harness, HarnessError, RunEvent, RunRequest};
 fn main() -> Result<(), HarnessError> {
     let codex = Codex::new();
 
-    let (_handle, rx) = codex.run_channel(RunRequest {
-        run_id: "demo".into(),
-        prompt: "In one sentence, what is a Markdown heading?".into(),
-        // Codex exposes reasoning effort but no turn cap. Model ids change
-        // often, so free text is accepted: RunTuning { model: Some("o4-mini".into()), .. },
-        ..Default::default()
-    })?;
+    let (_handle, rx) = codex.run(RunRequest::new("demo", "In one sentence, what is a Markdown heading?"))?;
 
     for ev in rx {
         match ev {
