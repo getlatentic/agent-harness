@@ -32,6 +32,10 @@ const TEMPERATURE: f64 = 0.0;
 /// loads the intended context window. Calls `on_delta` per text/reasoning
 /// fragment as it arrives and returns the assembled assistant message + usage.
 /// Mirrors [`super::wire::post_chat_stream`] for the native endpoint.
+// Each argument is a distinct wire field, and the two `post_chat_stream`
+// variants must stay signature-symmetric so callers can swap endpoints; the
+// optional bits are already bundled in `RequestExtras`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn post_chat_stream(
     base: &str,
     model: &str,

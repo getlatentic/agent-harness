@@ -18,7 +18,9 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+#[cfg(unix)]
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -224,12 +226,16 @@ where
         child: Mutex::new(Some(child)),
         cancelled: AtomicBool::new(false),
     });
-    let handle = ProcessHandle { inner: Arc::clone(&inner) };
+    let handle = ProcessHandle {
+        inner: Arc::clone(&inner),
+    };
 
     // Emit Started immediately so the caller doesn't wait on the first
     // output line for a UI signal.
     let mut started_cb = callback.clone();
-    started_cb(ProcessEvent::Started { run_id: run_id.clone() });
+    started_cb(ProcessEvent::Started {
+        run_id: run_id.clone(),
+    });
 
     // Reader threads. Each owns its own callback clone — the Clone bound
     // is the whole point.
@@ -264,7 +270,7 @@ where
                 match guard.as_mut() {
                     Some(child) => match child.try_wait() {
                         Ok(Some(status)) => break Ok(status),
-                        Ok(None) => {}            // still running; poll again
+                        Ok(None) => {} // still running; poll again
                         Err(err) => break Err(err),
                     },
                     None => return, // already reaped
@@ -308,9 +314,15 @@ where
         match line {
             Ok(text) => {
                 let event = if is_stdout {
-                    ProcessEvent::Stdout { run_id: run_id.clone(), line: text }
+                    ProcessEvent::Stdout {
+                        run_id: run_id.clone(),
+                        line: text,
+                    }
                 } else {
-                    ProcessEvent::Stderr { run_id: run_id.clone(), line: text }
+                    ProcessEvent::Stderr {
+                        run_id: run_id.clone(),
+                        line: text,
+                    }
                 };
                 callback(event);
             }
@@ -458,6 +470,7 @@ fn keep_absolute_entries(path: &str) -> String {
 /// shell-init chatter / terminal escape sequences (e.g. iTerm2 shell
 /// integration's `]1337;…` OSC codes) the interactive shell emits before our
 /// command runs — which would otherwise prepend to the `PATH=` line.
+#[cfg(unix)]
 const PATH_SENTINEL: &str = "__CLI_STREAM_PATH__";
 
 #[cfg(unix)]
@@ -512,6 +525,7 @@ fn login_shell_path() -> Option<String> {
 /// where shell-init chatter and terminal escape sequences live — then the
 /// `PATH=` line is read from the clean `env` dump that follows. `None` if the
 /// sentinel is missing (query misbehaved) or PATH is absent/empty.
+#[cfg(unix)]
 fn parse_path_from_shell_output(output: &str) -> Option<String> {
     output
         .rsplit_once(PATH_SENTINEL)?
@@ -565,11 +579,18 @@ mod tests {
         // resolves CLIs even without a usable shell — the original
         // "not installed" fix.
         let path = hardcoded_node_dirs();
-        assert!(path.contains("/opt/homebrew/bin"), "missing Apple-Silicon Homebrew bin");
-        assert!(path.contains("/usr/local/bin"), "missing Intel Homebrew / system bin");
+        assert!(
+            path.contains("/opt/homebrew/bin"),
+            "missing Apple-Silicon Homebrew bin"
+        );
+        assert!(
+            path.contains("/usr/local/bin"),
+            "missing Intel Homebrew / system bin"
+        );
         assert!(path.contains("/usr/bin"), "missing system bin");
     }
 
+    #[cfg(unix)]
     #[test]
     fn parse_path_from_shell_output_skips_chatter_before_the_sentinel() {
         // Real-world shape: iTerm2 OSC escapes + a banner emitted at shell
@@ -584,8 +605,14 @@ mod tests {
         // even if a bare PATH= is present.
         assert_eq!(parse_path_from_shell_output("PATH=/usr/bin"), None);
         // Sentinel present but PATH absent/empty → None.
-        assert_eq!(parse_path_from_shell_output("__CLI_STREAM_PATH__\nFOO=bar"), None);
-        assert_eq!(parse_path_from_shell_output("__CLI_STREAM_PATH__\nPATH=\nFOO=bar"), None);
+        assert_eq!(
+            parse_path_from_shell_output("__CLI_STREAM_PATH__\nFOO=bar"),
+            None
+        );
+        assert_eq!(
+            parse_path_from_shell_output("__CLI_STREAM_PATH__\nPATH=\nFOO=bar"),
+            None
+        );
     }
 
     #[test]
@@ -611,7 +638,10 @@ mod tests {
         assert!(combined.starts_with("/Users/x/.nvm/versions/node/v22/bin:"));
         assert!(combined.contains("/opt/homebrew/bin"));
         // A bare program name has no parent dir → base path unchanged.
-        assert_eq!(prepend_program_dir(Path::new("bob"), "/usr/bin"), "/usr/bin");
+        assert_eq!(
+            prepend_program_dir(Path::new("bob"), "/usr/bin"),
+            "/usr/bin"
+        );
     }
 
     #[test]
@@ -652,7 +682,10 @@ mod tests {
         let path_env = format!("{}:{}", dir_a.display(), dir_b.display());
         assert_eq!(resolve_on_path(Path::new("bob"), &path_env), Some(exec));
         // An unknown name resolves to nothing.
-        assert_eq!(resolve_on_path(Path::new("definitely-missing"), &path_env), None);
+        assert_eq!(
+            resolve_on_path(Path::new("definitely-missing"), &path_env),
+            None
+        );
     }
 }
 
@@ -729,7 +762,11 @@ mod lifecycle {
         assert!(matches!(events.first(), Some(ProcessEvent::Started { .. })));
         assert!(matches!(
             events.last(),
-            Some(ProcessEvent::Exited { exit_code: Some(0), cancelled: false, .. })
+            Some(ProcessEvent::Exited {
+                exit_code: Some(0),
+                cancelled: false,
+                ..
+            })
         ));
         // Lines arrive in order, one event each.
         let lines: Vec<&str> = events
@@ -747,7 +784,11 @@ mod lifecycle {
         let events = run("sh", &["-c", "exit 3"]);
         assert!(matches!(
             events.last(),
-            Some(ProcessEvent::Exited { exit_code: Some(3), cancelled: false, .. })
+            Some(ProcessEvent::Exited {
+                exit_code: Some(3),
+                cancelled: false,
+                ..
+            })
         ));
     }
 
@@ -758,7 +799,10 @@ mod lifecycle {
         let (cb, events, done) = collector();
         let _handle = spawn_streaming(
             PathBuf::from("sh"),
-            vec!["-c".to_owned(), "printf '%s\\n' \"$CLI_STREAM_STUB\"".to_owned()],
+            vec![
+                "-c".to_owned(),
+                "printf '%s\\n' \"$CLI_STREAM_STUB\"".to_owned(),
+            ],
             vec![("CLI_STREAM_STUB".to_owned(), "from-env".to_owned())],
             PathBuf::from("."),
             "t".to_owned(),
@@ -781,10 +825,16 @@ mod lifecycle {
         assert!(events
             .iter()
             .any(|e| matches!(e, ProcessEvent::Stderr { line, .. } if line == "to-stderr")));
-        assert!(!events.iter().any(|e| matches!(e, ProcessEvent::Stdout { .. })));
-        assert!(events
+        assert!(!events
             .iter()
-            .any(|e| matches!(e, ProcessEvent::Exited { exit_code: Some(0), .. })));
+            .any(|e| matches!(e, ProcessEvent::Stdout { .. })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ProcessEvent::Exited {
+                exit_code: Some(0),
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -814,7 +864,13 @@ mod lifecycle {
         assert!(handle.was_cancelled());
         let events = events.lock().unwrap();
         assert!(
-            matches!(events.last(), Some(ProcessEvent::Exited { cancelled: true, .. })),
+            matches!(
+                events.last(),
+                Some(ProcessEvent::Exited {
+                    cancelled: true,
+                    ..
+                })
+            ),
             "expected Exited(cancelled=true), got {:?}",
             events.last()
         );

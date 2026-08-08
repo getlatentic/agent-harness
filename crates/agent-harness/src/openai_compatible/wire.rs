@@ -197,6 +197,10 @@ pub(crate) enum Fragment<'a> {
 /// reasoning fragment as it arrives, accumulates the full assistant message
 /// (content + tool calls) and any usage, and returns them. Blocking — driven on
 /// the worker thread, like [`post_chat`].
+// Each argument is a distinct wire field, and the two `post_chat_stream`
+// variants must stay signature-symmetric so callers can swap endpoints; the
+// optional bits are already bundled in `RequestExtras`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn post_chat_stream(
     base: &str,
     api_key: Option<&str>,

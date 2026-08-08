@@ -1,4 +1,5 @@
-//! Shell tool — `bash`. Runs a command via `sh -c` in the working directory,
+//! Shell tool — `bash`. Runs a command through the platform's shell (`sh -c`
+//! on unix, `cmd /C` on Windows) in the working directory,
 //! draining both pipes on threads (so a chatty command can't deadlock on a full
 //! pipe buffer) and polling for completion so a timeout or cooperative cancel
 //! can kill it. Ported from OpenCode's `bash` design (MIT).
@@ -6,6 +7,7 @@
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -78,6 +80,25 @@ enum BashEnd {
     WaitErr(String),
 }
 
+/// The command that hands `command` to the platform's shell. Unix gets
+/// `sh -c`; Windows gets `cmd /C`, which is the closest equivalent that is
+/// always present (PowerShell's startup cost and profile loading make it a
+/// poor fit for the per-call shell of an agent loop).
+fn shell_command(command: &str) -> Command {
+    #[cfg(unix)]
+    {
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(command);
+        c
+    }
+    #[cfg(windows)]
+    {
+        let mut c = Command::new("cmd");
+        c.arg("/C").arg(command);
+        c
+    }
+}
+
 fn run_bash(ctx: &ToolCtx, command: &str, workdir: Option<&str>, timeout_ms: u64) -> ToolOutcome {
     let dir = match workdir {
         Some(w) => match safe_join(ctx.cwd, w) {
@@ -86,9 +107,7 @@ fn run_bash(ctx: &ToolCtx, command: &str, workdir: Option<&str>, timeout_ms: u64
         },
         None => ctx.cwd.to_path_buf(),
     };
-    let mut child = match Command::new("sh")
-        .arg("-c")
-        .arg(command)
+    let mut child = match shell_command(command)
         .current_dir(&dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -100,8 +119,8 @@ fn run_bash(ctx: &ToolCtx, command: &str, workdir: Option<&str>, timeout_ms: u64
 
     // Drain both pipes on threads so a chatty command can't deadlock on a full
     // OS pipe buffer while the main thread polls for completion.
-    let out_h = drain(child.stdout.take());
-    let err_h = drain(child.stderr.take());
+    let (out_buf, out_h) = drain(child.stdout.take());
+    let (err_buf, err_h) = drain(child.stderr.take());
 
     let start = Instant::now();
     let limit = Duration::from_millis(timeout_ms);
@@ -124,8 +143,15 @@ fn run_bash(ctx: &ToolCtx, command: &str, workdir: Option<&str>, timeout_ms: u64
         thread::sleep(Duration::from_millis(40));
     };
 
-    let stdout = out_h.join().unwrap_or_default();
-    let stderr = err_h.join().unwrap_or_default();
+    // Wait for the readers only when the child exited on its own — then EOF is
+    // guaranteed and joining yields the complete output. After a kill it is
+    // not, so take what has arrived instead of blocking past the timeout.
+    if matches!(end, BashEnd::Exited(_)) {
+        let _ = out_h.join();
+        let _ = err_h.join();
+    }
+    let stdout = taken(&out_buf);
+    let stderr = taken(&err_buf);
     let mut body = stdout;
     if !stderr.trim().is_empty() {
         if !body.is_empty() && !body.ends_with('\n') {
@@ -150,13 +176,37 @@ fn run_bash(ctx: &ToolCtx, command: &str, workdir: Option<&str>, timeout_ms: u64
     }
 }
 
-/// Read a child pipe to completion on its own thread (returns the text).
-fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> thread::JoinHandle<String> {
-    thread::spawn(move || {
-        let mut s = String::new();
+/// Read a child pipe on its own thread, appending into a shared buffer as data
+/// arrives. The buffer — rather than the thread's return value — is what makes
+/// a timeout bounded: `read_to_string` only returns at EOF, and killing the
+/// child does not necessarily close the pipe (a surviving grandchild can still
+/// hold the write end), so waiting for the reader would wait out the very
+/// process the timeout just killed.
+fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> (Arc<Mutex<Vec<u8>>>, thread::JoinHandle<()>) {
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&buf);
+    let handle = thread::spawn(move || {
         if let Some(mut r) = pipe {
-            let _ = r.read_to_string(&mut s);
+            let mut chunk = [0u8; 8192];
+            loop {
+                match r.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => lock(&sink).extend_from_slice(&chunk[..n]),
+                }
+            }
         }
-        s
-    })
+    });
+    (buf, handle)
+}
+
+/// A poisoned buffer still holds the bytes read before the panic, and partial
+/// output beats none in a diagnostic.
+fn lock(buf: &Arc<Mutex<Vec<u8>>>) -> std::sync::MutexGuard<'_, Vec<u8>> {
+    buf.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Take everything read so far, leaving the buffer empty.
+fn taken(buf: &Arc<Mutex<Vec<u8>>>) -> String {
+    let bytes = std::mem::take(&mut *lock(buf));
+    String::from_utf8_lossy(&bytes).into_owned()
 }

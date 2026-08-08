@@ -14,15 +14,21 @@
 
 use crate::error::BobError;
 use cli_stream::InstallEvent;
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::thread;
+#[cfg(unix)]
 use tempfile::NamedTempFile;
 
 /// Source of truth — same bytes also read by the dev API at
 /// `scripts/install-bob.sh`. The bob-api binary doesn't need a
 /// separate copy because it depends on this crate.
+#[cfg(unix)]
 const INSTALL_SCRIPT: &str = include_str!("../scripts/install-bob.sh");
 
 /// Run the install script, invoking `callback` for each event.
@@ -36,6 +42,7 @@ const INSTALL_SCRIPT: &str = include_str!("../scripts/install-bob.sh");
 /// failure, spawn failure). Once `bash` is running, all failures
 /// surface through the `Done { ok: false }` event instead — that's
 /// how the script's own errors get back to the user.
+#[cfg(unix)]
 pub fn install_bob<F>(mut callback: F) -> Result<(), BobError>
 where
     F: FnMut(InstallEvent) + Send + Sync + 'static + Clone,
@@ -134,4 +141,23 @@ where
     });
     drop(tmp);
     Ok(())
+}
+
+/// bob ships its installer as a POSIX shell script (`scripts/install-bob.sh`)
+/// and runs it under `bash`, so installation is unix-only. Refuse up front on
+/// other platforms: the alternative is a confusing failure deep in the spawn,
+/// several steps after the real reason.
+#[cfg(not(unix))]
+pub fn install_bob<F>(_callback: F) -> Result<(), BobError>
+where
+    F: FnMut(InstallEvent) + Send + Sync + 'static + Clone,
+{
+    Err(BobError::Io {
+        context: "install bob",
+        source: std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "bob's installer is a POSIX shell script run under bash; \
+             install bob manually on this platform",
+        ),
+    })
 }

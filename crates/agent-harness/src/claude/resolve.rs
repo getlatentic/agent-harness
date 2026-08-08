@@ -48,14 +48,16 @@ impl InstallKind {
 /// would actually launch. `None` when nothing on PATH matches.
 pub(crate) fn resolve_on_path(program: &str, path: &str) -> Option<PathBuf> {
     // A program containing a separator is a path, not a PATH lookup (mirrors the
-    // OS): resolve it directly.
-    if program.contains('/') {
+    // OS): resolve it directly. Windows accepts either slash.
+    if program.contains('/') || (cfg!(windows) && program.contains('\\')) {
         let candidate = PathBuf::from(program);
         return is_executable_file(&candidate).then_some(candidate);
     }
-    path.split(':')
-        .filter(|dir| !dir.is_empty())
-        .map(|dir| Path::new(dir).join(program))
+    // `split_paths` uses the platform's PATH separator — `:` on unix, `;` on
+    // Windows, where splitting on `:` would also sever every drive letter.
+    std::env::split_paths(path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(program))
         .find(|candidate| is_executable_file(candidate))
 }
 
@@ -177,8 +179,9 @@ mod tests {
         std::fs::create_dir_all(&second).unwrap();
         // Only the second dir has the binary → it must win even though it's later.
         write_executable(&second.join("claude"));
-        let path = format!("{}:{}", first.display(), second.display());
-        assert_eq!(resolve_on_path("claude", &path), Some(second.join("claude")));
+        let path = std::env::join_paths([&first, &second]).unwrap();
+        let path = path.to_str().unwrap();
+        assert_eq!(resolve_on_path("claude", path), Some(second.join("claude")));
         std::fs::remove_dir_all(&dir).ok();
     }
 

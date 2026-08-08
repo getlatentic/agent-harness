@@ -227,7 +227,7 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
         (*on_event)(RunEvent::Activity { run_id: rid.to_owned(), message });
     }
     let toolset = tools::ToolSet::new(mcp_tools, cfg.permissions.clone(), cfg.permission_prompt.clone());
-    let tool_defs = toolset.defs(cfg.mode, &cfg.model, false);
+    let tool_defs = toolset.defs(cfg.mode, &cfg.model, tools::AgentContext::Main);
     // Structured-output schema (if set) as an OpenAI `response_format`, applied
     // each turn so the final answer conforms; tool-call turns carry null content
     // and stay unconstrained.
@@ -735,7 +735,7 @@ fn run_subagent(
 
     let mut system_prompt = build_system_prompt(base, &parent.cwd, skills);
     system_prompt.push_str(&environment_block(&parent.cwd));
-    let tool_defs = toolset.defs(parent.mode, model, true);
+    let tool_defs = toolset.defs(parent.mode, model, tools::AgentContext::Subagent);
     let model_client = Model { cfg: parent };
     let mut transcript = vec![ChatMessage::user(prompt.to_owned())];
     let mut final_text = String::new();

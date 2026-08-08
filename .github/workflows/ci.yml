@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # A crate that spawns agent CLIs has no business hiding warnings.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Every platform reports independently: a Windows break must not cancel
+      # the macOS/Linux runs, since the point is to see the whole picture.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+      # The `bob` adapter pulls `keyring`, whose Linux backend links libdbus.
+      - name: Linux system deps
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      # `--all-features` covers what Compose actually consumes (acp +
+      # openai-compatible), not just the default CLI adapters.
+      - name: Build
+        run: cargo build --workspace --all-features --verbose
+      - name: Test
+        run: cargo test --workspace --all-features --verbose
+
+  lint:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      # Reported, not enforced: the tree predates this workflow and a repo-wide
+      # `cargo fmt` belongs in its own commit, not mixed into unrelated work.
+      # Flip to a gate once that lands.
+      - name: Format (advisory)
+        run: cargo fmt --all --check || true
+      - name: Clippy
+        run: cargo clippy --workspace --all-features --all-targets
