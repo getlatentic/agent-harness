@@ -184,10 +184,15 @@ impl RunControl for ProcessHandle {
 ///
 /// Treat `Ask` as "do not change my files", not as a sandbox. None of these
 /// adapters isolate the process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RunMode {
     /// Answer / discuss. No file edits expected.
+    ///
+    /// The default, deliberately: a caller who omits the mode gets the
+    /// read-only one. Defaulting to `Edit` would hand write access to anyone
+    /// who forgot the field.
+    #[default]
     Ask,
     /// Propose edits to the workspace.
     Edit,
@@ -271,7 +276,11 @@ pub struct Attachment {
 /// approval mode, coin budget, executable override) are filled in by
 /// the adapter from its own defaults; the user-facing tuning the
 /// picker exposes (model, effort, turn cap) rides on `tuning`.
-#[derive(Debug, Clone)]
+/// Derives `Default`, so a call site names only what it cares about and leaves
+/// the rest to `..Default::default()`. Spelling out `cwd: None`, `resume:
+/// None` and `attachments: Vec::new()` on every call was noise, and it made
+/// each new field a breaking change for every caller.
+#[derive(Debug, Clone, Default)]
 pub struct RunRequest {
     /// Caller-chosen id used to correlate events with the handle.
     pub run_id: String,
@@ -619,11 +628,7 @@ pub trait Harness: Send + Sync {
     /// let (_handle, rx) = Claude::new().run_channel(RunRequest {
     ///     run_id: "demo".into(),
     ///     prompt: "Explain Markdown headings in one sentence.".into(),
-    ///     cwd: None,
-    ///     mode: RunMode::Ask,
-    ///     tuning: RunTuning::default(),
-    ///     resume: None,
-    ///     attachments: Vec::new(),
+    ///     ..Default::default()
     /// })?;
     /// for event in rx {
     ///     match event {

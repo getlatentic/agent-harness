@@ -49,11 +49,9 @@ fn main() -> Result<(), HarnessError> {
     let (_handle, rx) = model.run_channel(RunRequest {
         run_id: "demo".into(),
         prompt: "In one sentence, what is an OpenAI-compatible API?".into(),
-        cwd: None,
         mode: RunMode::Ask, // Ask = read-only tools; Edit = + write/edit/bash
         tuning: RunTuning { model: Some(chosen), ..Default::default() },
-        resume: None,
-        attachments: Vec::new(),
+        ..Default::default()
     })?;
 
     for ev in rx {

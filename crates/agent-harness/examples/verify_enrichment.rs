@@ -11,7 +11,7 @@
 
 use std::sync::{mpsc::sync_channel, Arc};
 
-use harness::{default_registry, ReasoningEffort, RunCallback, RunEvent, RunMode, RunRequest, RunTuning};
+use harness::{default_registry, ReasoningEffort, RunCallback, RunEvent, RunRequest, RunTuning};
 
 fn main() -> Result<(), String> {
     let id = std::env::args().nth(1).unwrap_or_else(|| "claude".to_owned());
@@ -40,10 +40,8 @@ fn main() -> Result<(), String> {
             run_id: "verify".into(),
             prompt,
             cwd: Some(std::env::current_dir().map_err(|e| e.to_string())?),
-            mode: RunMode::Ask,
             tuning,
-            resume: None,
-            attachments: Vec::new(),
+            ..Default::default()
         },
         on_event,
     )

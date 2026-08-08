@@ -6,7 +6,7 @@
 //!
 //! Every other example uses this same loop. Only the constructor changes.
 
-use harness::{Claude, Harness, HarnessError, RunEvent, RunMode, RunRequest, RunTuning};
+use harness::{Claude, Harness, HarnessError, RunEvent, RunRequest};
 
 fn main() -> Result<(), HarnessError> {
     // Drives the `claude` CLI. See `codex.rs` for the same loop, one line apart.
@@ -20,11 +20,12 @@ fn main() -> Result<(), HarnessError> {
     let (_handle, rx) = claude.run_channel(RunRequest {
         run_id: "demo".into(),
         prompt: "In one sentence, what is a Markdown heading?".into(),
-        cwd: None,                    // working dir for the agent's tool calls
-        mode: RunMode::Ask,           // Ask = answer only; Edit = may edit files
-        tuning: RunTuning::default(), // optional: model / effort / max_turns
-        resume: None,                 // Some(session_id) to continue a prior run
-        attachments: Vec::new(),      // images for multimodal models; none here
+        // The rest have defaults worth knowing: no `cwd` (the agent's tools
+        // run where the process does), `mode: RunMode::Ask` (answer only —
+        // `Edit` lets it write files), no `resume` (pass a session id to
+        // continue a prior run), and no `attachments` (images, for multimodal
+        // models). `tuning` carries model, effort and turn cap.
+        ..Default::default()
     })?; // keep `_handle` to `.cancel()`; dropping it does NOT stop the run
 
     // ONE normalized event stream, regardless of the backing CLI. `rx` hangs

@@ -11,7 +11,7 @@
 //! — change the URL and the variable name.
 
 use harness::{
-    Harness, HarnessError, OpenHarness, OpenHarnessConfig, RunEvent, RunMode, RunRequest, RunTuning,
+    Harness, HarnessError, OpenHarness, OpenHarnessConfig, RunEvent, RunRequest, RunTuning,
 };
 
 fn main() -> Result<(), HarnessError> {
@@ -39,11 +39,8 @@ fn main() -> Result<(), HarnessError> {
     let (_handle, rx) = openrouter.run_channel(RunRequest {
         run_id: "demo".into(),
         prompt: "In one sentence, what is an OpenAI-compatible API?".into(),
-        cwd: None,
-        mode: RunMode::Ask,
         tuning: RunTuning { model: Some(model), ..Default::default() },
-        resume: None,
-        attachments: Vec::new(),
+        ..Default::default()
     })?;
 
     for ev in rx {

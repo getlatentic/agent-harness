@@ -24,7 +24,7 @@ use std::sync::{mpsc::sync_channel, Arc, Mutex};
 use harness::{
     run_events_from_parsed, spawn_streaming, CredentialSpec, Harness, HarnessCapabilities,
     HarnessError, HarnessInfo, HarnessReadiness, ParsedLine, ProcessEvent,
-    RunCallback, RunEvent, RunHandle, RunMode, RunRequest, RunTuning, Registry, SessionInfo,
+    RunCallback, RunEvent, RunHandle, RunRequest, Registry, SessionInfo,
 };
 use serde_json::Value;
 
@@ -182,11 +182,7 @@ fn main() -> Result<(), String> {
         RunRequest {
             run_id: "demo".into(),
             prompt: "hello".into(),
-            cwd: None,
-            mode: RunMode::Ask,
-            tuning: RunTuning::default(),
-            resume: None,
-            attachments: Vec::new(),
+            ..Default::default()
         },
         on_event,
     )

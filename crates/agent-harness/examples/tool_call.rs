@@ -42,12 +42,14 @@ fn main() -> Result<(), HarnessError> {
         prompt: "List the files in the current directory, then say how many there are.".into(),
         // The tools run here. Point it anywhere you do not mind being read.
         cwd: Some(std::env::current_dir().unwrap_or_default()),
+        // Spelled out because it is the subject of this example: Ask offers
+        // the read-only tools (read, glob, grep, list); Edit adds write, edit
+        // and bash. Ask is the default, so the other examples omit it.
+        mode: RunMode::Ask,
         // Ask offers read-only tools: read, glob, grep, list.
         // Edit adds the mutating ones: write, edit, bash.
-        mode: RunMode::Ask,
         tuning: RunTuning { model: Some(model), ..Default::default() },
-        resume: None,
-        attachments: Vec::new(),
+        ..Default::default()
     })?;
 
     let mut calls = 0usize;

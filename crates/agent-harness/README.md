@@ -10,8 +10,8 @@ teaching your UI another format.
 
 Imported as `harness`.
 
-```toml
-agent-harness = "0.4"
+```sh
+cargo add agent-harness
 ```
 
 ## Highlights
@@ -55,25 +55,31 @@ agent-harness = { version = "0.4", default-features = false, features = ["claude
 
 Build an agent. Call `run_channel`. Read events.
 
+(`run_channel` hands back a receiver to loop over. The trait's own `run` takes
+a callback instead — reach for it when you are forwarding events straight onto
+a socket or channel and an intermediate hop would be waste.)
+
 ```rust
-use harness::{Claude, Harness, RunEvent, RunMode, RunRequest, RunTuning};
+use harness::{Claude, Harness, RunEvent, RunRequest};
 
 let (_handle, events) = Claude::new().run_channel(RunRequest {
-    run_id: "1".into(),
-    prompt: "Summarize the README in one sentence.".into(),
-    attachments: Vec::new(),
-    cwd: None,
-    mode: RunMode::Ask,
-    tuning: RunTuning::default(),
-    resume: None,
+    run_id: "demo".into(),
+    prompt: "In one sentence, what is a Markdown heading?".into(),
+    ..Default::default()
 })?;
 
 for event in events {
-    if let RunEvent::Text { delta, .. } = event {
-        print!("{delta}");
+    match event {
+        RunEvent::Text { delta, .. } => print!("{delta}"),
+        RunEvent::Exited { .. } => break,
+        _ => {}
     }
 }
 ```
+
+Everything not named has a default: no working directory, `RunMode::Ask`
+(answer only — `Edit` lets it write files), no resumed session, no
+attachments.
 
 Keep `_handle` if you want to stop the run. Dropping it does not cancel.
 

@@ -14,7 +14,7 @@
 //! below is only a label.
 
 use harness::{
-    Harness, HarnessError, OpenHarness, OpenHarnessConfig, RunEvent, RunMode, RunRequest, RunTuning,
+    Harness, HarnessError, OpenHarness, OpenHarnessConfig, RunEvent, RunRequest, RunTuning,
 };
 
 fn main() -> Result<(), HarnessError> {
@@ -40,13 +40,10 @@ fn main() -> Result<(), HarnessError> {
     let (_handle, rx) = llama.run_channel(RunRequest {
         run_id: "demo".into(),
         prompt: "In one sentence, what is llama.cpp?".into(),
-        cwd: None,
-        mode: RunMode::Ask,
         // Whatever the server loaded. llama.cpp ignores this and serves its
         // one model, so it is a label rather than a selection.
         tuning: RunTuning { model: Some("local".into()), ..Default::default() },
-        resume: None,
-        attachments: Vec::new(),
+        ..Default::default()
     })?;
 
     for ev in rx {

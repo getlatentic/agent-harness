@@ -7,7 +7,7 @@
 //! This file exists to make the point concrete: swapping the agent is a
 //! constructor change. Diff it against `claude.rs` — nothing else moves.
 
-use harness::{Codex, Harness, HarnessError, RunEvent, RunMode, RunRequest, RunTuning};
+use harness::{Codex, Harness, HarnessError, RunEvent, RunRequest};
 
 fn main() -> Result<(), HarnessError> {
     let codex = Codex::new();
@@ -15,13 +15,9 @@ fn main() -> Result<(), HarnessError> {
     let (_handle, rx) = codex.run_channel(RunRequest {
         run_id: "demo".into(),
         prompt: "In one sentence, what is a Markdown heading?".into(),
-        cwd: None,
-        mode: RunMode::Ask,
         // Codex exposes reasoning effort but no turn cap. Model ids change
-        // often, so free text is accepted: RunTuning { model: Some("o4-mini".into()), .. }
-        tuning: RunTuning::default(),
-        resume: None,
-        attachments: Vec::new(),
+        // often, so free text is accepted: RunTuning { model: Some("o4-mini".into()), .. },
+        ..Default::default()
     })?;
 
     for ev in rx {

@@ -69,7 +69,7 @@ fn stream_run(request: tiny_http::Request) {
         mode: if get("mode").as_deref() == Some("ask") { RunMode::Ask } else { RunMode::Edit },
         tuning: RunTuning { model: get("model"), ..Default::default() },
         resume: get("session"),
-        attachments: Vec::new(),
+        ..Default::default()
     };
 
     respond_stream(build_harness(&params).as_ref(), req, request);

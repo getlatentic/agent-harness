@@ -6,7 +6,7 @@
 //! cargo run --example acp --features acp   # needs `opencode` on PATH
 //! ```
 
-use harness::{AcpHarness, Harness, HarnessError, RunEvent, RunMode, RunRequest, RunTuning};
+use harness::{AcpHarness, Harness, HarnessError, RunEvent, RunRequest};
 
 fn main() -> Result<(), HarnessError> {
     // OpenCode over ACP — spawns `opencode acp` and relays its session stream.
@@ -16,14 +16,10 @@ fn main() -> Result<(), HarnessError> {
     let (_handle, rx) = agent.run_channel(RunRequest {
         run_id: "demo".into(),
         prompt: "In one sentence, what is the Agent Client Protocol?".into(),
-        cwd: None,
-        mode: RunMode::Ask,
         // ACP carries no model; opencode takes a launch-time one out-of-band.
         // Set `tuning.model` (e.g. "opencode/big-pickle") and it's written to a
-        // temp config at spawn. `default()` ⇒ the agent's own default.
-        tuning: RunTuning::default(),
-        resume: None,
-        attachments: Vec::new(),
+        // temp config at spawn. `default()` ⇒ the agent's own default.,
+        ..Default::default()
     })?;
 
     // One normalized stream, whichever ACP agent produced it.

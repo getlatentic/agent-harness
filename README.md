@@ -7,8 +7,8 @@ OpenRouter, vLLM, LM Studio, llama-server. Call them from your program instead
 of opening a terminal. You do not shell out, and you do not parse each agent's
 own output format. Every agent returns the same event stream.
 
-```toml
-agent-harness = "0.4"
+```sh
+cargo add agent-harness
 ```
 
 ## Highlights
@@ -29,17 +29,17 @@ agent-harness = "0.4"
 
 Build an agent. Call `run_channel`. Read events until the run exits.
 
+(`run_channel` hands back a receiver to loop over. The trait's own `run` takes
+a callback instead — reach for it when you are forwarding events straight onto
+a socket or channel and an intermediate hop would be waste.)
+
 ```rust
-use harness::{Claude, Harness, RunEvent, RunMode, RunRequest, RunTuning};
+use harness::{Claude, Harness, RunEvent, RunRequest};
 
 let (_handle, events) = Claude::new().run_channel(RunRequest {
     run_id: "demo".into(),
     prompt: "In one sentence, what is a Markdown heading?".into(),
-    attachments: Vec::new(),
-    cwd: None,
-    mode: RunMode::Ask,
-    tuning: RunTuning::default(),
-    resume: None,
+    ..Default::default()
 })?;
 
 for event in events {
@@ -50,6 +50,10 @@ for event in events {
     }
 }
 ```
+
+Everything not named has a default: no working directory, `RunMode::Ask`
+(answer only — `Edit` lets it write files), no resumed session, no
+attachments.
 
 To use Codex, an ACP agent, or a local model, change the constructor. The loop
 does not change. There is a runnable example for each:
