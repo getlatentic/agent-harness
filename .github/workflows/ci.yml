@@ -26,6 +26,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.os }}
+      # The `bob` adapter pulls `keyring`, whose Linux backend links libdbus.
+      - name: Linux system deps
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       # `--all-features` covers what Compose actually consumes (acp +
       # openai-compatible), not just the default CLI adapters.
       - name: Build
