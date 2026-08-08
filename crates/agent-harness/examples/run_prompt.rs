@@ -2,13 +2,13 @@
 //!
 //! `cargo run --example run_prompt`
 //! (requires the `claude` CLI installed + signed in; swap `Claude` for
-//! `Bob` / `Codex` to drive a different agent).
+//! `Codex` to drive a different agent).
 
 use harness::{Claude, Harness, HarnessError, RunEvent, RunMode, RunRequest, RunTuning};
 
 fn main() -> Result<(), HarnessError> {
     // Pick a harness. `Claude` drives the `claude` CLI (must be installed +
-    // signed in). Swap for `harness::Bob::new()` or `harness::Codex::new()`.
+    // signed in). Swap for `harness::Codex::new()`.
     let claude = Claude::new();
 
     // `run_channel()` starts the run and hands back the events on a channel,

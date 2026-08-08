@@ -11,7 +11,7 @@
 //!     shape ([`InstallEvent`]), and
 //!   * the shared interactive-login helper ([`run_login_command`]).
 //!
-//! The built-in per-CLI adapters live here as modules ([`bob`] / [`claude`]
+//! The built-in per-CLI adapters live here as modules ([`claude`]
 //! / [`codex`]), re-exported as [`Bob`] / [`Claude`] / [`Codex`]. The
 //! [`Registry`] is open: a third party adds their own provider by
 //! implementing [`Harness`] in their crate and registering it — no fork.
@@ -48,8 +48,6 @@ pub use cli_stream::{
     augmented_node_path, spawn_streaming, InstallEvent, ProcessEvent, ProcessHandle, StreamError,
 };
 
-#[cfg(feature = "bob")]
-pub mod bob;
 #[cfg(feature = "claude")]
 pub mod claude;
 #[cfg(feature = "codex")]
@@ -66,12 +64,6 @@ pub mod registry;
 
 // The built-in adapters, re-exported as short names so consumers write
 // `use harness::{Bob, Claude, Codex}` — each gated behind its feature.
-#[cfg(feature = "bob")]
-pub use bob::{bob_tool_kind, normalize_bob_event, BobHarness as Bob, BOB_HARNESS_ID};
-// bob's typed error, re-exported so a consumer can `downcast_ref` a bob
-// `HarnessError`'s source (install / keychain / spawn) back to `BobError`.
-#[cfg(feature = "bob")]
-pub use bob_rs::BobError;
 #[cfg(feature = "claude")]
 pub use claude::{ClaudeHarness as Claude, CLAUDE_HARNESS_ID};
 #[cfg(feature = "codex")]

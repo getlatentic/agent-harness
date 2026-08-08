@@ -3,10 +3,9 @@
 //! `cargo run --example setup`
 //!
 //! `readiness()` reports whether the CLI is installed and authenticated;
-//! `install()` installs it (npm for claude/codex; a bundled script for bob)
+//! `install()` installs it (npm for claude/codex)
 //! and `login()` runs the CLI's own OAuth (`claude auth login` / `codex
-//! login`, which opens the browser). bob has no `login()` — store its API
-//! key instead (see the `bob-rs` crate).
+//! login`, which opens the browser).
 
 use std::sync::Arc;
 

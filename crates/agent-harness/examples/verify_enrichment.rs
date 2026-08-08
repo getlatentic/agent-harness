@@ -6,7 +6,7 @@
 //! use. (Claude's tool *input* is expected to be `None`: it streams args
 //! incrementally; codex delivers `command` inline, so it shows input.)
 //!
-//! `cargo run --example verify_enrichment -- [claude|codex|bob] ["prompt"]`
+//! `cargo run --example verify_enrichment -- [claude|codex] ["prompt"]`
 //! (requires the CLI installed + signed in.)
 
 use std::sync::{mpsc::sync_channel, Arc};

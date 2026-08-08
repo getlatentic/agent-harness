@@ -11,7 +11,7 @@ keywords = ["llm", "ai-agent", "coding-agent", "claude", "codex"]
 categories = ["api-bindings", "command-line-utilities", "development-tools"]
 
 # The harness umbrella: the framework (trait + RunEvent + open Registry,
-# re-exporting the engine from `cli-stream`) plus the built-in bob/claude/
+# re-exporting the engine from `cli-stream`) plus the built-in claude/
 # codex adapters as feature-gated modules. Imported as `harness`
 # (`use harness::{Harness, Registry, Bob, Claude, Codex}`); with
 # `default-features = false` it's just the lean framework — no adapters,
@@ -25,9 +25,7 @@ name = "harness"
 # want (e.g. just `claude` — no keychain SDK). The local- / OpenAI-compatible
 # model runtime is the opt-in `openai-compatible` feature below (off by default;
 # it pulls a blocking HTTP client + ripgrep / HTML-md / JSON-schema deps).
-default = ["claude", "codex", "bob"]
-# The unofficial bob adapter pulls in the bob SDK (keyring / tempfile / installer).
-bob = ["dep:bob-rs"]
+default = ["claude", "codex"]
 # claude / codex own their CLI's login — no extra deps.
 claude = []
 codex = []
@@ -51,9 +49,6 @@ openai-compatible = ["models-dev", "dep:ureq", "dep:ignore", "dep:globset", "dep
 # ProcessEvent / InstallEvent shapes. Re-exported so adapters + consumers
 # reach the engine through this framework crate.
 cli-stream.workspace = true
-# The unofficial bob SDK — wrapped by the `bob` adapter module, so it's
-# optional + gated behind the `bob` feature.
-bob-rs = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 # Typed errors for the public API (HarnessError) — derive Display + the
