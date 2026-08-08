@@ -119,7 +119,7 @@ fn build_harness(params: &HashMap<String, String>) -> Box<dyn Harness> {
 /// (`AcpHarness`) share one path.
 fn respond_stream(harness: &dyn Harness, req: RunRequest, request: tiny_http::Request) {
     match harness.run(req) {
-        Ok((_handle, rx)) => {
+        Ok((_handle, events)) => {
             let headers = vec![
                 header("Content-Type", "text/event-stream"),
                 header("Cache-Control", "no-cache"),
@@ -128,7 +128,7 @@ fn respond_stream(harness: &dyn Harness, req: RunRequest, request: tiny_http::Re
             // `data_length: None` → chunked transfer, which the browser's
             // EventSource consumes incrementally. `respond` blocks while the body
             // streams (so `_handle` outlives the run).
-            let _ = request.respond(Response::new(StatusCode(200), headers, SseBody::new(rx), None, None));
+            let _ = request.respond(Response::new(StatusCode(200), headers, SseBody::new(events), None, None));
         }
         Err(e) => {
             let _ = request.respond(Response::from_string(format!("run failed: {e}")).with_status_code(500));
@@ -219,15 +219,15 @@ fn read_file_scoped(cwd: &Path, path: &str) -> Result<String, String> {
 /// blocks for the next event, formats it as one `data:` frame, and yields EOF
 /// once `Exited` has been sent (or the sender drops).
 struct SseBody {
-    rx: Receiver<RunEvent>,
+    events: Receiver<RunEvent>,
     buf: Vec<u8>,
     pos: usize,
     done: bool,
 }
 
 impl SseBody {
-    fn new(rx: Receiver<RunEvent>) -> Self {
-        Self { rx, buf: Vec::new(), pos: 0, done: false }
+    fn new(events: Receiver<RunEvent>) -> Self {
+        Self { events, buf: Vec::new(), pos: 0, done: false }
     }
 }
 
@@ -237,7 +237,7 @@ impl Read for SseBody {
             if self.done {
                 return Ok(0);
             }
-            match self.rx.recv() {
+            match self.events.recv() {
                 Ok(event) => {
                     self.done = matches!(event, RunEvent::Exited { .. });
                     let json = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_owned());

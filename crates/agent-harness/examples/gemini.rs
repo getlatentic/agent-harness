@@ -34,14 +34,14 @@ fn main() -> Result<(), HarnessError> {
         return Ok(());
     }
 
-    let (_handle, rx) = gemini.run(RunRequest {
+    let (_handle, events) = gemini.run(RunRequest {
         run_id: "demo".into(),
         prompt: "In one sentence, what is the Agent Client Protocol?".into(),
         ..Default::default()
     })?;
 
-    for ev in rx {
-        match ev {
+    for event in events {
+        match event {
             RunEvent::Text { delta, .. } => print!("{delta}"),
             RunEvent::Thinking { delta, .. } => eprint!("{delta}"),
             RunEvent::ToolStart { title, .. } => eprintln!("\n[tool] {title}"),

@@ -46,7 +46,7 @@ fn main() -> Result<(), HarnessError> {
     };
     eprintln!("[model] {chosen}");
 
-    let (_handle, rx) = model.run(RunRequest {
+    let (_handle, events) = model.run(RunRequest {
         run_id: "demo".into(),
         prompt: "In one sentence, what is an OpenAI-compatible API?".into(),
         mode: RunMode::Ask, // Ask = read-only tools; Edit = + write/edit/bash
@@ -54,8 +54,8 @@ fn main() -> Result<(), HarnessError> {
         ..Default::default()
     })?;
 
-    for ev in rx {
-        match ev {
+    for event in events {
+        match event {
             RunEvent::Text { delta, .. } => print!("{delta}"),
             RunEvent::Thinking { delta, .. } => eprint!("{delta}"),
             RunEvent::ToolStart { title, .. } => eprintln!("\n[tool] {title}"),

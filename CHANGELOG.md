@@ -7,6 +7,96 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+Breaking. Read **Migration from 0.4** before you upgrade.
+
+### Migration from 0.4
+
+**1. `Harness::run` is now `Harness::start`.** If you *implement* `Harness`,
+rename your method. The signature is unchanged:
+
+```rust
+fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError>
+```
+
+**2. `Harness::run_channel` is now `Harness::run`.** If you *call* a harness,
+`run` is the name to reach for, and it hands back a receiver:
+
+```rust
+let (_handle, events) = harness.run(request)?;   // was run_channel
+for event in events { /* … */ }
+```
+
+An adapter implements only `start`; every harness gets `run` for free.
+
+**3. Give an OpenAI-compatible host its API key as a value.** `api_key_env`
+named an environment variable, so the key had to be exported into the
+process — and every child the agent spawned inherited it. Pass the secret
+directly instead:
+
+```rust
+OpenHarnessConfig {
+    api_key: Some(key_from_your_vault),   // the secret itself
+    requires_api_key: true,               // was implied by api_key_env
+    ..Default::default()
+}
+```
+
+`api_key_env` still works and still reads the variable, for CI and headless
+runs where an env var is the natural source. `api_key` wins when both are set.
+
+**4. `requires_api_key` is now its own field.** It used to be inferred from
+`api_key_env.is_some()`, which meant a host passing a key by value reported
+`credential_required: false` and looked permanently ready. Set it explicitly.
+Leaving it `false` while `api_key_env` is set keeps the old behaviour.
+
+**5. `OpenHarnessConfig` gained `disabled_tools`.** Add
+`disabled_tools: Vec::new()` — or use `..Default::default()`, which is now
+derived — to keep every built-in tool. Name a tool to withhold it:
+
+```rust
+disabled_tools: vec!["shell".into()],
+```
+
+Disabled tools are removed at construction, so they never reach the model's
+prompt. `OpenHarness::builtin_tool_names()` lists what you can name.
+
+### Changed
+
+- **BREAKING — `Harness::run` renamed to `start`; `run_channel` renamed to
+  `run`.** The common call is the channel one, so it should have the short
+  name. `run_channel` described its plumbing rather than what a caller wanted,
+  and left `run` — the obvious first thing to reach for — as the awkward
+  callback form.
+- **BREAKING — `OpenHarnessConfig.requires_api_key` split out of
+  `api_key_env`.** One field was doing four jobs: naming a variable, marking
+  the host as needing a key, deciding whether a credential slot was writable,
+  and gating readiness. A host holding its key in a vault got the wrong answer
+  to all four.
+
+### Added
+
+- **`OpenHarnessConfig.api_key`** — the secret by value, so a host with an OS
+  vault never has to put it in the environment.
+- **`OpenHarnessConfig.disabled_tools`** and
+  **`OpenHarness::builtin_tool_names`** — choose the tool set at construction.
+  Everything is enabled by default; name what you want withheld.
+- **`RunRequest` and `RunMode` now derive `Default`.** Name the fields you
+  mean and let the rest default. `RunMode` defaults to `Ask`, the read-only
+  mode — defaulting to `Edit` would hand write access to anyone who forgot
+  the field.
+- **`OpenHarness::ollama_at(base_url)`** — an Ollama on a non-default host.
+
+### Fixed
+
+- **The shell tool no longer inherits the whole environment.** A command the
+  model ran could read any variable the host process held, including the API
+  key driving that same run. The child now gets an allowlist of about twenty
+  benign variables (`PATH`, `HOME`, `LANG`, the Windows equivalents). A
+  denylist was tried first and leaked in both directions — it stripped
+  `TOKENIZERS_PARALLELISM` while passing `AWS_ACCESS_KEY_ID` straight through.
+- **No console window flashes on Windows** (#35). Every child process spawns
+  with `CREATE_NO_WINDOW`, via `cli_stream::hidden_command`.
+
 ## [0.4.0] - 2026-08-08
 
 `agent-harness` 0.4.0 and `cli-stream` 0.3.7.

@@ -37,7 +37,7 @@ fn main() -> Result<(), HarnessError> {
     };
     eprintln!("[model] {model}\n");
 
-    let (_handle, rx) = agent.run(RunRequest {
+    let (_handle, events) = agent.run(RunRequest {
         run_id: "tools".into(),
         prompt: "List the files in the current directory, then say how many there are.".into(),
         // The tools run here. Point it anywhere you do not mind being read.
@@ -53,8 +53,8 @@ fn main() -> Result<(), HarnessError> {
     })?;
 
     let mut calls = 0usize;
-    for ev in rx {
-        match ev {
+    for event in events {
+        match event {
             // A tool call starts. `locations` carries the paths it touches, so
             // a UI can show the subject rather than a bare tool name.
             RunEvent::ToolStart { title, tool_kind, locations, .. } => {

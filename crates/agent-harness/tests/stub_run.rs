@@ -103,11 +103,11 @@ fn streams_normalized_events_then_closes() {
     let harness = StubHarness {
         script: "printf '%s\\n' alpha beta".to_owned(),
     };
-    let (_handle, rx) = harness.run(request()).expect("run");
+    let (_handle, events) = harness.run(request()).expect("run");
 
     // Draining to completion proves the channel closed on its own when the
     // real process exited.
-    let events: Vec<RunEvent> = rx.into_iter().collect();
+    let events: Vec<RunEvent> = events.into_iter().collect();
 
     assert!(
         matches!(events.first(), Some(RunEvent::Started { .. })),
@@ -139,9 +139,9 @@ fn run_id_is_threaded_onto_every_event() {
     let harness = StubHarness {
         script: "printf '%s\\n' one".to_owned(),
     };
-    let (_handle, rx) = harness.run(request()).expect("run");
-    for ev in rx {
-        let id = match &ev {
+    let (_handle, events) = harness.run(request()).expect("run");
+    for event in events {
+        let id = match &event {
             RunEvent::Started { run_id }
             | RunEvent::Text { run_id, .. }
             | RunEvent::Exited { run_id, .. } => run_id.as_str(),
@@ -162,7 +162,7 @@ fn cancel_flows_through_run_and_flags_exited() {
     let harness = StubHarness {
         script: "exec sleep 5".to_owned(),
     };
-    let (handle, rx) = harness.run(request()).expect("run");
+    let (handle, events) = harness.run(request()).expect("run");
 
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(150));
@@ -170,7 +170,7 @@ fn cancel_flows_through_run_and_flags_exited() {
     });
 
     let started = Instant::now();
-    let events: Vec<RunEvent> = rx.into_iter().collect();
+    let events: Vec<RunEvent> = events.into_iter().collect();
     assert!(
         started.elapsed() < Duration::from_secs(4),
         "cancel should end the run well before the 5s sleep finishes"

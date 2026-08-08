@@ -12,14 +12,14 @@ use harness::{Codex, Harness, HarnessError, RunEvent, RunRequest};
 fn main() -> Result<(), HarnessError> {
     let codex = Codex::new();
 
-    let (_handle, rx) = codex.run(RunRequest {
+    let (_handle, events) = codex.run(RunRequest {
         run_id: "demo".into(),
         prompt: "In one sentence, what is a Markdown heading?".into(),
         ..Default::default()
     })?;
 
-    for ev in rx {
-        match ev {
+    for event in events {
+        match event {
             RunEvent::Text { delta, .. } => print!("{delta}"),
             RunEvent::Thinking { delta, .. } => eprint!("{delta}"),
             RunEvent::ToolStart { title, .. } => eprintln!("\n[tool] {title}"),
