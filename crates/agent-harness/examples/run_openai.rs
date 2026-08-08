@@ -4,7 +4,8 @@
 //!
 //! ```text
 //! cargo run --example run_openai --features openai-compatible
-//! # needs a reachable model, e.g. `ollama serve` + `ollama pull qwen2.5-coder`
+//! # needs `ollama serve` and at least one pulled model
+//! # pick one explicitly with OLLAMA_MODEL=llama3.2:1b
 //! ```
 
 use harness::{Harness, HarnessError, OpenHarness, RunEvent, RunMode, RunRequest, RunTuning};
@@ -17,13 +18,36 @@ fn main() -> Result<(), HarnessError> {
     //       api_key_env: Some("OPENROUTER_API_KEY".into()), ..Default::default() })
     let model = OpenHarness::ollama();
 
+    let readiness = model.readiness();
+    if !readiness.ready {
+        eprintln!("Ollama is not reachable: {}", readiness.error.unwrap_or_default());
+        if let Some(hint) = model.info().install_hint {
+            eprintln!("Get it from {}", hint.url);
+        }
+        return Ok(());
+    }
+
+    // Ollama has no default model, so a run must name one. Take it from the
+    // environment, else the first model actually installed — hardcoding an id
+    // here would fail on any machine that pulled something else.
+    let chosen = match std::env::var("OLLAMA_MODEL") {
+        Ok(model) if !model.trim().is_empty() => model,
+        _ => match model.list_models()?.into_iter().next() {
+            Some(first) => first.value,
+            None => {
+                eprintln!("No models installed. Try `ollama pull llama3.2:1b`.");
+                return Ok(());
+            }
+        },
+    };
+    eprintln!("[model] {chosen}");
+
     let (_handle, rx) = model.run_channel(RunRequest {
         run_id: "demo".into(),
         prompt: "In one sentence, what is an OpenAI-compatible API?".into(),
         cwd: None,
         mode: RunMode::Ask, // Ask = read-only tools; Edit = + write/edit/bash
-        // OpenHarness owns the model, so pick one per run (Ollama has no default).
-        tuning: RunTuning { model: Some("qwen2.5-coder".into()), ..Default::default() },
+        tuning: RunTuning { model: Some(chosen), ..Default::default() },
         resume: None,
         attachments: Vec::new(),
     })?;
@@ -38,5 +62,6 @@ fn main() -> Result<(), HarnessError> {
             _ => {}
         }
     }
+    println!();
     Ok(())
 }

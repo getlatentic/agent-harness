@@ -1,11 +1,12 @@
 # agent-harness
 
-**Drive coding agents from Rust, behind one trait.**
+**Use popular coding agents from your Rust code.**
 
-Claude Code, OpenAI Codex, any ACP agent, and any OpenAI-compatible model.
-Each agent streams a different format. This crate turns them all into one
-event stream, so your app learns the shape once. Adding an agent means writing
-a parser into `RunEvent`. It does not mean teaching your UI another format.
+Claude Code, OpenAI Codex, OpenCode, and any OpenAI-compatible model. Call them
+from your program instead of opening a terminal. You do not shell out, and you
+do not parse each agent's own output format. Every agent returns the same event
+stream, so adding an agent means writing a parser into `RunEvent` — not
+teaching your UI another format.
 
 Imported as `harness`.
 
@@ -15,16 +16,17 @@ agent-harness = "0.4"
 
 ## Highlights
 
-- **One trait, every agent.** Write your loop against `Harness`. Swap the
-  agent underneath and the loop does not change.
-- **One event stream.** Text, reasoning, tool calls, plans, token usage, and
-  lifecycle all arrive as `RunEvent`.
-- **A built-in agent for open models.** The `openai-compatible` feature is not
-  a wrapper. It speaks the chat API and runs the tool loop in Rust.
-- **Open registry.** Register your own agent from your own crate. No fork.
-- **Stable wire format.** `RunEvent` serializes to camelCase JSON, so HTTP,
-  SSE, and IPC transports all emit the same shape.
-- **Cancellable.** Every run returns a handle. Call `cancel()` to stop it.
+- **No terminal.** Run an agent from your code and read its output as typed
+  events, not scraped text.
+- **Every agent looks the same.** Text, reasoning, tool calls, plans, token
+  usage, and lifecycle all arrive as `RunEvent`.
+- **Swap agents without rewriting.** Change the constructor. Your loop stays.
+- **A built-in agent for open models.** The `openai-compatible` feature is not a
+  wrapper. It speaks the chat API and runs the tool loop in Rust.
+- **Add your own agent.** Implement `Harness` in your own crate and register it.
+  No fork.
+- **Stable wire format.** `RunEvent` serializes to camelCase JSON, so HTTP, SSE,
+  and IPC transports all emit the same shape.
 
 ## Features
 
@@ -171,6 +173,12 @@ Run with `cargo run --example <name>`.
 | `setup` | readiness, install hints, and sign-in | default |
 | `custom_harness` | your own agent | default |
 | `playground` | a browser UI that streams a live run over SSE | `openai-compatible acp` |
+
+## Status
+
+In active development. The API can still change. See the
+[changelog](https://github.com/getlatentic/agent-harness/blob/main/CHANGELOG.md)
+for breaking changes and how to migrate.
 
 ## License
 
