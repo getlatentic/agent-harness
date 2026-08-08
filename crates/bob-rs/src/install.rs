@@ -14,16 +14,21 @@
 
 use crate::error::BobError;
 use cli_stream::InstallEvent;
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::thread;
+#[cfg(unix)]
 use tempfile::NamedTempFile;
 
 /// Source of truth — same bytes also read by the dev API at
 /// `scripts/install-bob.sh`. The bob-api binary doesn't need a
 /// separate copy because it depends on this crate.
+#[cfg(unix)]
 const INSTALL_SCRIPT: &str = include_str!("../scripts/install-bob.sh");
 
 /// Run the install script, invoking `callback` for each event.
