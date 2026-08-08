@@ -20,7 +20,11 @@ fn main() -> Result<(), HarnessError> {
     //
     // Keep `_handle` to `.cancel()`; dropping it does NOT stop the run.
     let prompt = "In one sentence, what is a Markdown heading?";
-    let (_handle, rx) = claude.run(RunRequest::new("demo", prompt))?;
+    let (_handle, rx) = claude.run(RunRequest {
+        run_id: "demo".into(),
+        prompt: prompt.into(),
+        ..Default::default()
+    })?;
 
     // ONE normalized event stream, regardless of the backing CLI. `rx` hangs
     // up on its own when the run ends, so this loop terminates without

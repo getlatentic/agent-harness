@@ -304,27 +304,6 @@ pub struct RunRequest {
     pub resume: Option<String>,
 }
 
-impl RunRequest {
-    /// The two fields a run cannot do without. Everything else takes its
-    /// default, and `..` supplies the rest when you want more:
-    ///
-    /// ```
-    /// use harness::{RunMode, RunRequest};
-    /// let edit = RunRequest {
-    ///     mode: RunMode::Edit,
-    ///     ..RunRequest::new("run-1", "Tidy the introduction.")
-    /// };
-    /// assert_eq!(edit.run_id, "run-1");
-    /// ```
-    ///
-    /// Taking `impl Into<String>` keeps `.into()` out of the call site. A
-    /// string literal is the overwhelmingly common argument and should not
-    /// have to announce itself.
-    pub fn new(run_id: impl Into<String>, prompt: impl Into<String>) -> Self {
-        Self { run_id: run_id.into(), prompt: prompt.into(), ..Default::default() }
-    }
-}
-
 /// Where a harness's secret lives in the OS keychain, and how to
 /// label it in the UI. Lets the front-end ask for the right
 /// credential per harness without hard-coding any one harness's slot.

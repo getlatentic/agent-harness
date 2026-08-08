@@ -179,7 +179,11 @@ fn main() -> Result<(), String> {
         let _ = tx.send(ev);
     });
     let _handle = h.start(
-        RunRequest::new("demo", "hello"),
+        RunRequest {
+        run_id: "demo".into(),
+        prompt: "hello".into(),
+        ..Default::default()
+    },
         on_event,
     )
     .map_err(|e| e.to_string())?;

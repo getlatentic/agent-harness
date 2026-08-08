@@ -13,7 +13,11 @@ fn main() -> Result<(), HarnessError> {
     // Any other ACP agent works the same way — see `gemini.rs`.
     let agent = AcpHarness::opencode();
 
-    let (_handle, rx) = agent.run(RunRequest::new("demo", "In one sentence, what is the Agent Client Protocol?"))?;
+    let (_handle, rx) = agent.run(RunRequest {
+        run_id: "demo".into(),
+        prompt: "In one sentence, what is the Agent Client Protocol?".into(),
+        ..Default::default()
+    })?;
 
     // One normalized stream, whichever ACP agent produced it.
     for ev in rx {

@@ -63,10 +63,11 @@ harness gets `run` for free.)
 ```rust
 use harness::{Claude, Harness, RunEvent, RunRequest};
 
-let (_handle, events) = Claude::new().run(RunRequest::new(
-    "demo",
-    "In one sentence, what is a Markdown heading?",
-))?;
+let (_handle, events) = Claude::new().run(RunRequest {
+    run_id: "demo".into(),
+    prompt: "In one sentence, what is a Markdown heading?".into(),
+    ..Default::default()
+})?;
 
 for event in events {
     match event {
@@ -77,10 +78,8 @@ for event in events {
 }
 ```
 
-`RunRequest::new` takes the two fields a run needs; the rest default — no
-working directory, `RunMode::Ask` (answer only; `Edit` lets it write files), no
-resumed session, no attachments. Override any of them with
-`RunRequest { mode: RunMode::Edit, ..RunRequest::new(id, prompt) }`.
+Name what you mean; the rest defaults — no working directory, `RunMode::Ask`
+(answer only; `Edit` lets it write files), no resumed session, no attachments.
 
 Keep `_handle` if you want to stop the run. Dropping it does not cancel.
 

@@ -34,7 +34,11 @@ fn main() -> Result<(), HarnessError> {
         return Ok(());
     }
 
-    let (_handle, rx) = gemini.run(RunRequest::new("demo", "In one sentence, what is the Agent Client Protocol?"))?;
+    let (_handle, rx) = gemini.run(RunRequest {
+        run_id: "demo".into(),
+        prompt: "In one sentence, what is the Agent Client Protocol?".into(),
+        ..Default::default()
+    })?;
 
     for ev in rx {
         match ev {
