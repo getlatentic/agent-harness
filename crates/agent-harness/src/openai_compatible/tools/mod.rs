@@ -696,6 +696,27 @@ mod tests {
             .collect()
     }
 
+    /// A real directory for tests that only need *some* valid cwd. `/tmp` is
+    /// not a path on Windows, where a bogus cwd fails the spawn outright
+    /// ("The directory name is invalid").
+    fn any_cwd() -> &'static Path {
+        static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        DIR.get_or_init(|| {
+            let d = std::env::temp_dir().join("hl-tools-cwd");
+            let _ = std::fs::create_dir_all(&d);
+            d
+        })
+    }
+
+    /// Sleep ~5s in the platform's shell — Windows `cmd` has no `sleep`.
+    fn sleep_5() -> &'static str {
+        if cfg!(windows) {
+            "ping -n 6 127.0.0.1 > nul"
+        } else {
+            "sleep 5"
+        }
+    }
+
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("hl-tools-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -733,7 +754,7 @@ mod tests {
     #[test]
     fn mutating_tools_refused_in_ask_mode() {
         for name in ["write", "edit", "bash"] {
-            let out = run(name, json!({}), Path::new("/tmp"), RunMode::Ask);
+            let out = run(name, json!({}), any_cwd(), RunMode::Ask);
             assert!(!out.ok, "{name} should be refused in Ask");
             assert!(out.output.contains("read-only"));
         }
@@ -758,7 +779,7 @@ mod tests {
 
     #[test]
     fn unknown_tool_is_an_error() {
-        let out = run("nope", json!({}), Path::new("/tmp"), RunMode::Edit);
+        let out = run("nope", json!({}), any_cwd(), RunMode::Edit);
         assert!(!out.ok);
         assert!(out.output.contains("unknown tool"));
     }
@@ -774,7 +795,7 @@ mod tests {
         );
         let cancel = AtomicBool::new(false);
         let ctx = ToolCtx {
-            cwd: Path::new("/tmp"),
+            cwd: any_cwd(),
             mode: RunMode::Edit,
             cancel: &cancel,
             run_id: "t",
@@ -799,7 +820,7 @@ mod tests {
     fn permission_ask_consults_the_prompt() {
         let cancel = AtomicBool::new(false);
         let ctx = ToolCtx {
-            cwd: Path::new("/tmp"),
+            cwd: any_cwd(),
             mode: RunMode::Edit,
             cancel: &cancel,
             run_id: "t",
@@ -979,19 +1000,20 @@ mod tests {
         let dir = scratch("bash");
         let ok = run(
             "bash",
-            json!({ "command": "printf hi" }),
+            json!({ "command": "echo hi" }),
             &dir,
             RunMode::Edit,
         );
         assert!(ok.ok, "{}", ok.output);
-        assert_eq!(ok.output, "hi");
+        // Trimmed: `cmd` ends lines with CRLF, `sh` with LF.
+        assert_eq!(ok.output.trim(), "hi");
         let bad = run("bash", json!({ "command": "exit 3" }), &dir, RunMode::Edit);
         assert!(!bad.ok);
         assert!(bad.output.contains("exit 3"));
         let started = Instant::now();
         let slow = run(
             "bash",
-            json!({ "command": "sleep 5", "timeout": 150 }),
+            json!({ "command": sleep_5(), "timeout": 150 }),
             &dir,
             RunMode::Edit,
         );
@@ -1010,7 +1032,7 @@ mod tests {
         let cancel = AtomicBool::new(true); // already cancelled
         let out = ToolSet::builtin().execute(
             "bash",
-            &json!({ "command": "sleep 5" }),
+            &json!({ "command": sleep_5() }),
             &ToolCtx {
                 cwd: &dir,
                 mode: RunMode::Edit,
@@ -1036,9 +1058,11 @@ mod tests {
         std::fs::write(dir.join("README.md"), "").unwrap();
         let out = run("glob", json!({ "pattern": "**/*.rs" }), &dir, RunMode::Ask);
         assert!(out.ok, "{}", out.output);
-        assert!(out.output.contains("src/a.rs"));
-        assert!(out.output.contains("src/b.rs"));
-        assert!(!out.output.contains("README.md"));
+        // Windows reports `src\\a.rs`; compare on normalised separators.
+        let listed = out.output.replace('\\', "/");
+        assert!(listed.contains("src/a.rs"));
+        assert!(listed.contains("src/b.rs"));
+        assert!(!listed.contains("README.md"));
         let none = run("glob", json!({ "pattern": "*.zzz" }), &dir, RunMode::Ask);
         assert!(none.ok);
         assert!(none.output.contains("no files matched"));
@@ -1082,7 +1106,7 @@ mod tests {
                 { "content": "first", "status": "in_progress", "priority": "high" },
                 { "content": "second", "status": "pending" }
             ]}),
-            Path::new("/tmp"),
+            any_cwd(),
             RunMode::Edit,
         );
         assert!(out.ok, "{}", out.output);
@@ -1107,7 +1131,7 @@ mod tests {
                 { "header": "Pick", "question": "Which option?",
                   "options": [ { "label": "A", "description": "first" }, { "label": "B" } ] }
             ]}),
-            Path::new("/tmp"),
+            any_cwd(),
             RunMode::Ask,
         );
         assert!(out.ok, "{}", out.output);
@@ -1125,7 +1149,7 @@ mod tests {
         let out = run(
             "webfetch",
             json!({ "url": "ftp://example.com/x" }),
-            Path::new("/tmp"),
+            any_cwd(),
             RunMode::Ask,
         );
         assert!(!out.ok);
@@ -1206,7 +1230,7 @@ mod tests {
             body: "Run the deploy script.".into(),
         }];
         let ctx = ToolCtx {
-            cwd: Path::new("/tmp"),
+            cwd: any_cwd(),
             mode: RunMode::Ask,
             cancel: &cancel,
             run_id: "t",
@@ -1267,7 +1291,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let echo = Echo;
         let ctx = ToolCtx {
-            cwd: Path::new("/tmp"),
+            cwd: any_cwd(),
             mode: RunMode::Edit,
             cancel: &cancel,
             run_id: "t",

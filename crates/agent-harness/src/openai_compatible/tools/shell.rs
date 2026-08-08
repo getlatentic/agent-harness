@@ -1,4 +1,5 @@
-//! Shell tool — `bash`. Runs a command via `sh -c` in the working directory,
+//! Shell tool — `bash`. Runs a command through the platform's shell (`sh -c`
+//! on unix, `cmd /C` on Windows) in the working directory,
 //! draining both pipes on threads (so a chatty command can't deadlock on a full
 //! pipe buffer) and polling for completion so a timeout or cooperative cancel
 //! can kill it. Ported from OpenCode's `bash` design (MIT).
@@ -78,6 +79,25 @@ enum BashEnd {
     WaitErr(String),
 }
 
+/// The command that hands `command` to the platform's shell. Unix gets
+/// `sh -c`; Windows gets `cmd /C`, which is the closest equivalent that is
+/// always present (PowerShell's startup cost and profile loading make it a
+/// poor fit for the per-call shell of an agent loop).
+fn shell_command(command: &str) -> Command {
+    #[cfg(unix)]
+    {
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(command);
+        c
+    }
+    #[cfg(windows)]
+    {
+        let mut c = Command::new("cmd");
+        c.arg("/C").arg(command);
+        c
+    }
+}
+
 fn run_bash(ctx: &ToolCtx, command: &str, workdir: Option<&str>, timeout_ms: u64) -> ToolOutcome {
     let dir = match workdir {
         Some(w) => match safe_join(ctx.cwd, w) {
@@ -86,9 +106,7 @@ fn run_bash(ctx: &ToolCtx, command: &str, workdir: Option<&str>, timeout_ms: u64
         },
         None => ctx.cwd.to_path_buf(),
     };
-    let mut child = match Command::new("sh")
-        .arg("-c")
-        .arg(command)
+    let mut child = match shell_command(command)
         .current_dir(&dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
