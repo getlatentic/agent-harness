@@ -8,27 +8,25 @@
 //! [`Registry::register`] — no fork of this crate required.
 
 use crate::{Harness, HarnessInfo, HarnessReadiness};
-#[cfg(feature = "bob")]
-use crate::Bob;
 #[cfg(feature = "claude")]
 use crate::Claude;
 #[cfg(feature = "codex")]
 use crate::Codex;
 
-/// The identifier used when the caller doesn't pick one — the bob adapter,
-/// the conventional default. (A literal so it's available even in builds
-/// that compile without the `bob` feature; hosts override as needed.)
-pub const DEFAULT_HARNESS_ID: &str = "bob";
+/// The identifier used when the caller doesn't pick one. (A literal so it's
+/// available even in builds compiled without the `claude` feature; hosts
+/// override as needed.)
+pub const DEFAULT_HARNESS_ID: &str = "claude";
 
 /// An open set of harnesses. Build it with the ones you want — the
-/// built-ins (`Bob`/`Claude`/`Codex`) and/or your own:
+/// built-ins (`Claude`/`Codex`) and/or your own:
 ///
 /// ```no_run
 /// use harness::Registry;
 /// let reg = Registry::new()
-///     .register(harness::Bob::new());
+///     .register(harness::Claude::new());
 ///     // .register(MyCustomHarness::new())   // your own impl Harness
-/// assert!(reg.by_id("bob").is_some());
+/// assert!(reg.by_id("claude").is_some());
 /// ```
 #[derive(Default)]
 pub struct Registry {
@@ -90,14 +88,10 @@ impl Registry {
 }
 
 /// A [`Registry`] of the built-in adapters compiled into this build
-/// (bob / claude / codex), in display order.
+/// (claude / codex), in display order.
 pub fn default_registry() -> Registry {
     #[allow(unused_mut)]
     let mut reg = Registry::new();
-    #[cfg(feature = "bob")]
-    {
-        reg = reg.register(Bob::new());
-    }
     #[cfg(feature = "claude")]
     {
         reg = reg.register(Claude::new());
@@ -113,12 +107,6 @@ pub fn default_registry() -> Registry {
 /// hosts that look one up per call. Returns `None` for an unknown id.
 pub fn harness_by_id(id: &str) -> Option<Box<dyn Harness>> {
     let _ = id;
-    #[cfg(feature = "bob")]
-    {
-        if id == crate::BOB_HARNESS_ID {
-            return Some(Box::new(Bob::new()));
-        }
-    }
     #[cfg(feature = "claude")]
     {
         if id == crate::CLAUDE_HARNESS_ID {
@@ -148,14 +136,13 @@ mod tests {
     };
 
     #[test]
-    fn default_registry_lists_bob_claude_codex_in_order() {
-        assert_eq!(default_registry().ids(), vec!["bob", "claude", "codex"]);
+    fn default_registry_lists_claude_codex_in_order() {
+        assert_eq!(default_registry().ids(), vec!["claude", "codex"]);
         assert_eq!(default_registry().catalog()[0].id, DEFAULT_HARNESS_ID);
     }
 
     #[test]
     fn harness_by_id_resolves_builtins_and_rejects_unknown() {
-        assert!(harness_by_id("bob").is_some());
         assert!(harness_by_id("claude").is_some());
         assert!(harness_by_id("codex").is_some());
         assert!(harness_by_id("nope").is_none());
@@ -164,16 +151,6 @@ mod tests {
     #[test]
     fn capabilities_match_each_adapter_and_back_credential_required() {
         let caps = |id: &str| harness_by_id(id).unwrap().info().capabilities;
-
-        let bob = caps("bob");
-        // bob stores a key (credential_required) but, running in auto_edit,
-        // writes directly like the others — so previews_edits is false too.
-        assert!(bob.credential_required && !bob.previews_edits);
-        assert!(bob.models.is_empty() && !bob.supports_effort && !bob.supports_max_turns);
-        assert_eq!(
-            bob.credential_required,
-            harness_by_id("bob").unwrap().credential().required
-        );
 
         let claude = caps("claude");
         assert!(!claude.credential_required && !claude.previews_edits);
@@ -184,7 +161,7 @@ mod tests {
         assert!(!codex.credential_required && !codex.previews_edits);
         assert!(codex.allows_custom_model && codex.supports_effort && !codex.supports_max_turns);
 
-        assert!(claude.supports_login && codex.supports_login && !bob.supports_login);
+        assert!(claude.supports_login && codex.supports_login);
     }
 
     // A third-party / custom provider — proves the registry is open: this
@@ -246,10 +223,10 @@ mod tests {
 
     #[test]
     fn custom_harness_registers_and_resolves_alongside_builtins() {
-        let reg = Registry::new().register(Bob::new()).register(Acme);
-        assert!(reg.by_id("bob").is_some());
+        let reg = Registry::new().register(Claude::new()).register(Acme);
+        assert!(reg.by_id("claude").is_some());
         assert!(reg.by_id("acme").is_some(), "custom harness must resolve");
-        assert_eq!(reg.ids(), vec!["bob", "acme"]);
+        assert_eq!(reg.ids(), vec!["claude", "acme"]);
     }
 
     #[test]

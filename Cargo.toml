@@ -17,7 +17,7 @@
 #                     → cli-stream + bob-rs (optional). [publishable]
 [workspace]
 resolver = "2"
-members = ["crates/cli-stream", "crates/bob-rs", "crates/agent-harness"]
+members = ["crates/cli-stream", "crates/agent-harness"]
 
 # Shared publish metadata + agent-harness's version. Only agent-harness inherits
 # `version` here (via `version.workspace = true`); cli-stream and bob-rs are

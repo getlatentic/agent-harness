@@ -95,7 +95,7 @@ impl Harness for EchoHarness {
 
         // One parser per run. The engine's callback is `Fn + Send + Sync`
         // (invoked from reader threads), so per-run state lives behind an
-        // `Arc<Mutex>` — the same shape the built-in bob/codex adapters use.
+        // `Arc<Mutex>` — the same shape the built-in codex adapter uses.
         let parser = Arc::new(Mutex::new(EchoParser::default()));
         let handle = spawn_streaming(
             PathBuf::from("printf"),
