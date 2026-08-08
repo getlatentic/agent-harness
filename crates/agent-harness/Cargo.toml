@@ -20,8 +20,8 @@ categories = ["api-bindings", "command-line-utilities", "development-tools"]
 name = "harness"
 
 [features]
-# All built-in CLI/ACP adapters on by default; the unofficial `bob` adapter is
-# listed last. Slim the set with `default-features = false` + the features you
+# The CLI adapters are on by default. Slim the set with
+# `default-features = false` + the features you
 # want (e.g. just `claude` — no keychain SDK). The local- / OpenAI-compatible
 # model runtime is the opt-in `openai-compatible` feature below (off by default;
 # it pulls a blocking HTTP client + ripgrep / HTML-md / JSON-schema deps).

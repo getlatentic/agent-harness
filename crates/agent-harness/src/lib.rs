@@ -12,7 +12,7 @@
 //!   * the shared interactive-login helper ([`run_login_command`]).
 //!
 //! The built-in per-CLI adapters live here as modules ([`claude`]
-//! / [`codex`]), re-exported as [`Bob`] / [`Claude`] / [`Codex`]. The
+//! / [`codex`]), re-exported as [`Claude`] / [`Codex`]. The
 //! [`Registry`] is open: a third party adds their own provider by
 //! implementing [`Harness`] in their crate and registering it — no fork.
 //!
@@ -22,9 +22,7 @@
 
 pub mod events;
 pub mod harness;
-/// The untyped raw passthrough tier, harness-agnostic (any JSONL CLI).
 pub mod raw;
-/// models.dev catalog lookup for `list_models` (opt-in `models-dev` feature).
 pub mod models_dev;
 
 pub use events::{
@@ -35,7 +33,8 @@ pub use events::{
 pub use raw::parse_raw_line;
 pub use harness::{
     run_login_command, BoxError, CredentialSpec, Harness, HarnessCapabilities, HarnessError,
-    HarnessInfo, HarnessModel, HarnessReadiness, InstallCallback, InstalledModel, ModelManagement,
+    HarnessInfo, HarnessModel, HarnessReadiness, InstallCallback, InstalledModel, InstallHint,
+    ModelManagement,
     PullProgress, PullProgressAggregator, PullProgressCallback, ReasoningEffort, RunCallback,
     RunControl, RunHandle, RunMode, RunRequest, RunTuning,
 };
@@ -45,7 +44,8 @@ pub use harness::{
 // is re-exported too so a consumer can `downcast_ref` a `HarnessError`'s
 // source back to the typed spawn/cancel error.
 pub use cli_stream::{
-    augmented_node_path, spawn_streaming, InstallEvent, ProcessEvent, ProcessHandle, StreamError,
+    augmented_node_path, hidden_command, spawn_streaming, InstallEvent, ProcessEvent,
+    ProcessHandle, StreamError,
 };
 
 #[cfg(feature = "claude")]
@@ -63,7 +63,7 @@ pub mod openai_compatible;
 pub mod registry;
 
 // The built-in adapters, re-exported as short names so consumers write
-// `use harness::{Bob, Claude, Codex}` — each gated behind its feature.
+// `use harness::{Claude, Codex}` — each gated behind its feature.
 #[cfg(feature = "claude")]
 pub use claude::{ClaudeHarness as Claude, CLAUDE_HARNESS_ID};
 #[cfg(feature = "codex")]

@@ -27,8 +27,8 @@ use serde_json::Value;
 // agent-harness (the `openai-compatible` feature), so they come from the crate
 // root: the `Harness` trait it implements + the request/metadata types it uses.
 use crate::{
-    CredentialSpec, Harness, HarnessCapabilities, HarnessError, HarnessInfo, HarnessModel,
-    HarnessReadiness, InstallCallback, InstalledModel, ModelManagement, PullProgressCallback,
+    CredentialSpec, Harness, HarnessCapabilities, HarnessError, HarnessInfo, HarnessModel, InstallHint,
+    HarnessReadiness, InstalledModel, ModelManagement, PullProgressCallback,
     RunCallback, RunHandle, RunRequest,
 };
 
@@ -217,13 +217,21 @@ pub struct OpenHarnessConfig {
 
 impl OpenHarness {
     /// Local Ollama on its default port, with live `/api/tags` discovery and
-    /// no auth. Chat hits `http://localhost:11434/v1/chat/completions`.
+    /// no auth. Chat hits Ollama's **native** `/api/chat` (not `/v1`) so
+    /// `num_ctx` applies — see [`Self::resolve_context`].
     pub fn ollama() -> Self {
+        Self::ollama_at("http://localhost:11434")
+    }
+
+    /// Ollama served from somewhere other than the default port — a remote box,
+    /// a container, a second instance. Identical to [`Self::ollama`] in every
+    /// other respect, including the native `/api/chat` path.
+    pub fn ollama_at(base_url: impl Into<String>) -> Self {
         Self {
             id: "ollama".to_owned(),
             display_name: "Ollama".to_owned(),
             description: "Local models served by Ollama via its OpenAI-compatible API.".to_owned(),
-            base_url: "http://localhost:11434".to_owned(),
+            base_url: base_url.into(),
             api_key_env: None,
             discovery: Discovery::OllamaTags,
             default_model: None,
@@ -442,9 +450,12 @@ impl Harness for OpenHarness {
             id: self.id.clone(),
             display_name: self.display_name.clone(),
             description: self.description.clone(),
-            // Nothing to install — the user runs the endpoint (e.g. `ollama
-            // serve`) themselves; readiness reports reachability instead.
-            requires_install: false,
+            // A local server is something the user installs and runs; a hosted
+            // endpoint needs nothing. Readiness reports reachability either way.
+            install_hint: match self.discovery {
+                Discovery::OllamaTags => Some(InstallHint::url("https://ollama.com/download")),
+                Discovery::Static(_) | Discovery::ModelsDev(_) => None,
+            },
             capabilities: HarnessCapabilities {
                 credential_required: self.api_key_env.is_some(),
                 previews_edits: false,
@@ -498,11 +509,6 @@ impl Harness for OpenHarness {
                 _ => base(true, None),
             },
         }
-    }
-
-    fn install(&self, _on_event: InstallCallback) -> Result<(), HarnessError> {
-        // Nothing to install: the endpoint is provided by the user.
-        Ok(())
     }
 
     fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
@@ -623,7 +629,9 @@ mod tests {
         let h = OpenHarness::ollama();
         let info = h.info();
         assert_eq!(info.id, "ollama");
-        assert!(!info.requires_install);
+        // A local server IS something the user installs — the hint is the only
+        // way the picker can say where to get it now that nothing self-installs.
+        assert!(info.install_hint.is_some_and(|h| h.url.contains("ollama.com")));
         assert!(!info.capabilities.credential_required);
         assert!(!info.capabilities.previews_edits);
         assert!(info.capabilities.allows_custom_model);

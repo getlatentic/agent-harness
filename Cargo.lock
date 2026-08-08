@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "agent-harness"
-version = "0.4.0-alpha.4"
+version = "0.4.0"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
@@ -335,7 +335,7 @@ checksum = "6e4de3bc4ea267985becf712dc6d9eed8b04c953b3fcfb339ebc87acd9804901"
 
 [[package]]
 name = "cli-stream"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "libc",
  "serde",

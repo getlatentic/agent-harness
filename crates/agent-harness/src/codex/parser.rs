@@ -7,7 +7,7 @@
 //! preamble-vs-answer ambiguity and drop its stderr noise.
 //!
 //! Wire format reference (verified against the official docs,
-//! https://developers.openai.com/codex/noninteractive): `--json` emits one
+//! <https://developers.openai.com/codex/noninteractive>): `--json` emits one
 //! JSON object per line. The assistant's reply is an `item.completed` event
 //! whose `item.type == "agent_message"` with the full text in `item.text` —
 //! Codex sends the whole message at once, not token deltas. Command

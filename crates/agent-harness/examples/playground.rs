@@ -91,6 +91,7 @@ fn build_harness(params: &HashMap<String, String>) -> Box<dyn Harness> {
             display_name: "Gemini".to_owned(),
             command: "gemini".to_owned(),
             args: vec!["--experimental-acp".to_owned()],
+            install_hint: None,
         })),
         _ => {
             let session_dir = std::env::temp_dir().join("openai-compatible-playground");
