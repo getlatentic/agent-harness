@@ -54,6 +54,8 @@ pub(crate) struct LoopConfig {
     pub run_id: String,
     pub base_url: String,
     pub api_key: Option<String>,
+    /// Tool ids the host withheld. Everything else is offered.
+    pub disabled_tools: Vec<String>,
     pub model: String,
     pub prompt: String,
     pub cwd: PathBuf,
@@ -226,7 +228,12 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
     for message in mcp_status {
         (*on_event)(RunEvent::Activity { run_id: rid.to_owned(), message });
     }
-    let toolset = tools::ToolSet::new(mcp_tools, cfg.permissions.clone(), cfg.permission_prompt.clone());
+    let toolset = tools::ToolSet::new(
+        mcp_tools,
+        cfg.permissions.clone(),
+        cfg.permission_prompt.clone(),
+        &cfg.disabled_tools,
+    );
     let tool_defs = toolset.defs(cfg.mode, &cfg.model, tools::AgentContext::Main);
     // Structured-output schema (if set) as an OpenAI `response_format`, applied
     // each turn so the final answer conforms; tool-call turns carry null content
@@ -888,6 +895,7 @@ mod tests {
             run_id: "t".into(),
             base_url: "http://unused".into(),
             api_key: None,
+            disabled_tools: Vec::new(),
             model: "m".into(),
             prompt: prompt.into(),
             cwd: PathBuf::from("/tmp"),

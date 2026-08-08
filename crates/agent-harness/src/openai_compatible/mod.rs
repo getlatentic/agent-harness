@@ -5,9 +5,12 @@
 //! configuration, not a type, so [`OpenHarness::ollama`] and
 //! [`OpenHarness::custom`] are constructors, not separate structs.
 //!
-//! Auth: `api_key_env` names the environment variable the key is read from at
-//! run time (e.g. `OPENROUTER_API_KEY`); `None` means no auth, the local
-//! Ollama case. Edits land on disk directly (`previews_edits: false`), gated
+//! Auth: a host that already holds the secret passes it as `api_key`, which
+//! never touches the environment — an exported variable is inherited by every
+//! child this crate spawns, including the `bash` tool, which would put the key
+//! within reach of the model. `api_key_env` names a variable to read instead,
+//! for CI and headless runs. `None` for both means no auth, the local Ollama
+//! case. Edits land on disk directly (`previews_edits: false`), gated
 //! only by [`RunMode`] (Ask = read-only) — review stays in the host, exactly
 //! as for the CLI adapters.
 //!
@@ -172,6 +175,13 @@ pub struct OpenHarness {
     base_url: String,
     /// Env var the API key is read from; `None` → no auth (local Ollama).
     api_key_env: Option<String>,
+    /// The key itself, when the host passed one. Preferred over the env var,
+    /// and never exported — see [`OpenHarnessConfig::api_key`].
+    api_key: Option<String>,
+    /// Tool ids withheld from this agent — see [`OpenHarnessConfig::disabled_tools`].
+    disabled_tools: Vec<String>,
+    /// Whether this endpoint needs a key — see [`OpenHarnessConfig::requires_api_key`].
+    requires_api_key: bool,
     discovery: Discovery,
     /// Used when a run doesn't specify a model via `RunTuning.model`.
     default_model: Option<String>,
@@ -209,13 +219,54 @@ pub struct OpenHarnessConfig {
     /// Base URL with no trailing slash; chat is `{base}/v1/chat/completions`.
     pub base_url: String,
     /// Env var the API key is read from; `None` → no auth (a local server).
+    ///
+    /// Prefer [`api_key`](Self::api_key) when the host already holds the
+    /// secret. An environment variable is process-global: every child this
+    /// crate spawns inherits it, including the `bash` tool, which puts the key
+    /// within reach of the model itself. The env var remains for CI and
+    /// headless runs, where a variable is the natural place for it.
     pub api_key_env: Option<String>,
+    /// The API key itself, when the host has it — a value passed in, not a
+    /// name to look up. Takes precedence over `api_key_env`, and never touches
+    /// the environment, so it stays out of child processes, `/proc/PID/environ`
+    /// and crash dumps.
+    pub api_key: Option<String>,
+    /// Whether this endpoint needs an API key at all.
+    ///
+    /// Separate from where the key comes from. Setting `api_key_env` implies
+    /// it, so existing configs are unchanged; a host that passes the secret as
+    /// `api_key` sets this instead. Without the split, "needs a key" and "reads
+    /// this variable" were the same flag, so a value-only host reported that no
+    /// key was required, showed no field to enter one, and claimed to be ready
+    /// without one.
+    pub requires_api_key: bool,
+    /// Tool ids to withhold from this agent. Every tool is offered by default;
+    /// name the ones this host does not want.
+    ///
+    /// A denylist is right here and wrong for environment variables, for the
+    /// same reason in reverse: tool ids are a closed set this crate owns, so
+    /// naming one cannot miss a case, while environment names are open-ended
+    /// and a name-shaped guess always will. See
+    /// [`OpenHarness::builtin_tool_names`] for the set.
+    ///
+    /// Withheld at construction, so a disabled tool never reaches the model —
+    /// it costs no schema in the request and cannot be attempted. That is
+    /// different from [`PermissionRule::deny`], which advertises the tool and
+    /// refuses the call.
+    pub disabled_tools: Vec<String>,
     /// Curated models for the picker; may be empty (free-text ids are allowed,
     /// or call [`OpenHarness::with_models_dev`] for catalog discovery).
     pub models: Vec<HarnessModel>,
 }
 
 impl OpenHarness {
+    /// Every tool this harness can offer, for a host building the choice into
+    /// its own settings rather than hardcoding names that drift as tools are
+    /// added. Any of these may go in [`OpenHarnessConfig::disabled_tools`].
+    pub fn builtin_tool_names() -> Vec<String> {
+        tools::ToolSet::builtin_tool_names()
+    }
+
     /// Local Ollama on its default port, with live `/api/tags` discovery and
     /// no auth. Chat hits Ollama's **native** `/api/chat` (not `/v1`) so
     /// `num_ctx` applies, so the model loads the intended context window
@@ -234,6 +285,10 @@ impl OpenHarness {
             description: "Local models served by Ollama via its OpenAI-compatible API.".to_owned(),
             base_url: base_url.into(),
             api_key_env: None,
+            api_key: None,
+            disabled_tools: Vec::new(),
+            // Local Ollama takes no key.
+            requires_api_key: false,
             discovery: Discovery::OllamaTags,
             default_model: None,
             session_dir: None,
@@ -251,13 +306,28 @@ impl OpenHarness {
     /// self-hosted gateway), configured by an [`OpenHarnessConfig`] so each
     /// argument is named at the call site.
     pub fn custom(config: OpenHarnessConfig) -> Self {
-        let OpenHarnessConfig { id, display_name, base_url, api_key_env, models } = config;
+        let OpenHarnessConfig {
+            id,
+            display_name,
+            base_url,
+            api_key_env,
+            api_key,
+            disabled_tools,
+            requires_api_key,
+            models,
+        } = config;
+        // Naming a variable to read is itself a statement that a key is needed,
+        // so every existing config keeps working untouched.
+        let requires_api_key = requires_api_key || api_key_env.is_some();
         Self {
             id,
             description: format!("{display_name} via its OpenAI-compatible API."),
             display_name,
             base_url,
             api_key_env,
+            api_key,
+            disabled_tools,
+            requires_api_key,
             default_model: models.first().map(|m| m.value.clone()),
             discovery: Discovery::Static(models),
             session_dir: None,
@@ -295,11 +365,12 @@ impl OpenHarness {
         }
     }
 
-    /// The API key for this instance, read from the configured env var.
+    /// The API key for this instance: the one the host handed over, else the
+    /// configured environment variable.
     fn api_key(&self) -> Option<String> {
-        self.api_key_env
-            .as_ref()
-            .and_then(|env| std::env::var(env).ok())
+        self.api_key
+            .clone()
+            .or_else(|| self.api_key_env.as_ref().and_then(|env| std::env::var(env).ok()))
             .filter(|v| !v.trim().is_empty())
     }
 
@@ -458,7 +529,7 @@ impl Harness for OpenHarness {
                 Discovery::Static(_) | Discovery::ModelsDev(_) => None,
             },
             capabilities: HarnessCapabilities {
-                credential_required: self.api_key_env.is_some(),
+                credential_required: self.requires_api_key,
                 previews_edits: false,
                 // Dynamic discovery surfaces models via list_models(); a
                 // static instance lists them here.
@@ -502,13 +573,20 @@ impl Harness for OpenHarness {
             },
             // A cloud endpoint (static list or models.dev catalog) is ready once
             // its API key (if any) is present.
-            Discovery::Static(_) | Discovery::ModelsDev(_) => match &self.api_key_env {
-                Some(env) if self.api_key().is_none() => base(
-                    false,
-                    Some(format!("Set {env} to use {}.", self.display_name)),
-                ),
-                _ => base(true, None),
-            },
+            Discovery::Static(_) | Discovery::ModelsDev(_) => {
+                if self.requires_api_key && self.api_key().is_none() {
+                    // Name the variable only when there is one to set; a host
+                    // that passes the key as a value has no variable, and
+                    // telling its user to export one would be a dead end.
+                    let how = match &self.api_key_env {
+                        Some(env) => format!("Set {env} to use {}.", self.display_name),
+                        None => format!("Add an API key for {}.", self.display_name),
+                    };
+                    base(false, Some(how))
+                } else {
+                    base(true, None)
+                }
+            }
         }
     }
 
@@ -537,6 +615,7 @@ impl Harness for OpenHarness {
             run_id,
             base_url: self.base_url.clone(),
             api_key: self.api_key(),
+            disabled_tools: self.disabled_tools.clone(),
             model,
             prompt,
             cwd: cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
@@ -564,15 +643,17 @@ impl Harness for OpenHarness {
     }
 
     fn credential(&self) -> CredentialSpec {
-        match &self.api_key_env {
-            Some(env) => CredentialSpec {
+        match self.requires_api_key {
+            // The account name is the env var when there is one, else the id —
+            // a host needs a stable slot name either way.
+            true => CredentialSpec {
                 label: format!("{} API key", self.display_name),
                 keychain_service: self.id.clone(),
-                keychain_account: env.clone(),
+                keychain_account: self.api_key_env.clone().unwrap_or_else(|| self.id.clone()),
                 required: true,
             },
             // Local Ollama needs no key.
-            None => CredentialSpec {
+            false => CredentialSpec {
                 label: format!("{} (no key required)", self.display_name),
                 keychain_service: self.id.clone(),
                 keychain_account: String::new(),
@@ -654,13 +735,84 @@ mod tests {
             display_name: "OpenRouter".to_owned(),
             base_url: "https://openrouter.ai/api".to_owned(),
             api_key_env: Some("OPENROUTER_API_KEY".to_owned()),
-            models: Vec::new(),
+            ..Default::default()
         });
         assert!(remote.model_management().is_none());
         assert!(remote.list_installed_models().is_err());
         assert!(remote.delete_model("whatever").is_err());
         let cancel = std::sync::atomic::AtomicBool::new(false);
         assert!(remote.pull_model("whatever", &cancel, &mut |_| {}).is_err());
+    }
+
+    #[test]
+    fn a_key_passed_as_a_value_needs_no_environment_variable() {
+        // The whole point: a host holding the secret hands it over directly.
+        // Nothing is exported, and no variable name is involved.
+        let h = OpenHarness::custom(OpenHarnessConfig {
+            id: "openrouter".to_owned(),
+            display_name: "OpenRouter".to_owned(),
+            base_url: "https://openrouter.ai/api".to_owned(),
+            api_key: Some("sk-or-v1-example".to_owned()),
+            requires_api_key: true,
+            ..Default::default()
+        });
+
+        // Declares that it needs a key, so a host shows the field for it.
+        assert!(h.info().capabilities.credential_required);
+        // Has one, so it is ready — no variable was ever set.
+        assert!(h.readiness().ready);
+        // And the credential slot is real, so a host can store into it.
+        let spec = h.credential();
+        assert!(spec.required && !spec.keychain_account.is_empty());
+    }
+
+    #[test]
+    fn a_value_only_provider_without_a_key_says_so_without_naming_a_variable() {
+        // Telling someone to export a variable that does not exist is a dead
+        // end — this is the message a host with its own key field wants.
+        let h = OpenHarness::custom(OpenHarnessConfig {
+            id: "acme".to_owned(),
+            display_name: "Acme".to_owned(),
+            base_url: "https://acme.test".to_owned(),
+            requires_api_key: true,
+            ..Default::default()
+        });
+        let readiness = h.readiness();
+        assert!(!readiness.ready);
+        let error = readiness.error.unwrap_or_default();
+        assert!(error.contains("Add an API key"), "{error}");
+        assert!(!error.contains("Set "), "{error}");
+    }
+
+    #[test]
+    fn naming_a_variable_still_implies_a_key_is_needed() {
+        // Every config written before the split keeps working untouched.
+        let h = OpenHarness::custom(OpenHarnessConfig {
+            id: "openrouter".to_owned(),
+            display_name: "OpenRouter".to_owned(),
+            base_url: "https://openrouter.ai/api".to_owned(),
+            api_key_env: Some("OPENROUTER_API_KEY".to_owned()),
+            ..Default::default()
+        });
+        assert!(h.info().capabilities.credential_required);
+        assert!(h.credential().required);
+    }
+
+    #[test]
+    fn a_value_wins_over_the_environment() {
+        // A host that passes a key should not be silently overridden by a stale
+        // variable in the user's shell.
+        std::env::set_var("ACME_KEY", "from-the-environment");
+        let h = OpenHarness::custom(OpenHarnessConfig {
+            id: "acme".to_owned(),
+            display_name: "Acme".to_owned(),
+            base_url: "https://acme.test".to_owned(),
+            api_key_env: Some("ACME_KEY".to_owned()),
+            api_key: Some("from-the-host".to_owned()),
+            ..Default::default()
+        });
+        assert_eq!(h.api_key().as_deref(), Some("from-the-host"));
+        std::env::remove_var("ACME_KEY");
     }
 
     #[test]
@@ -671,6 +823,7 @@ mod tests {
             base_url: "https://openrouter.ai/api".to_owned(),
             api_key_env: Some("OPENROUTER_API_KEY".to_owned()),
             models: vec![HarnessModel { value: "x-ai/grok".to_owned(), label: "Grok".to_owned() }],
+            ..Default::default()
         });
         assert!(h.info().capabilities.credential_required);
         assert!(h.credential().required);

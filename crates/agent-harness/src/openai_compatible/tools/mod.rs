@@ -167,14 +167,26 @@ impl ToolSet {
         mcp: Vec<Box<dyn Tool>>,
         permissions: Vec<crate::openai_compatible::PermissionRule>,
         permission_prompt: Option<crate::openai_compatible::PermissionPrompt>,
+        disabled: &[String],
     ) -> Self {
         let mut tools = builtins();
         tools.extend(mcp);
+        // Withheld at construction, not refused at call time. A tool the host
+        // disabled should never reach the model at all: an advertised-then-
+        // refused tool still costs its schema in every request, and still
+        // invites the model to try.
+        tools.retain(|t| !disabled.iter().any(|name| name == t.id()));
         Self {
             tools,
             permissions,
             permission_prompt,
         }
+    }
+
+    /// Every built-in tool's id, so a host can offer the choice rather than
+    /// hardcoding a list that drifts as tools are added.
+    pub fn builtin_tool_names() -> Vec<String> {
+        builtins().iter().map(|t| t.id().to_owned()).collect()
     }
 
     /// The OpenAI `tools` array offered to the model: the read-only tools always,
@@ -669,6 +681,74 @@ fn find_line_trimmed_unique(content: &str, old: &str) -> Option<(usize, usize)> 
 mod tests {
     use super::*;
 
+    #[test]
+    fn every_tool_is_offered_by_default() {
+        // Opt-out, not opt-in: a host that says nothing gets the full set.
+        let all = ToolSet::new(vec![], vec![], None, &[]);
+        let names = tool_names(&all.defs(RunMode::Edit, "qwen", AgentContext::Main));
+        assert!(names.contains(&"bash".to_string()));
+        assert!(names.contains(&"read".to_string()));
+    }
+
+    #[test]
+    fn a_disabled_tool_is_never_offered() {
+        // The difference from PermissionRule::deny, which advertises the tool
+        // and refuses the call: this one never reaches the model, so it costs
+        // no schema and cannot be attempted.
+        let set = ToolSet::new(vec![], vec![], None, &["bash".to_owned()]);
+        let names = tool_names(&set.defs(RunMode::Edit, "qwen", AgentContext::Main));
+        assert!(!names.contains(&"bash".to_string()));
+        // Everything else survives — disabling one tool is not a mode switch.
+        assert!(names.contains(&"read".to_string()) && names.contains(&"edit".to_string()));
+    }
+
+    #[test]
+    fn a_disabled_tool_is_also_refused_if_the_model_guesses_it() {
+        // Withholding the schema is not the whole defence: a model can still
+        // name a tool it was never shown.
+        let set = ToolSet::new(vec![], vec![], None, &["bash".to_owned()]);
+        let cancel = AtomicBool::new(false);
+        let ctx = ToolCtx {
+            cwd: any_cwd(),
+            mode: RunMode::Edit,
+            cancel: &cancel,
+            run_id: "t",
+            call_id: "c",
+            skills: &[],
+            subagent: None,
+            model: None,
+        };
+        assert!(!set.execute("bash", &json!({ "command": "echo hi" }), &ctx).ok);
+    }
+
+    #[test]
+    fn disabling_shrinks_the_prompt() {
+        // Tool schemas are sent on every request, so withholding one is also a
+        // per-turn token saving — the reason to prefer it over a runtime deny.
+        let all = ToolSet::new(vec![], vec![], None, &[]);
+        let fewer = ToolSet::new(vec![], vec![], None, &["bash".to_owned()]);
+        let full = serde_json::to_string(&all.defs(RunMode::Edit, "qwen", AgentContext::Main)).unwrap();
+        let cut = serde_json::to_string(&fewer.defs(RunMode::Edit, "qwen", AgentContext::Main)).unwrap();
+        assert!(cut.len() < full.len());
+    }
+
+    #[test]
+    fn the_host_can_enumerate_what_it_may_disable() {
+        // So a host builds its UI from the crate's list rather than hardcoding
+        // names that drift as tools are added.
+        let names = ToolSet::builtin_tool_names();
+        assert!(names.iter().any(|n| n == "bash"));
+        assert!(names.iter().any(|n| n == "read"));
+    }
+
+    /// Tool ids out of an OpenAI `tools` array.
+    fn tool_names(defs: &[Value]) -> Vec<String> {
+        defs.iter()
+            .filter_map(|d| d["function"]["name"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+
     /// Run a tool through the public dispatch with a fresh (un-cancelled) context.
     fn run(name: &str, args: Value, cwd: &Path, mode: RunMode) -> ToolOutcome {
         let cancel = AtomicBool::new(false);
@@ -792,6 +872,7 @@ mod tests {
                 "bash", "rm -rf",
             )],
             None,
+            &[],
         );
         let cancel = AtomicBool::new(false);
         let ctx = ToolCtx {
@@ -838,6 +919,7 @@ mod tests {
             vec![],
             vec![crate::openai_compatible::PermissionRule::ask("bash")],
             Some(prompt),
+            &[],
         );
         assert!(
             !tools
@@ -856,6 +938,7 @@ mod tests {
             vec![],
             vec![crate::openai_compatible::PermissionRule::ask("bash")],
             None,
+            &[],
         );
         assert!(
             !no_prompt
