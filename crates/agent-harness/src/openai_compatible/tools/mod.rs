@@ -1419,7 +1419,9 @@ mod tests {
         let dir = scratch("bash-trunc");
         // Spelled per shell: `$(seq)` is sh-only, `for /L` is cmd-only.
         let cmd = if cfg!(windows) {
-            "for /L %i in (1,1,5000) do @echo info line %i & echo BOOM the real error & exit 7"
+            // Parenthesised: in cmd an unbracketed `&` binds inside the `do`
+            // clause, so the error and exit would run on the first iteration.
+            "(for /L %i in (1,1,5000) do @echo info line %i) & echo BOOM the real error & exit 7"
         } else {
             "for i in $(seq 1 5000); do echo info line $i; done; echo 'BOOM the real error'; exit 7"
         };
