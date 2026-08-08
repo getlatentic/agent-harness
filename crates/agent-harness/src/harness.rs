@@ -169,6 +169,21 @@ impl RunControl for ProcessHandle {
 /// What the user wants the harness to do with the prompt. Mirrors
 /// the Ask / Edit split the comment bubble already exposes; adapters
 /// map it onto their own mode vocabulary.
+///
+/// **How strongly `Ask` is enforced depends on the adapter**, because only one
+/// of them owns the tools:
+///
+/// * `openai-compatible` — this crate owns the tool surface, so `Ask` simply
+///   does not offer the mutating tools. The model cannot call what it was
+///   never given.
+/// * `acp` — the agent owns its tools. `Ask` denies ACP permission requests,
+///   which works only for calls the agent chooses to ask about. An agent that
+///   treats reading a file or searching the web as safe will just do it.
+/// * `claude` / `codex` — mapped onto each CLI's own permission flags, so the
+///   CLI enforces it.
+///
+/// Treat `Ask` as "do not change my files", not as a sandbox. None of these
+/// adapters isolate the process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunMode {

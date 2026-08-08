@@ -218,7 +218,8 @@ pub struct OpenHarnessConfig {
 impl OpenHarness {
     /// Local Ollama on its default port, with live `/api/tags` discovery and
     /// no auth. Chat hits Ollama's **native** `/api/chat` (not `/v1`) so
-    /// `num_ctx` applies — see [`Self::resolve_context`].
+    /// `num_ctx` applies, so the model loads the intended context window
+    /// instead of Ollama's truncating 4096 default.
     pub fn ollama() -> Self {
         Self::ollama_at("http://localhost:11434")
     }
