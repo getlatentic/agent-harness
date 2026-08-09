@@ -146,6 +146,7 @@ fn build_system_prompt(
     cwd: &Path,
     skills: &[skills::Skill],
     sources: &instructions::InstructionSources,
+    catalog_budget: usize,
 ) -> String {
     let mut prompt = base.to_owned();
     if let Some(text) = instructions::gather(cwd, sources) {
@@ -160,8 +161,15 @@ fn build_system_prompt(
         );
         prompt.push_str(&text);
     }
-    if let Some(catalog) = skills::catalog(skills) {
-        prompt.push_str(&catalog);
+    // Inline the catalog only while it fits. Over budget it stays out of every
+    // request and the `skill` tool hands it to the one that asks for it.
+    match skills::catalog(skills).filter(|c| c.len() <= catalog_budget) {
+        Some(catalog) => prompt.push_str(&catalog),
+        None if !skills.is_empty() => prompt.push_str(
+            "\n\n## Skills\nSpecialized instructions are available for some kinds of task. \
+             Call the `skill` tool with no arguments to see what there is.\n",
+        ),
+        None => {}
     }
     prompt
 }
@@ -314,7 +322,13 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
     // to the (regenerated, non-persisted) system prompt, and the model loads a
     // skill's body on demand via the `skill` tool.
     let skills = skills::discover(&cfg.cwd, &cfg.global_skill_roots);
-    let mut system_prompt = build_system_prompt(profile.system_prompt(), &cfg.cwd, &skills, &cfg.instruction_sources);
+    let mut system_prompt = build_system_prompt(
+        profile.system_prompt(),
+        &cfg.cwd,
+        &skills,
+        &cfg.instruction_sources,
+        profile.catalog_budget_bytes(),
+    );
     if let Some(catalog) = agent_catalog(&cfg.agents) {
         system_prompt.push_str(&catalog);
     }
@@ -864,7 +878,13 @@ fn run_subagent(
         });
     }
 
-    let mut system_prompt = build_system_prompt(base, &parent.cwd, skills, &parent.instruction_sources);
+    let mut system_prompt = build_system_prompt(
+        base,
+        &parent.cwd,
+        skills,
+        &parent.instruction_sources,
+        parent.profile.resolve(Default::default()).catalog_budget_bytes(),
+    );
     system_prompt.push_str(&environment_block(&parent.cwd));
     let tool_defs = toolset.defs(parent.mode, model, tools::AgentContext::Subagent);
     let model_client = Model { cfg: parent };
@@ -976,6 +996,41 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
+    fn a_catalog_over_budget_leaves_the_prompt_for_the_skill_tool() {
+        let dir = std::env::temp_dir().join(format!("hl-catalog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let skills_dir = dir.join(".claude/skills");
+        for i in 0..20 {
+            let name = format!("skill{i:02}");
+            std::fs::create_dir_all(skills_dir.join(&name)).unwrap();
+            std::fs::write(
+                skills_dir.join(&name).join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {}\n---\nbody", "x".repeat(400)),
+            )
+            .unwrap();
+        }
+        let found = skills::discover(&dir, &[]);
+        let sources = instructions::InstructionSources::default();
+        assert_eq!(found.len(), 20);
+
+        // Generous budget: the whole catalog rides along, as before.
+        let roomy = build_system_prompt(SYSTEM_PROMPT, &dir, &found, &sources, 64 * 1024);
+        assert!(roomy.contains("skill07"), "every skill is listed when it fits");
+
+        // Tight budget: the list is gone and the model is told how to ask.
+        let tight = build_system_prompt(SYSTEM_PROMPT, &dir, &found, &sources, 1_024);
+        assert!(!tight.contains("skill07"), "the list must not ride on every request");
+        assert!(tight.contains("`skill` tool with no arguments"), "and the model must know how to ask");
+        assert!(tight.len() < roomy.len(), "the point is that it is smaller");
+
+        // Nothing discovered means nothing to say either way.
+        let empty = build_system_prompt(SYSTEM_PROMPT, &dir, &[], &sources, 1_024);
+        assert!(!empty.contains("Skills"), "no skills, no pointer: {empty}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_prompt_prefix_is_byte_stable_and_ends_with_the_volatile_part() {
         // Prompt caching — Anthropic's, DeepSeek's, and the KV cache a local
         // Ollama or llama.cpp keeps — reuses whatever prefix is byte-identical
@@ -1000,7 +1055,7 @@ mod tests {
         //    a directory walk, a map iteration — would show up here.
         let build = || {
             let skills = skills::discover(&dir, &[]);
-            build_system_prompt(SYSTEM_PROMPT, &dir, &skills, &sources)
+            build_system_prompt(SYSTEM_PROMPT, &dir, &skills, &sources, 64 * 1024)
         };
         let first = build();
         for _ in 0..5 {

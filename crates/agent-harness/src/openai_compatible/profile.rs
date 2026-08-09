@@ -117,6 +117,20 @@ pub enum PromptProfile {
 const CORE_TOOLS: &[&str] = &["read", "list", "glob", "grep", "write", "edit", "bash"];
 
 impl PromptProfile {
+    /// How many bytes of skills catalog this profile will carry inline.
+    ///
+    /// The catalog is one line per skill and it is paid on every request. Twenty
+    /// skills is roughly 9 KB — fine against a 128k window, most of a 4k one.
+    /// Past the budget the catalog moves out of the prompt and the `skill` tool
+    /// serves it to the one request that asks, which is the same progressive
+    /// disclosure already used for skill bodies, applied one level up.
+    pub(crate) fn catalog_budget_bytes(self) -> usize {
+        match self {
+            Self::Compact => 1_024,
+            _ => 8_192,
+        }
+    }
+
     /// The profile to actually use, resolving [`Self::Auto`] against what the
     /// backend reported.
     ///

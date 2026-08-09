@@ -126,6 +126,13 @@ prompt. `OpenHarness::builtin_tool_names()` lists what you can name.
   under `$HOME` is read unless the host asks**. `InstructionSources::discover_global()`
   and `global_skill_roots()` return the conventional per-user locations for a
   host that wants them.
+- **The skills catalog is inlined only while it fits.** One line per skill,
+  paid on every request: twenty skills is ~9 KB, which is nothing against a 128k
+  window and most of a 4k one. Past the profile's budget (8 KB full, 1 KB
+  compact) the catalog leaves the prompt and the `skill` tool serves it to the
+  one request that asks — the progressive disclosure already used for skill
+  bodies, applied a level up. `skill` now takes an optional `name`; omitting it
+  lists what is available.
 - **`OpenHarnessConfig.prompt_cache`** — mark the prompt prefix as cacheable
   with `PromptCache::Ephemeral`. Anthropic caches only what a request marks,
   and forwards `cache_control` through OpenAI-compatible gateways, so a Claude
