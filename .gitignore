@@ -1,3 +1,6 @@
 /target
 **/*.rs.bk
 .DS_Store
+
+# Reference sources for comparison, cloned locally. Not part of this workspace.
+/repos/
