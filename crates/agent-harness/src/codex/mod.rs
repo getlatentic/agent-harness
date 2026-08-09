@@ -31,13 +31,37 @@ pub use parser::{parse_codex_line, CodexStreamParser};
 /// Registry id for the Codex harness.
 pub const CODEX_HARNESS_ID: &str = "codex";
 
+/// The program spawned when the host doesn't name one.
+pub const DEFAULT_CODEX_COMMAND: &str = "codex";
+
 /// OpenAI Codex CLI as a [`Harness`].
-#[derive(Debug, Default, Clone)]
-pub struct CodexHarness;
+#[derive(Debug, Clone)]
+pub struct CodexHarness {
+    command: String,
+}
+
+impl Default for CodexHarness {
+    // Not derived: a derived `Default` would leave `command` empty and every
+    // spawn would fail on a name nobody chose.
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl CodexHarness {
     pub fn new() -> Self {
-        Self
+        Self { command: DEFAULT_CODEX_COMMAND.to_owned() }
+    }
+
+    /// Drive a differently named or relocated binary: a rename upstream, a
+    /// fork, a wrapper script, or a stub in a test. Everything else about the
+    /// adapter is unchanged, so a rename costs a call here rather than a
+    /// release.
+    ///
+    /// A bare name is resolved on PATH; a path is used as given.
+    pub fn with_command(mut self, command: impl Into<String>) -> Self {
+        self.command = command.into();
+        self
     }
 }
 
@@ -76,7 +100,7 @@ impl Harness for CodexHarness {
     }
 
     fn readiness(&self) -> HarnessReadiness {
-        let Some(version) = probe_version("codex") else {
+        let Some(version) = probe_version(&self.command) else {
             return HarnessReadiness {
                 harness_id: CODEX_HARNESS_ID.to_owned(),
                 ready: false,
@@ -93,7 +117,7 @@ impl Harness for CodexHarness {
         // key is how you run headless (a container / CI), where `codex login`
         // can't open a browser. `codex login status` only sees the OAuth
         // state, so we OR in the env key ourselves.
-        let signed_in = probe_codex_signed_in()
+        let signed_in = probe_codex_signed_in(&self.command)
             || crate::harness::api_key_value_usable(std::env::var("OPENAI_API_KEY").ok());
         HarnessReadiness {
             harness_id: CODEX_HARNESS_ID.to_owned(),
@@ -109,7 +133,7 @@ impl Harness for CodexHarness {
                         .to_owned(),
                 )
             },
-            details: codex_resolved_details(),
+            details: codex_resolved_details(&self.command),
         }
     }
 
@@ -131,7 +155,7 @@ impl Harness for CodexHarness {
         // threads, so the parser is held behind an `Arc<Mutex>` — the same
         // shape as bob's.
         let parser = Arc::new(Mutex::new(CodexStreamParser::new()));
-        let program = tuning.binary_path.clone().unwrap_or_else(|| PathBuf::from("codex"));
+        let program = tuning.binary_path.clone().unwrap_or_else(|| PathBuf::from(&self.command));
         let handle = spawn_streaming(
             program,
             args,
@@ -163,7 +187,7 @@ impl Harness for CodexHarness {
 
     fn login(&self, on_event: InstallCallback) -> Result<(), HarnessError> {
         // `codex login` runs the CLI's OAuth flow (opens the browser).
-        crate::run_login_command("codex", &["login"], on_event)
+        crate::run_login_command(&self.command, &["login"], on_event)
     }
 }
 
@@ -171,9 +195,9 @@ impl Harness for CodexHarness {
 /// `details`, mirroring the Claude adapter — so the Runtimes UI can surface
 /// "npm — can go stale / Update to native" instead of a bare, ambiguous
 /// "Update". Reuses the shared resolve/classify in `crate::claude::resolve`.
-fn codex_resolved_details() -> Value {
+fn codex_resolved_details(command: &str) -> Value {
     let path = crate::augmented_node_path();
-    let Some(resolved) = crate::claude::resolve::resolve_on_path("codex", &path) else {
+    let Some(resolved) = crate::claude::resolve::resolve_on_path(command, &path) else {
         return Value::Null;
     };
     let mut details = serde_json::Map::new();
@@ -214,8 +238,8 @@ fn probe_version(program: &str) -> Option<String> {
 /// Probe Codex's auth: `codex login status` exits 0 when signed in.
 /// Lets [`CodexHarness::readiness`] distinguish installed from signed-in
 /// (so the picker can offer "Sign in").
-fn probe_codex_signed_in() -> bool {
-    crate::hidden_command("codex")
+fn probe_codex_signed_in(command: &str) -> bool {
+    crate::hidden_command(command)
         .args(["login", "status"])
         .env("PATH", crate::augmented_node_path())
         .output()
@@ -286,6 +310,14 @@ fn build_codex_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_renamed_binary_is_what_gets_probed() {
+        let renamed = CodexHarness::new().with_command("definitely-not-a-real-binary-xyz");
+        assert!(!renamed.readiness().installed, "an unresolvable command cannot report installed");
+        assert_eq!(CodexHarness::new().command, DEFAULT_CODEX_COMMAND);
+        assert_eq!(CodexHarness::default().command, DEFAULT_CODEX_COMMAND);
+    }
     use crate::ReasoningEffort;
 
     #[test]

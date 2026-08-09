@@ -109,6 +109,11 @@ prompt. `OpenHarness::builtin_tool_names()` lists what you can name.
   mode — defaulting to `Edit` would hand write access to anyone who forgot
   the field.
 - **`OpenHarness::ollama_at(base_url)`** — an Ollama on a non-default host.
+- **`Claude::with_command` / `Codex::with_command`** — spawn a differently
+  named or relocated binary. Both adapters hardcoded `"claude"` and `"codex"`
+  in five places each, while the ACP adapter had taken its `command` from
+  config since it shipped. An upstream rename, a fork, a wrapper script or a
+  test stub now costs a call rather than a release.
 
 ### Fixed
 

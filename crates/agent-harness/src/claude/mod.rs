@@ -32,13 +32,37 @@ pub use parser::parse_claude_line;
 /// Registry id for the Claude Code harness.
 pub const CLAUDE_HARNESS_ID: &str = "claude";
 
+/// The program spawned when the host doesn't name one.
+pub const DEFAULT_CLAUDE_COMMAND: &str = "claude";
+
 /// Claude Code CLI as a [`Harness`].
-#[derive(Debug, Default, Clone)]
-pub struct ClaudeHarness;
+#[derive(Debug, Clone)]
+pub struct ClaudeHarness {
+    command: String,
+}
+
+impl Default for ClaudeHarness {
+    // Not derived: a derived `Default` would leave `command` empty and every
+    // spawn would fail on a name nobody chose.
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ClaudeHarness {
     pub fn new() -> Self {
-        Self
+        Self { command: DEFAULT_CLAUDE_COMMAND.to_owned() }
+    }
+
+    /// Drive a differently named or relocated binary: a rename upstream, a
+    /// fork, a wrapper script, or a stub in a test. Everything else about the
+    /// adapter — arguments, output parsing, auth probing — is unchanged, so a
+    /// rename costs a call here rather than a release.
+    ///
+    /// A bare name is resolved on PATH; a path is used as given.
+    pub fn with_command(mut self, command: impl Into<String>) -> Self {
+        self.command = command.into();
+        self
     }
 }
 
@@ -88,7 +112,7 @@ impl Harness for ClaudeHarness {
     }
 
     fn readiness(&self) -> HarnessReadiness {
-        let Some(version) = probe_version("claude") else {
+        let Some(version) = probe_version(&self.command) else {
             return HarnessReadiness {
                 harness_id: CLAUDE_HARNESS_ID.to_owned(),
                 ready: false,
@@ -105,7 +129,7 @@ impl Harness for ClaudeHarness {
         // counts: the env key is how you run headless (a container / CI),
         // where `claude auth login` can't open a browser. `claude auth status`
         // only sees the OAuth state, so we OR in the env key ourselves.
-        let signed_in = probe_claude_signed_in()
+        let signed_in = probe_claude_signed_in(&self.command)
             || crate::harness::api_key_value_usable(std::env::var("ANTHROPIC_API_KEY").ok());
         HarnessReadiness {
             harness_id: CLAUDE_HARNESS_ID.to_owned(),
@@ -121,7 +145,7 @@ impl Harness for ClaudeHarness {
                         .to_owned(),
                 )
             },
-            details: resolved_details(),
+            details: resolved_details(&self.command),
         }
     }
 
@@ -134,7 +158,7 @@ impl Harness for ClaudeHarness {
         // No env injected — Claude Code uses its own auth. PATH
         // augmentation inside `spawn_streaming` ensures `node` is
         // found for a Finder-launched .app.
-        let program = tuning.binary_path.clone().unwrap_or_else(|| PathBuf::from("claude"));
+        let program = tuning.binary_path.clone().unwrap_or_else(|| PathBuf::from(&self.command));
         let handle = spawn_streaming(
             program,
             args,
@@ -165,7 +189,7 @@ impl Harness for ClaudeHarness {
     fn login(&self, on_event: InstallCallback) -> Result<(), HarnessError> {
         // `claude auth login` runs the CLI's OAuth flow (opens the
         // browser); streamed + blocked-until-exit by the shared helper.
-        crate::run_login_command("claude", &["auth", "login"], on_event)
+        crate::run_login_command(&self.command, &["auth", "login"], on_event)
     }
 }
 
@@ -174,8 +198,8 @@ impl Harness for ClaudeHarness {
 /// signed in; defensively falls back to the exit code if the JSON is
 /// unexpected. Lets [`ClaudeHarness::readiness`] distinguish installed
 /// from signed-in.
-fn probe_claude_signed_in() -> bool {
-    let Ok(output) = crate::hidden_command("claude")
+fn probe_claude_signed_in(command: &str) -> bool {
+    let Ok(output) = crate::hidden_command(command)
         .args(["auth", "status"])
         .env("PATH", crate::augmented_node_path())
         .output()
@@ -199,9 +223,9 @@ fn probe_claude_signed_in() -> bool {
 /// is absent when the binary can't be located despite a successful
 /// `--version` (e.g. a PATH entry the resolver can't read) — the host renders
 /// version + status regardless.
-fn resolved_details() -> Value {
+fn resolved_details(command: &str) -> Value {
     let path = crate::augmented_node_path();
-    let Some(resolved) = resolve::resolve_on_path("claude", &path) else {
+    let Some(resolved) = resolve::resolve_on_path(command, &path) else {
         return Value::Null;
     };
     let mut details = serde_json::Map::new();
@@ -305,6 +329,22 @@ mod tests {
         assert!(hint.command.is_some_and(|c| c.contains("claude.ai/install.sh")));
         // Claude manages its own auth — Compose doesn't require a key.
         assert!(!h.credential().required);
+    }
+
+    #[test]
+    fn a_renamed_binary_is_what_gets_probed() {
+        // The point of the field: if the CLI is renamed upstream, or a user
+        // keeps a fork or wrapper under another name, that costs a call here
+        // rather than a release. A name nothing can resolve must read as "not
+        // installed" — proving readiness consults the configured command and
+        // not a baked-in "claude".
+        let renamed = ClaudeHarness::new().with_command("definitely-not-a-real-binary-xyz");
+        let readiness = renamed.readiness();
+        assert!(!readiness.installed, "an unresolvable command cannot report installed");
+
+        // And the default still targets the real one.
+        assert_eq!(ClaudeHarness::new().command, DEFAULT_CLAUDE_COMMAND);
+        assert_eq!(ClaudeHarness::default().command, DEFAULT_CLAUDE_COMMAND);
     }
 
     #[test]
