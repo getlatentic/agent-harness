@@ -524,7 +524,7 @@ pub(crate) enum Keep {
 }
 
 /// A single end of an output — which one [`take_end`] keeps.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum End {
     Head,
     Tail,
@@ -1732,6 +1732,201 @@ mod tests {
             "fn main() {\n    let x = 2;\n}\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_output_caps_are_the_sizes_they_claim_to_be() {
+        // A cap is only a cap at a specific size. `50 * 1024` becoming
+        // `50 + 1024` is a 1 KB ceiling that truncates almost every real
+        // command's output, and nothing else would fail.
+        assert_eq!(MAX_OUTPUT_BYTES, 50 * 1024);
+        assert_eq!(MAX_OUTPUT_LINES, 2000);
+    }
+
+    #[test]
+    fn a_tool_without_a_subject_offers_none_for_permission_matching() {
+        // The trait's default. A rule with a `pattern` matches on the subject,
+        // so a default of `Some("")` or any string would make pattern rules
+        // start matching tools that have no subject to match against.
+        struct Subjectless;
+        impl Tool for Subjectless {
+            fn id(&self) -> &str {
+                "subjectless"
+            }
+            fn description(&self) -> &str {
+                "has no subject"
+            }
+            fn parameters(&self) -> Value {
+                json!({ "type": "object" })
+            }
+            fn kind(&self) -> ToolKind {
+                ToolKind::Other
+            }
+            fn mutating(&self) -> bool {
+                false
+            }
+            fn execute(&self, _args: &Value, _ctx: &ToolCtx) -> ToolOutcome {
+                ToolOutcome::ok("done")
+            }
+        }
+        assert_eq!(Subjectless.permission_subject(&json!({})), None);
+
+        // And the consequence: a pattern rule cannot match it.
+        let set = ToolSet::new(
+            vec![Box::new(Subjectless)],
+            vec![crate::PermissionRule::deny_matching("subjectless", "anything")],
+            None,
+            &[],
+        );
+        let out = set.execute("subjectless", &json!({}), &search_ctx(&AtomicBool::new(false)));
+        assert!(out.ok, "a pattern rule must not match a tool with no subject: {}", out.output);
+    }
+
+    #[test]
+    fn both_ends_keeps_a_half_from_each_and_counts_what_it_dropped() {
+        // `MAX_OUTPUT_LINES / 2` becoming `* 2` stops the halves being halves,
+        // and the omitted count is what tells the model how much it is missing —
+        // a wrong number there is a confident lie.
+        let lines: Vec<String> = (0..5_000).map(|i| format!("line{i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let out = take_both_ends(&refs, refs.len(), &None);
+
+        assert!(out.starts_with("line0\n"), "the head survives: {:?}", &out[..40]);
+        assert!(out.trim_end().ends_with("line4999"), "the tail survives");
+
+        let kept = out.lines().filter(|l| l.starts_with("line")).count();
+        assert!(kept <= MAX_OUTPUT_LINES, "kept {kept} of a {MAX_OUTPUT_LINES} cap");
+
+        let omitted: usize = out
+            .lines()
+            .find(|l| l.contains("omitted"))
+            .and_then(|l| l.split_whitespace().find_map(|w| w.replace(',', "").parse().ok()))
+            .expect("the marker states how many lines were dropped");
+        assert_eq!(omitted, refs.len() - kept, "the count must match what was actually dropped");
+    }
+
+    #[test]
+    fn both_ends_splits_the_line_cap_in_half() {
+        // Short lines, so the LINE cap binds rather than the byte cap — which is
+        // what makes `MAX_OUTPUT_LINES / 2` observable. Turned into `* 2` the
+        // halves stop being halves and four times as much comes back.
+        let lines: Vec<&str> = vec!["x"; 5_000];
+        let out = take_both_ends(&lines, lines.len(), &None);
+        let kept = out.lines().filter(|l| *l == "x").count();
+        assert_eq!(
+            kept, MAX_OUTPUT_LINES,
+            "half from each end is the whole cap, no more: got {kept}"
+        );
+    }
+
+    #[test]
+    fn take_end_stops_at_the_byte_budget_not_one_line_past_it() {
+        // The same exact-boundary case `collect_within` has, through the public
+        // path: each 3-byte line costs 4 with its newline, so 8 fits two and 7
+        // fits one. `>` relaxed to `>=`, or the `+ 1` dropped, moves that line.
+        let lines = ["aaa", "bbb", "ccc"];
+        for (budget, expected) in [(8usize, 2usize), (7, 1), (4, 1), (3, 0)] {
+            let body = take_end(&lines, lines.len(), 100, budget, End::Head, &None);
+            let kept = body.lines().filter(|l| lines.contains(l)).count();
+            assert_eq!(kept, expected, "budget {budget} should keep {expected}: {body:?}");
+        }
+    }
+
+    #[test]
+    fn spilled_output_is_written_somewhere_the_model_can_read_it() {
+        // The spill file is the whole point of truncating: the model is told
+        // where the rest went. Returning None, or a path to nothing, silently
+        // turns a truncation into a loss.
+        let body = "the full output\n".repeat(100);
+        let path = spill_output(&body).expect("a spill path");
+
+        let written = std::fs::read_to_string(&path).expect("the file the path names");
+        assert_eq!(written, body, "the spill holds the untruncated output");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn collect_within_fills_the_budget_and_stops_exactly_there() {
+        // The existing truncation tests assert what the output *says*. Nothing
+        // asserted the bound itself, which is the only reason the cap exists:
+        // an oversized tool result is what blows the model's context.
+        //
+        // Each line here costs its length plus one for the newline, so a budget
+        // of 8 fits exactly two 3-byte lines and cannot fit a third.
+        let lines = ["aaa", "bbb", "ccc"];
+        assert_eq!(collect_within(lines.iter(), 100, 8), vec!["aaa", "bbb"]);
+
+        // One byte less and only one line fits — the boundary where `>` and
+        // `>=` diverge, and where a mis-signed `+` shows up.
+        assert_eq!(collect_within(lines.iter(), 100, 7), vec!["aaa"]);
+
+        // A budget below even one line yields nothing rather than one line over.
+        assert!(collect_within(lines.iter(), 100, 2).is_empty());
+
+        // The line cap binds independently of the byte cap.
+        assert_eq!(collect_within(lines.iter(), 2, 10_000), vec!["aaa", "bbb"]);
+        assert!(collect_within(lines.iter(), 0, 10_000).is_empty());
+    }
+
+    #[test]
+    fn a_truncated_body_never_exceeds_the_byte_budget() {
+        // The property, over a range of budgets rather than one example: the
+        // lines kept must fit, whichever end they are taken from.
+        let lines: Vec<&str> = ["alpha", "beta", "gamma", "delta", "epsilon"].to_vec();
+        for max_bytes in [1usize, 5, 6, 11, 17, 40, 1_000] {
+            for end in [End::Head, End::Tail] {
+                let body = take_end(&lines, lines.len(), 100, max_bytes, end, &None);
+                // Isolate the kept lines from the truncation note, which is
+                // deliberately outside the budget — it explains the cut.
+                let kept: usize = body
+                    .lines()
+                    .filter(|l| lines.contains(l))
+                    .map(|l| l.len() + 1)
+                    .sum();
+                assert!(
+                    kept <= max_bytes,
+                    "{end:?} kept {kept} bytes against a {max_bytes} budget: {body:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn find_line_trimmed_unique_locates_the_line_and_refuses_an_ambiguous_one() {
+        // This is how `edit` finds what to replace. An off-by-one here edits the
+        // wrong line of a user's file, which no other test would notice.
+        let content = "first\n  target  \nthird\n";
+        let (start, end) = find_line_trimmed_unique(content, "target").expect("a unique match");
+        assert_eq!(
+            &content[start..end], "  target  \n",
+            "the span covers the line's own spacing AND its newline, so a replacement \
+             substitutes the whole line rather than splicing into it"
+        );
+
+        // Two candidates must be refused rather than guessed between.
+        let ambiguous = "dup\nother\ndup\n";
+        assert!(find_line_trimmed_unique(ambiguous, "dup").is_none());
+
+        // No candidate at all.
+        assert!(find_line_trimmed_unique(content, "absent").is_none());
+
+        // A multi-line match, which is where the window arithmetic lives: the
+        // span must cover exactly the matched lines and no neighbour.
+        let multi = "keep\nfirst\nsecond\ntrailing\n";
+        let (start, end) = find_line_trimmed_unique(multi, "first\nsecond").expect("a two-line match");
+        assert_eq!(&multi[start..end], "first\nsecond\n", "exactly the window, not one line either side");
+
+        // A pattern longer than the file cannot match — the guard that stops
+        // the window arithmetic running off the end.
+        assert!(find_line_trimmed_unique("only\n", "only\nmore\n").is_none());
+
+        // A pattern spanning the WHOLE file must still match. This is the exact
+        // boundary of that guard: `window > len` allows it, `window >= len`
+        // rejects it, and rejecting it means `edit` cannot replace the entire
+        // contents of a short file.
+        let whole = "alpha\nbeta\n";
+        let (start, end) = find_line_trimmed_unique(whole, "alpha\nbeta").expect("a whole-file match");
+        assert_eq!(&whole[start..end], whole);
     }
 
     #[test]
