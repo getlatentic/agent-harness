@@ -14,7 +14,7 @@
 //! way the secret goes into the config, not into the process environment,
 //! because every child the agent spawns inherits that environment.
 
-use harness::{
+use harness::{ApiKey, 
     Harness, HarnessError, OpenHarness, OpenHarnessConfig, RunEvent, RunRequest, RunTuning,
 };
 
@@ -29,8 +29,7 @@ fn main() -> Result<(), HarnessError> {
         id: "openrouter".into(),
         display_name: "OpenRouter".into(),
         base_url: "https://openrouter.ai/api".into(),
-        api_key: Some(key),
-        requires_api_key: true,
+        api_key: ApiKey::Value(key),
         ..Default::default()
     })
     // Optional: fill the model picker from the models.dev catalog rather than

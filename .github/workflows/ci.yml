@@ -90,3 +90,14 @@ jobs:
         run: cargo fmt --all --check || true
       - name: Clippy
         run: cargo clippy --workspace --all-features --all-targets
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # `deny.toml` has been in the tree unrun: advisories, licences and
+      # duplicate versions were configured and never checked.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

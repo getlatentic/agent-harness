@@ -73,7 +73,7 @@ pub use acp::{AcpHarness, AcpHarnessConfig};
 // The OpenAI-compatible / local-model runtime + its public surface (permission
 // rules, MCP config, named subagents, model pricing, sessions).
 #[cfg(feature = "openai-compatible")]
-pub use openai_compatible::{
+pub use openai_compatible::{ApiKey, 
     AgentDef, McpPrompt, McpPromptArg, McpServer, McpTransport, ModelCost, OpenHarness,
     OpenHarnessConfig, Permission, PermissionPrompt, PermissionRequest, PermissionRule,
     PromptMessage, SessionRecord,

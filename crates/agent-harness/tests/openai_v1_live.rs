@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use harness::{
+use harness::{ApiKey, 
     Harness, OpenHarness, OpenHarnessConfig, RunEvent, RunMode, RunRequest, RunTuning,
 };
 
@@ -40,7 +40,7 @@ fn exercise(provider: &str, base_url: &str, key_env: &str, model: &str) {
         id: provider.to_owned(),
         display_name: provider.to_owned(),
         base_url: base_url.to_owned(),
-        api_key_env: Some(key_env.to_owned()),
+        api_key: ApiKey::Env(key_env.to_owned()),
         ..Default::default()
     });
 

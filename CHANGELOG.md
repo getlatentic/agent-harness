@@ -28,7 +28,34 @@ for event in events { /* … */ }
 
 An adapter implements only `start`; every harness gets `run` for free.
 
-**3. Give an OpenAI-compatible host its API key as a value.** `api_key_env`
+**3. `api_key`, `api_key_env` and `requires_api_key` are now one `ApiKey`.**
+Three fields could represent eight combinations for four meanings, and they
+could contradict each other — which they did: "needs a key" was inferred from
+"names an environment variable", so a host holding its key in a vault reported
+that no credential was required and looked permanently ready.
+
+```rust
+api_key: ApiKey::NotNeeded,                    // local Ollama, llama-server
+api_key: ApiKey::Value(key_from_your_vault),   // the secret itself
+api_key: ApiKey::Env("OPENROUTER_API_KEY".into()), // CI / headless
+api_key: ApiKey::Required,                     // needed, not supplied yet
+```
+
+`Required` is the state the old `requires_api_key` existed for: readiness
+reports not-ready and the credential slot stays writable, so a host can prompt.
+`is_needed()` and `env_var()` derive from the variant, so no pair of values can
+disagree.
+
+**Old →  new**
+
+| before | after |
+|---|---|
+| `api_key: Some(k), requires_api_key: true` | `ApiKey::Value(k)` |
+| `api_key_env: Some(v)` | `ApiKey::Env(v)` |
+| `requires_api_key: true` alone | `ApiKey::Required` |
+| all three unset / false | `ApiKey::NotNeeded` |
+
+**3b. Historical note — the value-vs-variable change this replaces.** `api_key_env`
 named an environment variable, so the key had to be exported into the
 process — and every child the agent spawned inherited it. Pass the secret
 directly instead:

@@ -13,7 +13,7 @@
 //! model per process, so the model id is whatever that process loaded; the name
 //! below is only a label.
 
-use harness::{
+use harness::{ApiKey, 
     Harness, HarnessError, OpenHarness, OpenHarnessConfig, RunEvent, RunRequest, RunTuning,
 };
 
@@ -38,7 +38,7 @@ fn main() -> Result<(), HarnessError> {
         id: "llama-cpp".into(),
         display_name: "llama.cpp".into(),
         base_url: base_url.clone(),
-        api_key_env: None, // a local server needs no key
+        api_key: ApiKey::NotNeeded, // a local server needs no key
         disabled_tools,
         ..Default::default()
     });
