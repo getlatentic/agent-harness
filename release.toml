@@ -3,10 +3,10 @@
 #   cargo release <level|version>            # DRY RUN by default — prints the plan
 #   cargo release <level|version> --execute  # actually bump + changelog + commit + tag + publish
 #
-# The three crates version and release in lockstep:
+# Both crates version and release in lockstep:
 #   * `shared-version` keeps their versions identical and bumps them together;
-#   * cargo-release publishes in dependency order (cli-stream → bob-rs →
-#     agent-harness), waiting for each to appear in the index;
+#   * cargo-release publishes in dependency order (cli-stream → agent-harness),
+#     waiting for each to appear in the index;
 #   * the CHANGELOG stamp (below) turns `## [Unreleased]` into a fresh
 #     `## [Unreleased]` plus a dated version section.
 #

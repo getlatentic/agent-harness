@@ -7,7 +7,19 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
-Breaking. Read **Migration from 0.4** before you upgrade.
+## [0.5.0] - 2026-08-09
+
+`agent-harness` 0.5.0.
+
+A release about what a run actually sends. The direct-model runtime was putting
+roughly 6,400 tokens on the wire before the user's prompt, over half of it read
+out of the host machine's home directory, and no local server started on the
+common 4096-token context could run the agent loop at all. It now sends ~1,200
+on the same request, fits a 4k window with every tool offered, marks its prefix
+so providers that charge for re-reading it do not, and adapts what it offers to
+the model it is talking to.
+
+Read **Migration from 0.4** before upgrading: six changes need an edit.
 
 ### Migration from 0.4
 
@@ -35,189 +47,154 @@ could contradict each other — which they did: "needs a key" was inferred from
 that no credential was required and looked permanently ready.
 
 ```rust
-api_key: ApiKey::NotNeeded,                    // local Ollama, llama-server
-api_key: ApiKey::Value(key_from_your_vault),   // the secret itself
+api_key: ApiKey::NotNeeded,                        // local Ollama, llama-server
+api_key: ApiKey::Value(key_from_your_vault),       // the secret itself
 api_key: ApiKey::Env("OPENROUTER_API_KEY".into()), // CI / headless
-api_key: ApiKey::Required,                     // needed, not supplied yet
+api_key: ApiKey::Required,                         // needed, not supplied yet
 ```
-
-`Required` is the state the old `requires_api_key` existed for: readiness
-reports not-ready and the credential slot stays writable, so a host can prompt.
-`is_needed()` and `env_var()` derive from the variant, so no pair of values can
-disagree.
-
-**Old →  new**
 
 | before | after |
 |---|---|
-| `api_key: Some(k), requires_api_key: true` | `ApiKey::Value(k)` |
+| `api_key: Some(k)` | `ApiKey::Value(k)` |
 | `api_key_env: Some(v)` | `ApiKey::Env(v)` |
-| `requires_api_key: true` alone | `ApiKey::Required` |
-| all three unset / false | `ApiKey::NotNeeded` |
+| `requires_api_key: true`, no key yet | `ApiKey::Required` |
+| all unset | `ApiKey::NotNeeded` |
 
-**3b. Historical note — the value-vs-variable change this replaces.** `api_key_env`
-named an environment variable, so the key had to be exported into the
-process — and every child the agent spawned inherited it. Pass the secret
-directly instead:
+`Value` never touches the environment, which matters because an exported
+variable is inherited by every child the agent spawns — including the `bash`
+tool, putting the key running the agent within the agent's reach. `is_needed()`
+and `env_var()` derive from the variant, so no two values can disagree.
 
-```rust
-OpenHarnessConfig {
-    api_key: Some(key_from_your_vault),   // the secret itself
-    requires_api_key: true,               // was implied by api_key_env
-    ..Default::default()
-}
-```
-
-`api_key_env` still works and still reads the variable, for CI and headless
-runs where an env var is the natural source. `api_key` wins when both are set.
-
-**4. `requires_api_key` is now its own field.** It used to be inferred from
-`api_key_env.is_some()`, which meant a host passing a key by value reported
-`credential_required: false` and looked permanently ready. Set it explicitly.
-Leaving it `false` while `api_key_env` is set keeps the old behaviour.
-
-**5. Instruction files and skills no longer read `$HOME` on their own.**
-Runs used to load `~/.claude/CLAUDE.md` and scan `~/.claude/skills`
-unconditionally. On the machine this was found on that was ~3,400 tokens of
-someone else's product's config on every turn — enough that no local server
-started on the common 4096-token context could run the loop at all. A library
-should not decide to read a user's home directory, so the host names the
-locations now:
+**4. Instruction files and skills no longer read `$HOME` on their own.**
+Runs loaded `~/.claude/CLAUDE.md` and scanned `~/.claude/skills`
+unconditionally — another product's configuration, on every turn, measured at
+~3,400 tokens on one machine. A library should not decide to read a user's home
+directory, so the host names the locations:
 
 ```rust
 OpenHarnessConfig {
-    instruction_sources: InstructionSources::discover_global(),  // opt back in
+    instruction_sources: InstructionSources::discover_global(),
     global_skill_roots: harness::global_skill_roots(),
     ..Default::default()
 }
 ```
 
-Leave both at their defaults for project-only behaviour.
+Leave both at their defaults for project-only behaviour, which is what most
+hosts want: a writing app has no business inheriting a coding agent's rules.
 
-**6. `OpenHarnessConfig` gained `disabled_tools`.** Add
-`disabled_tools: Vec::new()` — or use `..Default::default()`, which is now
-derived — to keep every built-in tool. Name a tool to withhold it:
+**5. `OpenHarnessConfig` gained `disabled_tools`.** Use `..Default::default()`
+to keep every built-in, or name the ones to withhold:
 
 ```rust
-disabled_tools: vec!["shell".into()],
+disabled_tools: vec!["bash".into()],
 ```
 
-Disabled tools are removed at construction, so they never reach the model's
-prompt. `OpenHarness::builtin_tool_names()` lists what you can name.
+Withheld at construction, so a disabled tool never reaches the model's prompt
+rather than being advertised and refused. `OpenHarness::builtin_tool_names()`
+lists the valid ids.
+
+**6. Session files moved.** `sessions/<id>.json` plus `messages/<id>.jsonl`
+became a single `sessions/<id>.jsonl` — a header line, then one message per
+line. Nothing to do: the old layout is still read, so existing sessions resume.
+Only relevant if you read the files yourself.
 
 ### Changed
 
 - **BREAKING — `Harness::run` renamed to `start`; `run_channel` renamed to
-  `run`.** The common call is the channel one, so it should have the short
-  name. `run_channel` described its plumbing rather than what a caller wanted,
-  and left `run` — the obvious first thing to reach for — as the awkward
-  callback form.
-- **BREAKING — `OpenHarnessConfig.requires_api_key` split out of
-  `api_key_env`.** One field was doing four jobs: naming a variable, marking
-  the host as needing a key, deciding whether a credential slot was writable,
-  and gating readiness. A host holding its key in a vault got the wrong answer
-  to all four.
+  `run`.** The common call is the channel one, so it should have the short name.
+  `run_channel` described its plumbing rather than what a caller wanted, and
+  left `run` — the obvious first thing to reach for — as the callback form.
+- **BREAKING — `api_key`, `api_key_env` and `requires_api_key` collapsed into
+  `ApiKey`.** Four meaningful states as a sum type, where three booleans and
+  options could express eight and contradict each other.
+- **BREAKING — instruction files and skills are opt-in outside the working
+  tree.** See migration 4.
+- **Sessions are one append-only JSONL file each.** Recording a turn was
+  O(n) — the whole conversation re-serialised to add one exchange — and a
+  whole-array file is only meaningful complete, so a process killed mid-write
+  lost the conversation rather than the turn. Appending costs the final line.
+  Metadata moved into the same file, where it cannot fall out of step with the
+  transcript the way two separate writes could.
+- **`RunRequest` and `RunMode` derive `Default`.** Name the fields you mean and
+  let the rest default. `RunMode` defaults to `Ask`, the read-only mode —
+  defaulting to `Edit` would hand write access to anyone who forgot the field.
 
 ### Added
 
-- **`OpenHarnessConfig.instruction_sources`** and
-  **`OpenHarnessConfig.global_skill_roots`** — where `AGENTS.md` / `CLAUDE.md`
-  and skills are read from. Both default to the working tree only, so **nothing
-  under `$HOME` is read unless the host asks**. `InstructionSources::discover_global()`
-  and `global_skill_roots()` return the conventional per-user locations for a
-  host that wants them.
-- **A large MCP surface is deferred behind a `tool_search` tool.** Every tool
-  costs its schema in every request; built-ins are a fixed handful a coding task
-  needs, but MCP is open-ended — three servers with twenty tools each is sixty
-  schemas whether or not the task touches one. Past 4 KB of MCP schema they
-  leave the initial list and one search tool takes their place; the model
-  describes what it wants and gets back the matching schemas, ready to call. A
-  deferred tool stays callable throughout. Built-ins are never deferred. Ranking
-  is BM25, implemented in-crate — no new dependency.
-- **The skills catalog is inlined only while it fits.** One line per skill,
-  paid on every request: twenty skills is ~9 KB, which is nothing against a 128k
-  window and most of a 4k one. Past the profile's budget (8 KB full, 1 KB
-  compact) the catalog leaves the prompt and the `skill` tool serves it to the
-  one request that asks — the progressive disclosure already used for skill
-  bodies, applied a level up. `skill` now takes an optional `name`; omitting it
-  lists what is available.
-- **`OpenHarnessConfig.prompt_cache`** — mark the prompt prefix as cacheable
-  with `PromptCache::Ephemeral`. Anthropic caches only what a request marks,
-  and forwards `cache_control` through OpenAI-compatible gateways, so a Claude
-  model reached via OpenRouter previously re-charged the system prompt and the
-  whole tool block at full input price every turn. Breakpoints land on the last
-  tool and the system message. Default stays `Implicit` — correct for OpenAI and
-  DeepSeek, which cache prefixes on their own, and for local servers whose KV
-  cache keys on the bytes rather than a field.
-- **`OpenHarnessConfig.api_key`** — the secret by value, so a host with an OS
-  vault never has to put it in the environment.
-- **`OpenHarnessConfig.disabled_tools`** and
-  **`OpenHarness::builtin_tool_names`** — choose the tool set at construction.
-  Everything is enabled by default; name what you want withheld.
-- **`RunRequest` and `RunMode` now derive `Default`.** Name the fields you
-  mean and let the rest default. `RunMode` defaults to `Ask`, the read-only
-  mode — defaulting to `Edit` would hand write access to anyone who forgot
-  the field.
+- **`PromptProfile`** — the tool surface and base prompt now fit the model.
+  `Auto` reads `ModelFacts` (context window and parameter count) and picks
+  `Compact` for a small window *or* a small model: core tools only, and a
+  terser prompt that keeps every rule, because the rules are what a weak model
+  gets wrong. Either fact alone decides, and with neither, a local endpoint gets
+  `Compact` and a hosted one `Full` — on a local server a wrong guess is a
+  refused request, on a hosted one a slightly narrower run.
+- **`PromptCache`** — `Ephemeral` marks the tool block, the system message and
+  the last settled turn as cacheable. Anthropic caches only what a request
+  marks and forwards the field through OpenAI-compatible gateways, so a Claude
+  model reached via OpenRouter was re-charging its whole prefix every turn.
+  Default `Implicit` is correct for providers that cache prefixes themselves.
+- **A large MCP surface is deferred behind `tool_search`.** Past 4 KB of MCP
+  schema those tools leave the initial list and one search tool takes their
+  place; the model describes what it wants and gets back matching schemas,
+  ready to call. Deferred means unlisted, never unavailable. Built-ins are never
+  deferred. Ranking is BM25, implemented in-crate — no new dependency.
+- **The skills catalog is inlined only while it fits.** Twenty skills is ~9 KB
+  paid on every request. Past the profile's budget the catalog leaves the prompt
+  and `skill` — now callable with no arguments — serves it to the one request
+  that asks.
+- **`OpenHarnessConfig.instruction_sources` / `global_skill_roots`** — where
+  `AGENTS.md`, `CLAUDE.md` and skills are read from, with a running 32 KiB
+  budget and first-match-per-directory. `InstructionSources::discover_global()`
+  and `global_skill_roots()` return the conventional per-user locations.
+- **`OpenHarnessConfig.disabled_tools`** and **`OpenHarness::builtin_tool_names`**.
+- **`ClaudeHarnessConfig` / `CodexHarnessConfig`**, via `Claude::custom` and
+  `Codex::custom` — name the binary to spawn. Both adapters hardcoded their
+  program in five places each while the ACP adapter had taken it from config
+  since it shipped, so an upstream rename or a fork needed a release to reach.
 - **`OpenHarness::ollama_at(base_url)`** — an Ollama on a non-default host.
 - **`models_dev::context_limit(provider, model)`** — a hosted model's context
-  window from the catalog. Ollama reports its own via `/api/show` and a local
-  `llama-server` via `/props`, but a hosted endpoint publishes a window in a
-  shape of its own or not at all, so the catalog is the only cross-provider
-  source. Used to fill `ModelFacts` for models.dev-backed providers.
-- **`ClaudeHarnessConfig` / `CodexHarnessConfig`**, via `Claude::custom` and
-  `Codex::custom` — name the binary to spawn. Both adapters hardcoded
-  `"claude"` and `"codex"` in five places each, while the ACP adapter had taken
-  its `command` from config since it shipped. An upstream rename, a fork, a
-  wrapper script or a test stub now costs a field rather than a release.
-  `DEFAULT_CLAUDE_COMMAND` and `DEFAULT_CODEX_COMMAND` are public, and are what
-  each config's `Default` uses.
+  window. Ollama reports its own via `/api/show` and a local `llama-server` via
+  `/props`; a hosted endpoint publishes one in a shape of its own or not at all,
+  so the catalog is the only cross-provider source.
 
 ### Fixed
 
 - **The shell tool no longer inherits the whole environment.** A command the
-  model ran could read any variable the host process held, including the API
-  key driving that same run. The child now gets an allowlist of about twenty
-  benign variables (`PATH`, `HOME`, `LANG`, the Windows equivalents). A
-  denylist was tried first and leaked in both directions — it stripped
-  `TOKENIZERS_PARALLELISM` while passing `AWS_ACCESS_KEY_ID` straight through.
-- **No console window flashes on Windows** (#35). Every child process spawns
-  with `CREATE_NO_WINDOW`, via `cli_stream::hidden_command`.
-- **A crash mid-save no longer costs the whole conversation.** Transcripts were
-  rewritten with a truncating `fs::write` after every turn, and the document has
-  to parse as one value — so a kill inside that window lost the entire session,
-  not the turn in flight. Writes go to a sibling temp file and rename.
-- **Skill discovery is ordered, so the prompt prefix stays byte-stable.** The
-  catalog sits ahead of the volatile working-directory block, which makes it
-  part of the prefix every request shares. Discovery took whatever order the
-  directory walk produced — stable enough locally to look fine, not guaranteed
-  across machines — and one reordered line changes the bytes, misses the cache
-  and pays a full re-prefill of everything above it.
-- **A skill whose description is a YAML block scalar is now readable.** The
-  frontmatter reader handled only a flat `key: value`, so the common
-  `description: >-` followed by indented lines was read as the literal `">-"`.
-  The skill still appeared in the catalog, so nothing looked broken — the model
-  just had nothing to match a task against and never called it. Seven of
-  twenty-one skills on the machine this was found on were in that state.
-- **Claude's `fable` alias is selectable.** The curated list held
-  `sonnet`/`opus`/`haiku` only. Online it went unnoticed, because models.dev
-  supplies `claude-fable-5` — but that list *is* the picker when models.dev is
-  unreachable, and `allows_custom_model` is `false` for Claude, so offline or on
-  a cold cache Fable could be neither picked nor typed.
+  model ran could read any variable the host process held, including the API key
+  driving that same run. The child now gets an allowlist of about twenty benign
+  variables. A denylist was tried first and leaked in both directions — it
+  stripped `TOKENIZERS_PARALLELISM` while passing `AWS_ACCESS_KEY_ID` straight
+  through.
 - **A prompt the provider says is too long now compacts and retries.**
   Compaction fired on an estimate, and an estimate against a tokenizer we do not
   have is sometimes wrong — at which point the provider refused and the run
-  ended. A refusal that names a context overflow is now a third reason to
-  compact, alongside the threshold, and the turn is sent again. Pi has had this
-  as `overflow` beside `manual` and `threshold`; it only became possible here
-  once errors carried the provider's own words. If there is nothing left to
-  summarize the original error is reported rather than retrying into the same
-  refusal.
-- **A rejected request now quotes the provider's explanation.** `ureq`'s
-  `Display` for a status error stops at the code, so a failed run reported
-  `status code 400` and nothing else — the same message whether the key was
-  refused, the model id was unknown, or the prompt was too long. The body is
-  where a provider says which it was, and it now reaches the `RunEvent::Error`
-  message (truncated to 500 characters).
+  ended. A refusal naming a context overflow is now a third reason to compact,
+  beside the threshold. If there is nothing left to summarize the original error
+  is reported rather than retrying into the same refusal.
+- **A rejected request quotes the provider's explanation.** `ureq`'s `Display`
+  for a status error stops at the code, so a failure read `status code 400`
+  whether the key was refused, the model id was unknown, or the prompt was too
+  long. The body says which; it now reaches `RunEvent::Error` (truncated to 500
+  characters).
+- **Claude's `fable` alias is selectable.** The curated list held
+  `sonnet`/`opus`/`haiku`. Online this went unnoticed because models.dev
+  supplies `claude-fable-5`, but that list *is* the picker when models.dev is
+  unreachable, and Claude sets `allows_custom_model: false` — so offline, Fable
+  could be neither picked nor typed.
+- **A skill whose description is a YAML block scalar is readable.** The
+  frontmatter reader handled only a flat `key: value`, so the common
+  `description: >-` was read as the literal `">-"`. The skill still appeared in
+  the catalog, so nothing looked broken — the model simply had nothing to match
+  a task against. Seven of twenty-one skills on one machine were in that state.
+- **Skill discovery is ordered, so the prompt prefix stays byte-stable.** The
+  catalog sits ahead of the volatile working-directory block, making it part of
+  the prefix every request shares; directory order is not guaranteed, and one
+  reordered line misses the cache and re-prefills everything above it.
+- **No console window flashes on Windows** (#35). Every child process spawns
+  with `CREATE_NO_WINDOW`, via `cli_stream::hidden_command`.
+- **docs.rs shows the whole crate.** It builds default features, which here are
+  the two CLI adapters — so every type in `openai_compatible`, most of the
+  crate, was absent from the published documentation.
 
 ## [0.4.0] - 2026-08-08
 
