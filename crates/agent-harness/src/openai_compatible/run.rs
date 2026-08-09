@@ -904,9 +904,11 @@ mod tests {
 
     #[test]
     fn system_prompt_joins_cleanly_and_states_the_rules() {
-        // The `\`-continued literal must read as clean prose (no mashed words,
-        // no leaked indentation) and carry the behavioural rules that keep a
-        // weak model from editing on a read-only ask.
+        // The prompt must carry the behavioural rules that keep a weak model
+        // from editing on a read-only ask. The whitespace assertions predate
+        // the move to a file — a `\`-continued literal swallowed the next
+        // line's indentation and mashed words together — and are kept because
+        // a stray indent in Markdown is just as invisible in review.
         assert!(SYSTEM_PROMPT.contains("no more, no less"));
         assert!(SYSTEM_PROMPT.contains("READ-ONLY"));
         assert!(SYSTEM_PROMPT.contains("Only use a write or edit tool when the user clearly asks"));
