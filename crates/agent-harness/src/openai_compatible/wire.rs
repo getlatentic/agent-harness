@@ -15,6 +15,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use super::PromptCache;
+
 /// One chat message, in either direction (request history or response).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ChatMessage {
@@ -136,6 +138,34 @@ pub(super) fn send_with_retry(url: &str, make: impl Fn() -> Result<ureq::Respons
     }
 }
 
+
+/// Mark the cacheable prefix with Anthropic-style `cache_control` breakpoints.
+///
+/// Anthropic caches only what a request explicitly marks, unlike OpenAI and
+/// DeepSeek which cache a matching prefix implicitly. Reached through an
+/// OpenAI-compatible gateway — OpenRouter forwards the field — an unmarked
+/// request re-charges the whole system prompt and tool block at full input
+/// price on every turn of a conversation.
+///
+/// Two breakpoints: the last tool, which covers the entire schema block behind
+/// it, and the system message. They are the two largest fixed spans and they
+/// sit at the front, which is the only place a prefix cache can help.
+///
+/// Carrying the field forces the system message's content from a bare string
+/// into a one-element text part — the only shape that has somewhere to put it.
+pub(super) fn mark_cache_breakpoints(body: &mut Value) {
+    let breakpoint = json!({ "type": "ephemeral" });
+
+    if let Some(last) = body.get_mut("tools").and_then(Value::as_array_mut).and_then(|tools| tools.last_mut()) {
+        last["cache_control"] = breakpoint.clone();
+    }
+
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else { return };
+    let Some(system) = messages.iter_mut().find(|m| m["role"] == "system") else { return };
+    let Some(text) = system["content"].as_str().map(str::to_owned) else { return };
+    system["content"] = json!([{ "type": "text", "text": text, "cache_control": breakpoint }]);
+}
+
 /// Maximum characters of a provider's error body to quote.
 const MAX_BODY_SNIPPET: usize = 500;
 
@@ -190,6 +220,7 @@ pub(crate) fn post_chat(
     model: &str,
     messages: &[ChatMessage],
     tools: &[Value],
+    cache: PromptCache,
 ) -> Result<ChatResponse, String> {
     let url = format!("{base}/v1/chat/completions");
     let mut body = json!({
@@ -199,6 +230,9 @@ pub(crate) fn post_chat(
     });
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools.to_vec());
+    }
+    if cache == PromptCache::Ephemeral {
+        mark_cache_breakpoints(&mut body);
     }
     let resp = send_with_retry(&url, || {
         let mut req = ureq::post(&url);
@@ -252,6 +286,10 @@ pub(crate) fn post_chat_stream(
     if !extras.image_data_uris.is_empty() {
         attach_images(&mut body, extras.image_data_uris);
     }
+    // Last, so the breakpoint lands on the final tool after the list is settled.
+    if extras.cache == PromptCache::Ephemeral {
+        mark_cache_breakpoints(&mut body);
+    }
     let resp = send_with_retry(&url, || {
         let mut req = ureq::post(&url);
         if let Some(key) = api_key {
@@ -274,6 +312,8 @@ pub(crate) struct RequestExtras<'a> {
     /// Inline reasoning tag to lift out of the stream (e.g. `Some("think")` for
     /// `<think>…</think>`); `None` disables extraction. See [`ThinkSplitter`].
     pub reasoning_tag: Option<&'a str>,
+    /// Whether to mark the prompt prefix as cacheable.
+    pub cache: PromptCache,
 }
 
 /// Rewrite the first user message's content into a multimodal parts array — the
@@ -688,6 +728,44 @@ mod tests {
     fn status_error(code: u16, body: &str) -> Box<ureq::Error> {
         let response = ureq::Response::new(code, "Bad Request", body).expect("build response");
         Box::new(ureq::Error::Status(code, response))
+    }
+
+    #[test]
+    fn cache_breakpoints_land_on_the_tool_block_and_the_system_message() {
+        let mut body = json!({
+            "messages": [
+                { "role": "system", "content": "the rules" },
+                { "role": "user", "content": "hello" }
+            ],
+            "tools": [ { "function": { "name": "read" } }, { "function": { "name": "list" } } ]
+        });
+        mark_cache_breakpoints(&mut body);
+
+        // The LAST tool, not the first: a breakpoint covers everything before
+        // it, so marking the first would cache one schema and re-send the rest.
+        assert_eq!(body["tools"][1]["cache_control"]["type"], "ephemeral");
+        assert!(body["tools"][0]["cache_control"].is_null(), "only the last tool carries it");
+
+        // A bare string has nowhere to hang the field, so the system content
+        // becomes a one-element text part.
+        assert_eq!(body["messages"][0]["content"][0]["text"], "the rules");
+        assert_eq!(body["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(body["messages"][1]["content"], "hello", "the user turn is untouched");
+    }
+
+    #[test]
+    fn marking_a_request_without_tools_or_system_is_a_no_op() {
+        let mut body = json!({ "messages": [ { "role": "user", "content": "hi" } ] });
+        let before = body.clone();
+        mark_cache_breakpoints(&mut body);
+        assert_eq!(body, before, "nothing to mark must not corrupt the request");
+    }
+
+    #[test]
+    fn implicit_is_the_default_so_an_unmarked_request_stays_unmarked() {
+        // Correct everywhere; marking is wasted on providers that cache
+        // implicitly and restructures a message they never asked to change.
+        assert_eq!(PromptCache::default(), PromptCache::Implicit);
     }
 
     #[test]

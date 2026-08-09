@@ -126,6 +126,14 @@ prompt. `OpenHarness::builtin_tool_names()` lists what you can name.
   under `$HOME` is read unless the host asks**. `InstructionSources::discover_global()`
   and `global_skill_roots()` return the conventional per-user locations for a
   host that wants them.
+- **`OpenHarnessConfig.prompt_cache`** — mark the prompt prefix as cacheable
+  with `PromptCache::Ephemeral`. Anthropic caches only what a request marks,
+  and forwards `cache_control` through OpenAI-compatible gateways, so a Claude
+  model reached via OpenRouter previously re-charged the system prompt and the
+  whole tool block at full input price every turn. Breakpoints land on the last
+  tool and the system message. Default stays `Implicit` — correct for OpenAI and
+  DeepSeek, which cache prefixes on their own, and for local servers whose KV
+  cache keys on the bytes rather than a field.
 - **`OpenHarnessConfig.api_key`** — the secret by value, so a host with an OS
   vault never has to put it in the environment.
 - **`OpenHarnessConfig.disabled_tools`** and

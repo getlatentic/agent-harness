@@ -63,6 +63,8 @@ pub(crate) struct LoopConfig {
     /// Which prompt and tool surface this run gets; `Auto` decides from
     /// `context_tokens`.
     pub profile: PromptProfile,
+    /// Whether requests mark the prompt prefix as cacheable.
+    pub prompt_cache: crate::openai_compatible::PromptCache,
     /// Per-user skill directories to scan in addition to the project's.
     /// Empty by default — nothing under `$HOME` unless the host asks.
     pub global_skill_roots: Vec<PathBuf>,
@@ -307,6 +309,7 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
             response_format: response_format.as_ref(),
             image_data_uris: &cfg.image_data_uris,
             reasoning_tag: cfg.reasoning_tag.as_deref(),
+                    cache: cfg.prompt_cache,
         };
         // Ollama gets its native `/api/chat` so `num_ctx` actually applies; every
         // other provider speaks the OpenAI `/v1` shape.
@@ -600,7 +603,7 @@ fn chat_once(cfg: &LoopConfig, model: &str, messages: &[ChatMessage], tools: &[V
             Ok(msg)
         }
         None => {
-            let resp = wire::post_chat(&cfg.base_url, cfg.api_key.as_deref(), model, messages, tools)?;
+            let resp = wire::post_chat(&cfg.base_url, cfg.api_key.as_deref(), model, messages, tools, cfg.prompt_cache)?;
             resp.choices
                 .into_iter()
                 .next()
@@ -948,6 +951,7 @@ mod tests {
             instruction_sources: instructions::InstructionSources::default(),
             global_skill_roots: Vec::new(),
             profile: PromptProfile::default(),
+            prompt_cache: Default::default(),
             model_parameters_b: None,
             run_id: "t".into(),
             base_url: "http://unused".into(),

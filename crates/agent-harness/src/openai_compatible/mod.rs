@@ -181,6 +181,8 @@ pub struct OpenHarness {
     api_key: ApiKey,
     /// Tool ids withheld from this agent — see [`OpenHarnessConfig::disabled_tools`].
     disabled_tools: Vec<String>,
+    /// Prefix-cache marking — see [`OpenHarnessConfig::prompt_cache`].
+    prompt_cache: PromptCache,
     /// Instruction-file lookup — see [`OpenHarnessConfig::instruction_sources`].
     instruction_sources: InstructionSources,
     /// Extra skill roots — see [`OpenHarnessConfig::global_skill_roots`].
@@ -209,6 +211,28 @@ pub struct OpenHarness {
     /// Inline reasoning tag lifted from streamed output into `Thinking`
     /// (default `Some("think")`); `None` disables extraction.
     reasoning_tag: Option<String>,
+}
+
+/// Whether to mark the prompt prefix as cacheable.
+///
+/// Providers split two ways. OpenAI and DeepSeek cache a matching prefix
+/// implicitly and need nothing in the request. Anthropic caches only what the
+/// request marks with `cache_control`, and forwards that field through
+/// OpenAI-compatible gateways such as OpenRouter — so reaching a Claude model
+/// without marking anything re-charges the system prompt and the whole tool
+/// block at full input price on every turn.
+///
+/// Default is [`Self::Implicit`]: an unmarked request is correct everywhere,
+/// where a marked one restructures the system message and is wasted on an
+/// endpoint that ignores it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PromptCache {
+    /// Send no breakpoints — right for implicit-caching providers and for local
+    /// servers, whose KV cache keys on the prefix bytes rather than a field.
+    #[default]
+    Implicit,
+    /// Mark the tool block and the system message as cacheable.
+    Ephemeral,
 }
 
 /// Where an endpoint's API key comes from, or that it needs none.
@@ -277,6 +301,10 @@ pub struct OpenHarnessConfig {
     pub display_name: String,
     /// Base URL with no trailing slash; chat is `{base}/v1/chat/completions`.
     pub base_url: String,
+    /// Whether requests mark the prompt prefix as cacheable. See
+    /// [`PromptCache`] — needed for Anthropic models reached through a gateway,
+    /// unnecessary elsewhere.
+    pub prompt_cache: PromptCache,
     /// Where this endpoint's key comes from, or that it needs none. See
     /// [`ApiKey`]: one value, so "needs a key" and "reads this variable"
     /// cannot disagree the way three separate fields could.
@@ -340,6 +368,7 @@ impl OpenHarness {
             description: "Local models served by Ollama via its OpenAI-compatible API.".to_owned(),
             base_url: base_url.into(),
             api_key: ApiKey::NotNeeded, // a local Ollama takes none
+            prompt_cache: PromptCache::default(),
             disabled_tools: Vec::new(),
             instruction_sources: InstructionSources::default(),
             global_skill_roots: Vec::new(),
@@ -366,6 +395,7 @@ impl OpenHarness {
             display_name,
             base_url,
             api_key,
+            prompt_cache,
             disabled_tools,
             instruction_sources,
             global_skill_roots,
@@ -378,6 +408,7 @@ impl OpenHarness {
             display_name,
             base_url,
             api_key,
+            prompt_cache,
             disabled_tools,
             instruction_sources,
             global_skill_roots,
@@ -668,6 +699,7 @@ impl Harness for OpenHarness {
             instruction_sources: self.instruction_sources.clone(),
             global_skill_roots: self.global_skill_roots.clone(),
             profile: self.profile,
+            prompt_cache: self.prompt_cache,
             model_parameters_b,
             model,
             prompt,
