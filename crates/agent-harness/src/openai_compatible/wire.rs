@@ -147,12 +147,22 @@ pub(super) fn send_with_retry(url: &str, make: impl Fn() -> Result<ureq::Respons
 /// request re-charges the whole system prompt and tool block at full input
 /// price on every turn of a conversation.
 ///
-/// Two breakpoints: the last tool, which covers the entire schema block behind
-/// it, and the system message. They are the two largest fixed spans and they
-/// sit at the front, which is the only place a prefix cache can help.
+/// Three breakpoints, because a cache breakpoint covers everything *before* it
+/// and nothing after:
 ///
-/// Carrying the field forces the system message's content from a bare string
-/// into a one-element text part — the only shape that has somewhere to put it.
+/// 1. the last tool, covering the whole schema block;
+/// 2. the system message;
+/// 3. the last message of settled history.
+///
+/// The first two are the fixed prefix. The third is what makes a conversation
+/// cheap: without it every turn re-sends the entire transcript at full price,
+/// and the transcript is the part that grows. Placing it on the newest settled
+/// message means the turn that just completed is cached for the next one.
+///
+/// Anthropic allows four; the fourth is left unspent rather than guessed at.
+///
+/// Carrying the field forces a message's content from a bare string into a
+/// one-element text part — the only shape that has somewhere to put it.
 pub(super) fn mark_cache_breakpoints(body: &mut Value) {
     let breakpoint = json!({ "type": "ephemeral" });
 
@@ -161,9 +171,27 @@ pub(super) fn mark_cache_breakpoints(body: &mut Value) {
     }
 
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else { return };
-    let Some(system) = messages.iter_mut().find(|m| m["role"] == "system") else { return };
-    let Some(text) = system["content"].as_str().map(str::to_owned) else { return };
-    system["content"] = json!([{ "type": "text", "text": text, "cache_control": breakpoint }]);
+    if let Some(system) = messages.iter_mut().find(|m| m["role"] == "system") {
+        mark_message(system, &breakpoint);
+    }
+    // The final message is the prompt just added, which by definition has never
+    // been sent before — a breakpoint there would cache nothing and burn a slot.
+    // The one before it ends the history both this turn and the next will share.
+    if messages.len() >= 3 {
+        let settled = messages.len() - 2;
+        if messages[settled]["role"] != "system" {
+            mark_message(&mut messages[settled], &breakpoint);
+        }
+    }
+}
+
+/// Attach `cache_control` to a message, promoting string content to a text part.
+/// Leaves a message alone when its content is absent — a tool-call-only
+/// assistant turn has no text to hang it on.
+fn mark_message(message: &mut Value, breakpoint: &Value) {
+    if let Some(text) = message["content"].as_str().map(str::to_owned) {
+        message["content"] = json!([{ "type": "text", "text": text, "cache_control": breakpoint }]);
+    }
 }
 
 /// Maximum characters of a provider's error body to quote.
@@ -750,7 +778,58 @@ mod tests {
         // becomes a one-element text part.
         assert_eq!(body["messages"][0]["content"][0]["text"], "the rules");
         assert_eq!(body["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral");
-        assert_eq!(body["messages"][1]["content"], "hello", "the user turn is untouched");
+        assert_eq!(body["messages"][1]["content"], "hello", "the only user turn is the new one");
+    }
+
+    #[test]
+    fn history_gets_its_own_breakpoint_but_the_new_prompt_does_not() {
+        // The prefix breakpoints cover a fixed ~1.2k tokens. The transcript is
+        // the part that grows, so without a breakpoint in it a long
+        // conversation re-sends everything at full price every turn.
+        let mut body = json!({ "messages": [
+            { "role": "system", "content": "rules" },
+            { "role": "user", "content": "first question" },
+            { "role": "assistant", "content": "first answer" },
+            { "role": "user", "content": "the new prompt" }
+        ]});
+        mark_cache_breakpoints(&mut body);
+
+        assert_eq!(body["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral", "system");
+        assert_eq!(
+            body["messages"][2]["content"][0]["cache_control"]["type"], "ephemeral",
+            "the last settled turn ends the history this and the next turn share"
+        );
+        assert_eq!(
+            body["messages"][3]["content"], "the new prompt",
+            "the newest message has never been sent, so caching it would burn a slot for nothing"
+        );
+        assert!(body["messages"][1]["cache_control"].is_null(), "one history breakpoint, not many");
+    }
+
+    #[test]
+    fn a_first_turn_marks_only_the_prefix() {
+        // system + the first prompt: there is no settled history to cache yet.
+        let mut body = json!({ "messages": [
+            { "role": "system", "content": "rules" },
+            { "role": "user", "content": "hello" }
+        ]});
+        mark_cache_breakpoints(&mut body);
+        assert_eq!(body["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(body["messages"][1]["content"], "hello");
+    }
+
+    #[test]
+    fn a_tool_call_turn_without_text_is_left_alone() {
+        // An assistant turn that only calls tools has no content string to
+        // promote; writing a parts array over it would drop the tool calls.
+        let mut body = json!({ "messages": [
+            { "role": "system", "content": "rules" },
+            { "role": "assistant", "tool_calls": [ { "id": "1" } ] },
+            { "role": "user", "content": "next" }
+        ]});
+        mark_cache_breakpoints(&mut body);
+        assert!(body["messages"][1]["tool_calls"].is_array(), "tool calls survive");
+        assert!(body["messages"][1]["content"].is_null(), "nothing invented to carry the field");
     }
 
     #[test]

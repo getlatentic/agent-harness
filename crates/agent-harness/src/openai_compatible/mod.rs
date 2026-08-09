@@ -59,6 +59,22 @@ const OLLAMA_CTX_CEILING: u64 = 32_768;
 /// Ollama's 4096 default, which silently truncates our system prompt.
 const OLLAMA_CTX_DEFAULT: u64 = 8_192;
 
+/// A `llama-server`'s loaded context window, from `/props`. `None` when the
+/// endpoint is not llama.cpp, has no model loaded, or does not answer — every
+/// one of which means "unknown", which the profile already handles.
+fn local_server_context(base_url: &str) -> Option<u64> {
+    let response = ureq::get(&format!("{base_url}/props"))
+        .timeout(std::time::Duration::from_secs(2))
+        .call()
+        .ok()?;
+    let body: Value = response.into_json().ok()?;
+    // Zero is what it reports before a model is loaded — absent, not a window.
+    body.get("default_generation_settings")?
+        .get("n_ctx")?
+        .as_u64()
+        .filter(|n| *n > 0)
+}
+
 /// How a harness instance discovers its model list for [`Harness::list_models`].
 enum Discovery {
     /// Query Ollama's `/api/tags` live.
@@ -473,10 +489,20 @@ impl OpenHarness {
                     .unwrap_or(OLLAMA_CTX_DEFAULT);
                 (Some(effective), Some(effective), parameters)
             }
-            // Non-Ollama: no per-model probe here. OpenRouter publishes both a
-            // context_length and a benchmark set, and models.dev carries limits
-            // — both are separate enrichments.
-            Discovery::Static(_) | Discovery::ModelsDev(_) => (self.context_tokens, None, None),
+            // A local OpenAI-compatible server the host did not size. llama.cpp
+            // publishes its loaded window on `/props`, and getting it wrong here
+            // is what made the whole request 400 rather than merely answer
+            // worse — so it is worth one cheap call. A hosted endpoint is not
+            // probed: nothing there answers quickly, and models.dev already
+            // carries the limits for those.
+            Discovery::Static(_) | Discovery::ModelsDev(_) => {
+                let window = self.context_tokens.or_else(|| {
+                    profile::is_local_endpoint(&self.base_url)
+                        .then(|| local_server_context(&self.base_url))
+                        .flatten()
+                });
+                (window, None, None)
+            }
         }
     }
 

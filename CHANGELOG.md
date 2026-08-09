@@ -162,6 +162,10 @@ prompt. `OpenHarness::builtin_tool_names()` lists what you can name.
   `TOKENIZERS_PARALLELISM` while passing `AWS_ACCESS_KEY_ID` straight through.
 - **No console window flashes on Windows** (#35). Every child process spawns
   with `CREATE_NO_WINDOW`, via `cli_stream::hidden_command`.
+- **A crash mid-save no longer costs the whole conversation.** Transcripts were
+  rewritten with a truncating `fs::write` after every turn, and the document has
+  to parse as one value — so a kill inside that window lost the entire session,
+  not the turn in flight. Writes go to a sibling temp file and rename.
 - **Skill discovery is ordered, so the prompt prefix stays byte-stable.** The
   catalog sits ahead of the volatile working-directory block, which makes it
   part of the prefix every request shares. Discovery took whatever order the

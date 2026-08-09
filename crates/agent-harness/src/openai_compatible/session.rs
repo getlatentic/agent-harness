@@ -150,12 +150,28 @@ impl FileStore {
     }
 }
 
+/// Write JSON atomically: a sibling temp file, then a rename.
+///
+/// A transcript is rewritten in full after every turn, and a plain truncating
+/// write is only whole between the truncate and the last byte. A crash, a
+/// SIGKILL or a full disk inside that window leaves a partial file — and since
+/// the document has to parse as one value, the loss is the entire conversation
+/// rather than the turn in flight. Rename is atomic on POSIX and on Windows for
+/// a same-directory replace, so a reader sees the old file or the new one.
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
     }
     let json = serde_json::to_string_pretty(value).map_err(|e| format!("serializing {}: {e}", path.display()))?;
-    std::fs::write(path, json).map_err(|e| format!("writing {}: {e}", path.display()))
+
+    // Same directory, so the rename cannot cross a filesystem boundary. The pid
+    // keeps two processes writing the same session from colliding on the temp.
+    let temp = path.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&temp, json).map_err(|e| format!("writing {}: {e}", temp.display()))?;
+    std::fs::rename(&temp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&temp);
+        format!("replacing {}: {e}", path.display())
+    })
 }
 
 fn read_json_opt<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>, String> {
