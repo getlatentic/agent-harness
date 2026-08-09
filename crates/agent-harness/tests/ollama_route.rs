@@ -32,6 +32,12 @@ type Seen = Arc<Mutex<Vec<(String, Value)>>>;
 /// `recv()` for the life of the test binary — cheap, and it can't race a test
 /// that makes more requests than the script anticipated.
 fn fake_ollama(tags: Value, chat_turns: Vec<String>) -> (String, Seen) {
+    fake_ollama_with_context(tags, chat_turns, 8192)
+}
+
+/// As [`fake_ollama`], with the context window `/api/show` reports — the signal
+/// `PromptProfile::Auto` keys on.
+fn fake_ollama_with_context(tags: Value, chat_turns: Vec<String>, context_length: u64) -> (String, Seen) {
     let server = tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port");
     let base = format!("http://{}", server.server_addr());
     let seen: Seen = Arc::default();
@@ -49,7 +55,10 @@ fn fake_ollama(tags: Value, chat_turns: Vec<String>) -> (String, Seen) {
             let body = if url.starts_with("/api/tags") {
                 tags.to_string()
             } else if url.starts_with("/api/show") {
-                json!({ "model_info": { "context_length": 8192 } }).to_string()
+                // Ollama keys this by architecture (`qwen2.context_length`), and the
+                // parser scans for that suffix — a bare `context_length` silently
+                // falls back to the default and makes this stub decorative.
+                json!({ "model_info": { "qwen2.context_length": context_length } }).to_string()
             } else if url.starts_with("/api/chat") {
                 match turns.lock().unwrap().next() {
                     Some(ndjson) => ndjson,
@@ -212,6 +221,54 @@ fn a_tool_call_round_trips_its_result_back_to_the_model() {
         follow_up.iter().any(|m| m["role"] == "tool"),
         "the second turn must include the tool result: {follow_up:?}"
     );
+}
+
+/// Tool names offered to the model in the first `/api/chat` request.
+fn offered_tools(seen: &Seen) -> Vec<String> {
+    let log = seen.lock().unwrap();
+    let (_, body) = log.iter().find(|(u, _)| u.starts_with("/api/chat")).expect("chat call");
+    body["tools"]
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The profile is chosen from the context window `/api/show` reports, and it
+/// has to reach the wire — an enum that resolves correctly but never changes
+/// the request would pass a unit test and fix nothing.
+#[test]
+fn a_small_context_window_narrows_the_tools_actually_sent() {
+    let tags = json!({ "models": [ { "name": "test-model" } ] });
+
+    let (small_url, small_seen) =
+        fake_ollama_with_context(tags.clone(), vec![done_line("ok")], 8_192);
+    let _ = collect(&OpenHarness::ollama_at(&small_url), "hello");
+    let small = offered_tools(&small_seen);
+
+    let (big_url, big_seen) =
+        fake_ollama_with_context(tags, vec![done_line("ok")], 131_072);
+    let _ = collect(&OpenHarness::ollama_at(&big_url), "hello");
+    let big = offered_tools(&big_seen);
+
+    assert!(!small.is_empty() && !big.is_empty(), "both runs must offer tools");
+    assert!(
+        small.len() < big.len(),
+        "a small window must cost fewer tool schemas: {small:?} vs {big:?}"
+    );
+    // Whatever is trimmed, the model must keep the means to find and read a
+    // file — a run that cannot do that is not narrower, it is broken.
+    for essential in ["read", "list"] {
+        assert!(small.contains(&essential.to_owned()), "{essential} missing from {small:?}");
+    }
+    for optional in ["webfetch", "todowrite"] {
+        assert!(!small.contains(&optional.to_owned()), "{optional} should be withheld: {small:?}");
+        assert!(big.contains(&optional.to_owned()), "{optional} expected at full surface: {big:?}");
+    }
 }
 
 /// The same route against a **real** Ollama — what the fake can't catch: vendor

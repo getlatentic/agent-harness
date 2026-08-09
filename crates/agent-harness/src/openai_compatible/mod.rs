@@ -38,6 +38,8 @@ use crate::{
 mod instructions;
 pub use instructions::InstructionSources;
 mod ollama;
+mod profile;
+pub use profile::{PromptProfile, COMPACT_AT_OR_BELOW_TOKENS};
 mod run;
 mod session;
 mod skills;
@@ -186,6 +188,8 @@ pub struct OpenHarness {
     instruction_sources: InstructionSources,
     /// Extra skill roots — see [`OpenHarnessConfig::global_skill_roots`].
     global_skill_roots: Vec<std::path::PathBuf>,
+    /// Prompt/tool surface — see [`OpenHarnessConfig::profile`].
+    profile: PromptProfile,
     /// Whether this endpoint needs a key — see [`OpenHarnessConfig::requires_api_key`].
     requires_api_key: bool,
     discovery: Discovery,
@@ -269,6 +273,11 @@ pub struct OpenHarnessConfig {
     /// by default; [`global_skill_roots`] returns the usual ones
     /// for a host that wants them.
     pub global_skill_roots: Vec<std::path::PathBuf>,
+    /// Which prompt and tool surface runs get. [`PromptProfile::Auto`] (the
+    /// default) picks [`PromptProfile::Compact`] for a small context window —
+    /// core tools and plainer instructions, so a small local model has room to
+    /// work in.
+    pub profile: PromptProfile,
     /// Curated models for the picker; may be empty (free-text ids are allowed,
     /// or call [`OpenHarness::with_models_dev`] for catalog discovery).
     pub models: Vec<HarnessModel>,
@@ -304,6 +313,7 @@ impl OpenHarness {
             disabled_tools: Vec::new(),
             instruction_sources: InstructionSources::default(),
             global_skill_roots: Vec::new(),
+            profile: PromptProfile::default(),
             // Local Ollama takes no key.
             requires_api_key: false,
             discovery: Discovery::OllamaTags,
@@ -332,6 +342,7 @@ impl OpenHarness {
             disabled_tools,
             instruction_sources,
             global_skill_roots,
+            profile,
             requires_api_key,
             models,
         } = config;
@@ -348,6 +359,7 @@ impl OpenHarness {
             disabled_tools,
             instruction_sources,
             global_skill_roots,
+            profile,
             requires_api_key,
             default_model: models.first().map(|m| m.value.clone()),
             discovery: Discovery::Static(models),
@@ -639,6 +651,7 @@ impl Harness for OpenHarness {
             disabled_tools: self.disabled_tools.clone(),
             instruction_sources: self.instruction_sources.clone(),
             global_skill_roots: self.global_skill_roots.clone(),
+            profile: self.profile,
             model,
             prompt,
             cwd: cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),

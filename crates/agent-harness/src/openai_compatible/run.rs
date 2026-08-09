@@ -17,6 +17,7 @@ use serde_json::Value;
 use crate::{HarnessError, RunCallback, RunControl, RunEvent, RunMode};
 
 use super::instructions;
+use super::profile::PromptProfile;
 use super::ollama;
 use super::session::{self, FileStore};
 use super::skills;
@@ -59,6 +60,9 @@ pub(crate) struct LoopConfig {
     /// Where `AGENTS.md` / `CLAUDE.md` are read from, and how much of them is
     /// kept. Defaults to the working tree only.
     pub instruction_sources: instructions::InstructionSources,
+    /// Which prompt and tool surface this run gets; `Auto` decides from
+    /// `context_tokens`.
+    pub profile: PromptProfile,
     /// Per-user skill directories to scan in addition to the project's.
     /// Empty by default — nothing under `$HOME` unless the host asks.
     pub global_skill_roots: Vec<PathBuf>,
@@ -112,37 +116,9 @@ impl LoopConfig {
     }
 }
 
-/// The base system prompt. Regenerated each run (it is *not* part of the
-/// persisted transcript), so it can grow — Stage D appends the available-skills
-/// catalog here.
-const SYSTEM_PROMPT: &str = "You are a careful AI assistant working in the \
-    user's files. Do exactly what the user asks — no more, no less — and \
-    follow their instructions precisely.\n\
-    \n\
-    Match the request to the right action:\n\
-    - A question, summary, explanation, review, or analysis is a READ-ONLY \
-    task: read what you need, then answer directly in your reply. Do NOT \
-    create, edit, or overwrite any file for these.\n\
-    - Only use a write or edit tool when the user clearly asks you to create \
-    or change a file. Then make the smallest change that satisfies the \
-    request and keep the user's existing content and style.\n\
-    - If the request is ambiguous, ask one brief clarifying question instead \
-    of guessing or editing.\n\
-    \n\
-    Tools (paths are relative to the working directory): `read` to inspect a \
-    file; `glob`, `grep`, and `list` to find files and content; `edit` for a \
-    targeted change to an existing file; `write` to create or fully replace \
-    one; `bash` for builds, tests, and git.\n\
-    \n\
-    To see what files exist or to find one, call `list` or `glob` first — \
-    never guess file names or their contents from memory.\n\
-    \n\
-    If a write or edit is refused because the run is read-only, do NOT retry \
-    it. Tell the user the run is read-only and that they can turn on editing, \
-    then answer their request without changing files.\n\
-    \n\
-    When the task is done, reply with a short, clear final message and make \
-    no further tool calls.";
+/// The default base system prompt, re-exported from [`super::profile`] so the
+/// existing references and tests keep one name for it.
+use super::profile::FULL_SYSTEM_PROMPT as SYSTEM_PROMPT;
 
 /// Appended as the last message on every read-only (Ask) turn. Small local
 /// models attend most to the end of the prompt and honor the system-message
@@ -247,11 +223,17 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
     for message in mcp_status {
         (*on_event)(RunEvent::Activity { run_id: rid.to_owned(), message });
     }
+    // Resolved once: it decides both the tool surface and the base prompt, and
+    // the two must agree — a prompt naming a tool the model was not offered is
+    // the failure this profile exists to avoid.
+    let profile = cfg.profile.resolve(cfg.context_tokens);
+    let mut disabled = cfg.disabled_tools.clone();
+    disabled.extend(profile.withheld_tools(&tools::ToolSet::builtin_tool_names()));
     let toolset = tools::ToolSet::new(
         mcp_tools,
         cfg.permissions.clone(),
         cfg.permission_prompt.clone(),
-        &cfg.disabled_tools,
+        &disabled,
     );
     let tool_defs = toolset.defs(cfg.mode, &cfg.model, tools::AgentContext::Main);
     // Structured-output schema (if set) as an OpenAI `response_format`, applied
@@ -262,7 +244,7 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
     // to the (regenerated, non-persisted) system prompt, and the model loads a
     // skill's body on demand via the `skill` tool.
     let skills = skills::discover(&cfg.cwd, &cfg.global_skill_roots);
-    let mut system_prompt = build_system_prompt(SYSTEM_PROMPT, &cfg.cwd, &skills, &cfg.instruction_sources);
+    let mut system_prompt = build_system_prompt(profile.system_prompt(), &cfg.cwd, &skills, &cfg.instruction_sources);
     if let Some(catalog) = agent_catalog(&cfg.agents) {
         system_prompt.push_str(&catalog);
     }
@@ -913,6 +895,7 @@ mod tests {
         LoopConfig {
             instruction_sources: instructions::InstructionSources::default(),
             global_skill_roots: Vec::new(),
+            profile: PromptProfile::default(),
             run_id: "t".into(),
             base_url: "http://unused".into(),
             api_key: None,
