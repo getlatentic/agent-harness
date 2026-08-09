@@ -109,8 +109,11 @@ fn take_within(text: &str, remaining: &mut usize) -> String {
         *remaining -= text.len();
         return text.to_owned();
     }
+    // Walk back to a boundary. Index 0 is always one, so this terminates
+    // without a separate `end > 0` guard — which was redundant, and being
+    // redundant made it untestable: flipping it changed nothing observable.
     let mut end = *remaining;
-    while end > 0 && !text.is_char_boundary(end) {
+    while !text.is_char_boundary(end) {
         end -= 1;
     }
     *remaining = 0;
@@ -206,6 +209,52 @@ mod tests {
         let text = gather(&root, &project_only()).expect("found instructions");
         assert!(text.contains("the standard"), "AGENTS.md is preferred: {text}");
         assert!(!text.contains("the fallback"), "CLAUDE.md must not stack: {text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discover_global_names_the_conventional_files() {
+        // The opt-in path for a host that wants a user's existing global
+        // conventions. Untested, the whole function could return an empty list
+        // and a host that opted in would silently get nothing — which looks
+        // exactly like a user who has no global instructions.
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return; // no HOME: the function documents itself as empty
+        };
+        let sources = InstructionSources::discover_global();
+
+        assert_eq!(
+            sources.global,
+            vec![
+                home.join(".config/AGENTS.md"),
+                home.join(".codex/AGENTS.md"),
+                home.join(".claude/CLAUDE.md"),
+            ],
+            "order is precedence: our own convention first, then the agents that ship their own"
+        );
+        assert_eq!(sources.max_bytes, DEFAULT_MAX_BYTES, "opting in must not change the budget");
+    }
+
+    #[test]
+    fn the_default_budget_is_32_kib() {
+        // A budget is only a budget at a specific size. Left unasserted, an
+        // arithmetic slip turns 32 KiB into 1 KiB and quietly truncates almost
+        // every real instruction file.
+        assert_eq!(DEFAULT_MAX_BYTES, 32 * 1024);
+        assert_eq!(InstructionSources::default().max_bytes, DEFAULT_MAX_BYTES);
+    }
+
+    #[test]
+    fn a_file_exactly_on_budget_is_kept_whole() {
+        // The boundary between "fits" and "truncate". `<=` relaxed to `<` only
+        // differs here, and only by one byte of a file that should be intact.
+        let root = scratch("exact");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join("AGENTS.md"), "x".repeat(64)).unwrap();
+
+        let sources = InstructionSources { global: Vec::new(), max_bytes: 64 };
+        let text = gather(&root, &sources).expect("instructions");
+        assert_eq!(text.len(), 64, "a file the size of the budget is not truncated");
         let _ = std::fs::remove_dir_all(&root);
     }
 

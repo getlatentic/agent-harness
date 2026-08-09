@@ -243,6 +243,55 @@ mod tests {
     }
 
     #[test]
+    fn one_measurement_is_enough_to_stop_guessing_from_the_endpoint() {
+        // `unmeasured` needs BOTH facts missing. Requiring only one would change
+        // the answer for the shape llama.cpp actually has: a local server that
+        // reports its window via /props and has no parameter count to report.
+        // A roomy one would drop to Compact purely for being local.
+        let llama_cpp = ModelFacts {
+            context_tokens: Some(32_768),
+            parameters_b: None,
+            served_locally: true,
+        };
+        assert_eq!(
+            PromptProfile::Auto.resolve(llama_cpp),
+            PromptProfile::Full,
+            "a measured window is an answer; the endpoint only decides when nothing is known"
+        );
+
+        // The mirror: a known-large model on a local endpoint whose window we
+        // could not read.
+        let known_model = ModelFacts {
+            context_tokens: None,
+            parameters_b: Some(24.0),
+            served_locally: true,
+        };
+        assert_eq!(PromptProfile::Auto.resolve(known_model), PromptProfile::Full);
+
+        // And a small measurement still wins over the endpoint being local.
+        let small_local = ModelFacts {
+            context_tokens: Some(4_096),
+            parameters_b: None,
+            served_locally: true,
+        };
+        assert_eq!(PromptProfile::Auto.resolve(small_local), PromptProfile::Compact);
+    }
+
+    #[test]
+    fn the_catalog_budget_differs_by_profile_and_is_never_nothing() {
+        // A budget of 0 defers every catalog, however small; a budget the same
+        // for both profiles makes the profile pointless here. Neither shows up
+        // as a failure anywhere else.
+        let full = PromptProfile::Full.catalog_budget_bytes();
+        let compact = PromptProfile::Compact.catalog_budget_bytes();
+
+        assert!(compact > 0 && full > 0, "zero would defer a one-line catalog");
+        assert!(compact < full, "the compact profile carries less, not the same: {compact} vs {full}");
+        assert_eq!(full, 8 * 1024);
+        assert_eq!(compact, 1024);
+    }
+
+    #[test]
     fn nothing_reported_from_a_hosted_endpoint_keeps_the_full_surface() {
         // Withholding tools from a frontier model narrows the run silently, so
         // an absent measurement must not by itself trigger the smaller profile.
