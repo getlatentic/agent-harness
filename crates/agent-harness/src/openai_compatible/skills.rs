@@ -10,6 +10,7 @@
 //! (`name` required, `description` optional) and a Markdown body.
 
 use std::collections::HashSet;
+use std::iter::Peekable;
 use std::path::{Path, PathBuf};
 
 use ignore::WalkBuilder;
@@ -67,7 +68,9 @@ pub(crate) fn catalog(skills: &[Skill]) -> Option<String> {
     );
     for skill in skills {
         match &skill.description {
-            Some(d) => out.push_str(&format!("- `{}` — {d}\n", skill.name)),
+            // One bullet per skill, so a literal block's newlines are flattened
+            // rather than splitting the entry across list items.
+            Some(d) => out.push_str(&format!("- `{}` — {}\n", skill.name, one_line(d))),
             None => out.push_str(&format!("- `{}`\n", skill.name)),
         }
     }
@@ -116,19 +119,67 @@ fn split_frontmatter(content: &str) -> (&str, &str) {
     }
 }
 
-/// Read a flat `key: value` frontmatter field, stripping surrounding quotes.
+/// Read a frontmatter field: a flat `key: value`, or a YAML block scalar
+/// (`key: >` / `key: |`, with any chomping indicator).
+///
+/// The block forms matter. A description worth writing is usually longer than
+/// one comfortable line, so skill authors fold it — and reading only the marker
+/// line yielded a description of `">-"`, which tells the model nothing about
+/// when to call the skill. It was silently invisible rather than broken.
 fn field(frontmatter: &str, key: &str) -> Option<String> {
-    for line in frontmatter.lines() {
-        if let Some(rest) = line.trim().strip_prefix(key) {
-            if let Some(value) = rest.trim_start().strip_prefix(':') {
-                let v = value.trim().trim_matches(['"', '\'']).to_string();
-                if !v.is_empty() {
-                    return Some(v);
-                }
-            }
+    let mut lines = frontmatter.lines().peekable();
+    while let Some(line) = lines.next() {
+        let Some(rest) = line.trim_start().strip_prefix(key) else { continue };
+        let Some(value) = rest.trim_start().strip_prefix(':') else { continue };
+        let value = value.trim();
+        let text = match block_style(value) {
+            Some(style) => read_block(&mut lines, style),
+            None => value.trim_matches(['"', '\'']).to_owned(),
+        };
+        if !text.is_empty() {
+            return Some(text);
         }
     }
     None
+}
+
+/// Collapse every run of whitespace to a single space.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// How a block scalar joins its lines. Chomping indicators (`-`, `+`) only
+/// affect trailing newlines, which are trimmed either way.
+#[derive(Clone, Copy)]
+enum BlockStyle {
+    /// `>` — newlines become spaces.
+    Folded,
+    /// `|` — newlines are kept.
+    Literal,
+}
+
+fn block_style(value: &str) -> Option<BlockStyle> {
+    match value.trim_end_matches(['-', '+']) {
+        ">" => Some(BlockStyle::Folded),
+        "|" => Some(BlockStyle::Literal),
+        _ => None,
+    }
+}
+
+/// Consume the indented lines belonging to a block scalar, stopping at the
+/// first line that is dedented to column zero — the next key.
+fn read_block(lines: &mut Peekable<std::str::Lines<'_>>, style: BlockStyle) -> String {
+    let mut parts = Vec::new();
+    while let Some(line) = lines.peek() {
+        if !line.trim().is_empty() && !line.starts_with([' ', '\t']) {
+            break;
+        }
+        parts.push(lines.next().unwrap_or_default().trim());
+    }
+    match style {
+        BlockStyle::Folded => parts.iter().filter(|p| !p.is_empty()).cloned().collect::<Vec<_>>().join(" "),
+        BlockStyle::Literal => parts.join("\n").trim().to_owned(),
+    }
 }
 
 #[cfg(test)]
@@ -184,5 +235,49 @@ mod tests {
         let skills = vec![Skill { name: "x".into(), description: Some("does x".into()), body: "b".into() }];
         let c = catalog(&skills).unwrap();
         assert!(c.contains("`x`") && c.contains("does x"));
+    }
+
+    #[test]
+    fn a_folded_description_is_read_not_left_as_its_marker() {
+        // The regression: 7 of 21 real skills wrote `description: >-`, and the
+        // flat reader returned ">-" as the description. The skill still showed
+        // up in the catalog, so nothing looked broken — the model just had no
+        // reason to ever call it.
+        let frontmatter = "name: ast-grep\ndescription: >-\n  Structural search and rewrite\n  across files by syntax.\nversion: 1";
+
+        assert_eq!(field(frontmatter, "name").as_deref(), Some("ast-grep"));
+        assert_eq!(
+            field(frontmatter, "description").as_deref(),
+            Some("Structural search and rewrite across files by syntax."),
+            "a folded block joins its lines with spaces"
+        );
+    }
+
+    #[test]
+    fn a_literal_block_keeps_its_line_breaks_but_the_catalog_does_not() {
+        let frontmatter = "description: |\n  first line\n  second line\n";
+        let description = field(frontmatter, "description").expect("description");
+        assert_eq!(description, "first line\nsecond line", "`|` keeps newlines");
+
+        let skills = vec![Skill { name: "s".into(), description: Some(description), body: String::new() }];
+        let catalog = catalog(&skills).unwrap();
+        assert!(
+            catalog.contains("- `s` — first line second line\n"),
+            "one bullet per skill, so newlines flatten: {catalog}"
+        );
+    }
+
+    #[test]
+    fn a_block_scalar_stops_at_the_next_key() {
+        let frontmatter = "description: >\n  wanted text\nname: not-the-description\n";
+        assert_eq!(field(frontmatter, "description").as_deref(), Some("wanted text"));
+        assert_eq!(field(frontmatter, "name").as_deref(), Some("not-the-description"));
+    }
+
+    #[test]
+    fn a_flat_quoted_value_still_reads_as_before() {
+        assert_eq!(field("description: \"quoted\"\n", "description").as_deref(), Some("quoted"));
+        assert_eq!(field("description: plain\n", "description").as_deref(), Some("plain"));
+        assert_eq!(field("other: x\n", "description"), None);
     }
 }
