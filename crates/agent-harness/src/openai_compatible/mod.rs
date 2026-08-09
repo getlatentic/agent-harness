@@ -497,9 +497,17 @@ impl OpenHarness {
             // carries the limits for those.
             Discovery::Static(_) | Discovery::ModelsDev(_) => {
                 let window = self.context_tokens.or_else(|| {
-                    profile::is_local_endpoint(&self.base_url)
-                        .then(|| local_server_context(&self.base_url))
-                        .flatten()
+                    if profile::is_local_endpoint(&self.base_url) {
+                        local_server_context(&self.base_url)
+                    } else if let Discovery::ModelsDev(provider) = &self.discovery {
+                        // The catalog is the only cross-provider source of a
+                        // hosted model's window; each vendor publishes its own
+                        // shape or none. Cached on disk, so this costs nothing
+                        // after the first launch.
+                        crate::models_dev::context_limit(provider, model)
+                    } else {
+                        None
+                    }
                 });
                 (window, None, None)
             }

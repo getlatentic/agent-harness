@@ -144,6 +144,11 @@ prompt. `OpenHarness::builtin_tool_names()` lists what you can name.
   mode — defaulting to `Edit` would hand write access to anyone who forgot
   the field.
 - **`OpenHarness::ollama_at(base_url)`** — an Ollama on a non-default host.
+- **`models_dev::context_limit(provider, model)`** — a hosted model's context
+  window from the catalog. Ollama reports its own via `/api/show` and a local
+  `llama-server` via `/props`, but a hosted endpoint publishes a window in a
+  shape of its own or not at all, so the catalog is the only cross-provider
+  source. Used to fill `ModelFacts` for models.dev-backed providers.
 - **`ClaudeHarnessConfig` / `CodexHarnessConfig`**, via `Claude::custom` and
   `Codex::custom` — name the binary to spawn. Both adapters hardcoded
   `"claude"` and `"codex"` in five places each, while the ACP adapter had taken

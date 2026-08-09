@@ -23,6 +23,23 @@ use crate::HarnessModel;
 /// [`HarnessModel`] and sorted by id for a stable picker order. Empty when the
 /// `models-dev` feature is off, the catalog can't be fetched, or the provider is
 /// unknown — so a caller can fall back to its own static list.
+/// A model's context window from the catalog, when it lists one.
+///
+/// The only cross-provider source: a hosted endpoint publishes its window in a
+/// shape of its own or not at all, so without this a hosted run has no window
+/// and profile selection has one less fact to work with.
+pub fn context_limit(provider: &str, model: &str) -> Option<u64> {
+    #[cfg(feature = "models-dev")]
+    {
+        imp::context_limit(provider, model)
+    }
+    #[cfg(not(feature = "models-dev"))]
+    {
+        let _ = (provider, model);
+        None
+    }
+}
+
 pub fn provider_models(provider: &str) -> Vec<HarnessModel> {
     #[cfg(feature = "models-dev")]
     {
@@ -59,6 +76,13 @@ mod imp {
     }
 
     #[derive(Deserialize)]
+    struct Limit {
+        /// Context window in tokens.
+        #[serde(default)]
+        context: Option<u64>,
+    }
+
+    #[derive(Deserialize)]
     struct Model {
         /// Id passed to the CLI (`--model`).
         id: String,
@@ -73,6 +97,11 @@ mod imp {
         /// newer models first in the picker.
         #[serde(default)]
         release_date: Option<String>,
+        /// Context and output ceilings. The catalog is the only source of these
+        /// for a hosted provider: OpenRouter publishes a `context_length` on its
+        /// own models list, but nothing does across providers.
+        #[serde(default)]
+        limit: Option<Limit>,
     }
 
     /// The catalog for the process. Prefers the on-disk cache — instant and
@@ -146,6 +175,18 @@ mod imp {
             Ok(modified) => modified.elapsed().map(|age| age >= MAX_AGE).unwrap_or(true),
             Err(_) => true,
         }
+    }
+
+    pub fn context_limit(provider: &str, model: &str) -> Option<u64> {
+        catalog()?
+            .0
+            .get(provider)?
+            .models
+            .values()
+            .find(|entry| entry.id == model)?
+            .limit
+            .as_ref()?
+            .context
     }
 
     pub fn provider_models(provider: &str) -> Vec<HarnessModel> {
@@ -230,5 +271,20 @@ mod imp {
             assert!(!provider_models("openai").is_empty(), "openai should list models");
             assert!(provider_models("totally-unknown-xyz").is_empty());
         }
+    }
+}
+
+#[cfg(all(test, feature = "models-dev"))]
+mod limit_tests {
+    #[test]
+    fn a_hosted_window_comes_from_the_catalog_or_is_absent() {
+        // Network- and cache-dependent, so this asserts the shape rather than a
+        // number: a known provider/model either yields a plausible window or
+        // nothing (offline, no cache), and an unknown one always yields nothing.
+        if let Some(window) = super::context_limit("openrouter", "openai/gpt-oss-120b") {
+            assert!(window >= 8_192, "a real model's window should be sane, got {window}");
+        }
+        assert_eq!(super::context_limit("openrouter", "no-such-model"), None);
+        assert_eq!(super::context_limit("no-such-provider", "openai/gpt-oss-120b"), None);
     }
 }
