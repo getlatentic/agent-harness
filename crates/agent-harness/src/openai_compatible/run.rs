@@ -270,9 +270,10 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
     // what we persist: never lossy. The request sent to the model is a *windowed
     // view* of it ([`window`]), so compaction can summarize old turns without
     // discarding them from disk.
+    let mut persisted = session.history.len();
     let mut transcript = session.history;
     transcript.push(ChatMessage::user(cfg.prompt.clone()));
-    persist(&cfg, &session.id, &transcript, &on_event, rid);
+    persist(&cfg, &session.id, &transcript, &mut persisted, &on_event, rid);
 
     // A `task` call spawns a subagent through this runner: the parent's
     // connection config, running a child session under this one.
@@ -353,7 +354,7 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
         transcript.push(msg);
 
         if calls.is_empty() {
-            persist(&cfg, &session.id, &transcript, &on_event, rid);
+            persist(&cfg, &session.id, &transcript, &mut persisted, &on_event, rid);
             touch(&cfg, &session.id);
             emit_usage(&on_event, rid, usage, cfg.model_cost);
             (*on_event)(RunEvent::Exited { run_id: rid.to_owned(), exit_code: Some(0), cancelled: false });
@@ -401,7 +402,7 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
         }
         // Persist the assistant turn + its tool results, so a resume (or a crash
         // mid-run) keeps the progress made this turn.
-        persist(&cfg, &session.id, &transcript, &on_event, rid);
+        persist(&cfg, &session.id, &transcript, &mut persisted, &on_event, rid);
         // A tool asked to end the run (e.g. `question`, which awaits the user's
         // answer — it arrives as the next prompt on resume).
         if stop_requested {
@@ -466,9 +467,26 @@ fn resolve_session(cfg: &LoopConfig, on_event: &RunCallback) -> Result<ResolvedS
 /// best-effort; a write failure surfaces as Activity but never aborts a useful
 /// run. Never lossy: compaction inserts a summary marker, it doesn't drop
 /// messages, so the stored transcript stays the complete history.
-fn persist(cfg: &LoopConfig, session_id: &str, transcript: &[ChatMessage], on_event: &RunCallback, rid: &str) {
+fn persist(
+    cfg: &LoopConfig,
+    session_id: &str,
+    transcript: &[ChatMessage],
+    persisted: &mut usize,
+    on_event: &RunCallback,
+    rid: &str,
+) {
     if let Some(store) = &cfg.store {
-        if let Err(e) = store.save_messages(session_id, transcript) {
+        // The transcript normally only grows, so the new tail is all that needs
+        // writing. Compaction is the exception: it replaces a run of old turns
+        // with one summary, leaving the transcript SHORTER than the log, and
+        // there is no append that expresses that.
+        let result = if transcript.len() >= *persisted {
+            store.append_messages(session_id, &transcript[*persisted..])
+        } else {
+            store.replace_messages(session_id, transcript)
+        };
+        *persisted = transcript.len();
+        if let Err(e) = result {
             (*on_event)(RunEvent::Activity { run_id: rid.to_owned(), message: format!("transcript not saved: {e}") });
         }
     }
@@ -773,7 +791,7 @@ fn run_subagent(
         transcript.push(msg);
         if calls.is_empty() {
             if let Some(store) = &parent.store {
-                let _ = store.save_messages(&child_id, &transcript);
+                let _ = store.replace_messages(&child_id, &transcript);
                 let _ = store.touch(&child_id, session::now_millis());
             }
             return Ok(if final_text.is_empty() { "(the subagent produced no text)".to_owned() } else { final_text });
@@ -801,7 +819,7 @@ fn run_subagent(
             transcript.push(ChatMessage::tool_result(call.id.clone(), outcome.output));
         }
         if let Some(store) = &parent.store {
-            let _ = store.save_messages(&child_id, &transcript);
+            let _ = store.replace_messages(&child_id, &transcript);
         }
     }
     Err("the subagent reached its turn limit".to_owned())
@@ -1002,7 +1020,7 @@ mod tests {
     fn resume_replays_the_stored_transcript() {
         let dir = scratch("resume");
         let store = FileStore::new(&dir);
-        store.save_messages("ses_x", &[ChatMessage::user("earlier")]).unwrap();
+        store.append_messages("ses_x", &[ChatMessage::user("earlier")]).unwrap();
         let (cb, _) = capturing();
         let s = resolve_session(&cfg("again", Some("ses_x".into()), Some(store)), &cb).unwrap();
         assert_eq!(s.id, "ses_x");

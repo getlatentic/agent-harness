@@ -9,8 +9,16 @@
 //! Persistence is **opt-in**: a harness with no session dir runs ephemerally
 //! (no disk writes); one configured via `OpenHarness::with_session_dir`
 //! persists here and can resume by id. Layout under the root:
-//! `sessions/<id>.json` (metadata, cheap to list) + `messages/<id>.json` (the
-//! transcript — everything after the regenerated system prompt).
+//! `sessions/<id>.json` (metadata, cheap to list) + `messages/<id>.jsonl` (the
+//! transcript — everything after the regenerated system prompt, one message per
+//! line, appended).
+//!
+//! JSONL for the transcript, matching Codex and Claude Code. A whole-array file
+//! has to be rewritten to record one exchange, which is O(n) per turn and, more
+//! importantly, only valid as a complete document: a process killed mid-write
+//! left JSON that no longer parsed, losing the conversation rather than the
+//! turn. A torn append costs the final line. `<id>.json` is still read so
+//! sessions written by an older build resume.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -94,7 +102,13 @@ impl FileStore {
     fn session_path(&self, id: &str) -> PathBuf {
         self.root.join("sessions").join(format!("{id}.json"))
     }
+    /// The transcript log — one JSON message per line, appended.
     fn messages_path(&self, id: &str) -> PathBuf {
+        self.root.join("messages").join(format!("{id}.jsonl"))
+    }
+
+    /// The pre-JSONL whole-array file, still read so existing sessions resume.
+    fn legacy_messages_path(&self, id: &str) -> PathBuf {
         self.root.join("messages").join(format!("{id}.json"))
     }
 
@@ -139,14 +153,76 @@ impl FileStore {
 
     /// Load a session's transcript (the messages after the system prompt), or an
     /// empty vec if it has none yet.
+    /// A session's transcript. Reads the JSONL log, falling back to the
+    /// pre-JSONL whole-array file so a session written by an older build still
+    /// resumes.
+    ///
+    /// A trailing partial line is dropped rather than failing the read: it is
+    /// the signature of a process killed mid-append, and the turns before it
+    /// are intact and worth keeping.
     pub(crate) fn load_messages(&self, id: &str) -> Result<Vec<ChatMessage>, String> {
-        Ok(read_json_opt(&self.messages_path(id))?.unwrap_or_default())
+        let path = self.messages_path(id);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(read_json_opt(&self.legacy_messages_path(id))?.unwrap_or_default())
+            }
+            Err(e) => return Err(format!("reading {}: {e}", path.display())),
+        };
+        Ok(text.lines().filter_map(|line| serde_json::from_str(line).ok()).collect())
     }
 
-    /// Persist a session's transcript (overwrites — the loop hands over the full
-    /// message list each turn).
-    pub(crate) fn save_messages(&self, id: &str, messages: &[ChatMessage]) -> Result<(), String> {
-        write_json(&self.messages_path(id), &messages)
+    /// Append the messages added since the last save.
+    ///
+    /// Append rather than rewrite, which is how Codex and Claude Code store
+    /// theirs: a full rewrite costs O(n) per turn and re-serialises the whole
+    /// conversation to record one exchange. It is also the safer failure —
+    /// a kill mid-append truncates the last line, where a kill mid-rewrite
+    /// used to leave a JSON document that no longer parsed at all.
+    pub(crate) fn append_messages(&self, id: &str, messages: &[ChatMessage]) -> Result<(), String> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+        let path = self.messages_path(id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
+        }
+        let mut encoded = String::new();
+        for message in messages {
+            let line = serde_json::to_string(message)
+                .map_err(|e| format!("serializing a message for {}: {e}", path.display()))?;
+            encoded.push_str(&line);
+            encoded.push('\n');
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| format!("opening {}: {e}", path.display()))?;
+        std::io::Write::write_all(&mut file, encoded.as_bytes())
+            .map_err(|e| format!("appending to {}: {e}", path.display()))
+    }
+
+    /// Replace a session's transcript wholesale — for compaction, which
+    /// rewrites history rather than extending it.
+    pub(crate) fn replace_messages(&self, id: &str, messages: &[ChatMessage]) -> Result<(), String> {
+        let path = self.messages_path(id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
+        }
+        let mut encoded = String::new();
+        for message in messages {
+            let line = serde_json::to_string(message)
+                .map_err(|e| format!("serializing a message for {}: {e}", path.display()))?;
+            encoded.push_str(&line);
+            encoded.push('\n');
+        }
+        let temp = path.with_extension(format!("{}.tmp", std::process::id()));
+        std::fs::write(&temp, encoded).map_err(|e| format!("writing {}: {e}", temp.display()))?;
+        std::fs::rename(&temp, &path).map_err(|e| {
+            let _ = std::fs::remove_file(&temp);
+            format!("replacing {}: {e}", path.display())
+        })
     }
 }
 
@@ -210,13 +286,68 @@ mod tests {
     }
 
     #[test]
+    fn a_truncated_last_line_costs_only_that_turn() {
+        // The failure a full rewrite could not survive: a process killed
+        // mid-write. Appending makes the damage the final line, and the turns
+        // before it still load.
+        let dir = scratch("torn");
+        let store = FileStore::new(&dir);
+        store
+            .append_messages("s1", &[ChatMessage::user("first"), ChatMessage::user("second")])
+            .unwrap();
+
+        let path = dir.join("messages").join("s1.jsonl");
+        let mut raw = std::fs::read_to_string(&path).unwrap();
+        raw.push_str("{\"role\":\"user\",\"cont"); // killed mid-append
+        std::fs::write(&path, raw).unwrap();
+
+        let loaded = store.load_messages("s1").unwrap();
+        assert_eq!(loaded.len(), 2, "the intact turns survive a torn tail");
+        assert_eq!(loaded[0].content.as_deref(), Some("first"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_session_written_by_an_older_build_still_loads() {
+        // Pre-JSONL sessions are a whole-array `.json`. Dropping them would
+        // silently lose every conversation a user already had.
+        let dir = scratch("legacy");
+        let store = FileStore::new(&dir);
+        let legacy = dir.join("messages").join("s1.json");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, serde_json::to_string(&vec![ChatMessage::user("from before")]).unwrap())
+            .unwrap();
+
+        let loaded = store.load_messages("s1").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].content.as_deref(), Some("from before"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn appending_extends_rather_than_replacing() {
+        let dir = scratch("append");
+        let store = FileStore::new(&dir);
+        store.append_messages("s1", &[ChatMessage::user("one")]).unwrap();
+        store.append_messages("s1", &[ChatMessage::user("two")]).unwrap();
+        assert_eq!(store.load_messages("s1").unwrap().len(), 2);
+
+        // Compaction is the one caller that must shorten the log.
+        store.replace_messages("s1", &[ChatMessage::user("summary")]).unwrap();
+        let loaded = store.load_messages("s1").unwrap();
+        assert_eq!(loaded.len(), 1, "replace truncates, it does not extend");
+        assert_eq!(loaded[0].content.as_deref(), Some("summary"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn messages_roundtrip_and_touch() {
         let dir = scratch("msg");
         let store = FileStore::new(&dir);
         assert!(store.load_messages("s1").unwrap().is_empty());
 
         let msgs = vec![ChatMessage::user("hi"), ChatMessage::tool_result("c1", "done")];
-        store.save_messages("s1", &msgs).unwrap();
+        store.append_messages("s1", &msgs).unwrap();
         let loaded = store.load_messages("s1").unwrap();
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].content.as_deref(), Some("hi"));
