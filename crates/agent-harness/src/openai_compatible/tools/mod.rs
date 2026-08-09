@@ -1833,6 +1833,23 @@ mod tests {
     }
 
     #[test]
+    fn both_ends_splits_the_byte_cap_in_half_too() {
+        // The companion to the line-cap test, and it needs LONG lines: with
+        // short ones the line cap binds first and the byte half is never
+        // exercised, so doubling it changes nothing observable.
+        let long = "y".repeat(200);
+        let lines: Vec<&str> = vec![long.as_str(); 5_000];
+        let out = take_both_ends(&lines, lines.len(), &None);
+
+        let kept: usize = out.lines().filter(|l| *l == long).map(|l| l.len() + 1).sum();
+        assert!(
+            kept <= MAX_OUTPUT_BYTES,
+            "half of the byte cap from each end is the whole cap, no more: {kept} > {MAX_OUTPUT_BYTES}"
+        );
+        assert!(kept > MAX_OUTPUT_BYTES / 2, "and it should actually fill it: {kept}");
+    }
+
+    #[test]
     fn spilled_output_is_written_somewhere_the_model_can_read_it() {
         // The spill file is the whole point of truncating: the model is told
         // where the rest went. Returning None, or a path to nothing, silently
