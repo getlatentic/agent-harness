@@ -113,6 +113,15 @@ fn done_line(text: &str) -> String {
 }
 
 fn collect(harness: &dyn Harness, prompt: &str) -> Vec<RunEvent> {
+    collect_resuming(harness, prompt, None)
+}
+
+/// As [`collect`], continuing a stored session.
+fn collect_resuming(harness: &dyn Harness, prompt: &str, resume: Option<String>) -> Vec<RunEvent> {
+    collect_inner(harness, prompt, resume)
+}
+
+fn collect_inner(harness: &dyn Harness, prompt: &str, resume: Option<String>) -> Vec<RunEvent> {
     let events: Arc<Mutex<Vec<RunEvent>>> = Arc::default();
     let sink = Arc::clone(&events);
     let done = Arc::new(AtomicBool::new(false));
@@ -125,7 +134,7 @@ fn collect(harness: &dyn Harness, prompt: &str) -> Vec<RunEvent> {
                 cwd: Some(std::env::temp_dir()),
                 mode: RunMode::Ask,
                 tuning: RunTuning { model: Some("test-model".to_owned()), ..Default::default() },
-                resume: None,
+                resume,
                 attachments: Vec::new(),
             },
             Arc::new(move |event| {
@@ -304,6 +313,87 @@ fn a_tiny_model_gets_the_small_surface_despite_a_huge_window() {
         !offered.contains(&"webfetch".to_owned()),
         "a 1.2B model must not be handed the full surface just because its window is large: {offered:?}"
     );
+}
+
+/// A session store holding one long conversation, so a resumed run has enough
+/// history to be worth compacting. Returns the store root and the session id.
+fn seeded_session(tag: &str, turns: usize) -> (std::path::PathBuf, String) {
+    let root = std::env::temp_dir().join(format!("hl-compact-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("sessions")).unwrap();
+
+    let id = "ses-long";
+    let mut lines = vec![format!(
+        r#"{{"type":"session","id":"{id}","title":"long","created_at":1,"updated_at":1}}"#
+    )];
+    for i in 0..turns {
+        let filler = "some earlier discussion that is long enough to matter ".repeat(6);
+        lines.push(format!(
+            r#"{{"type":"message","role":"user","content":"question {i}: {filler}"}}"#
+        ));
+        lines.push(format!(
+            r#"{{"type":"message","role":"assistant","content":"answer {i}: {filler}"}}"#
+        ));
+    }
+    std::fs::write(root.join("sessions").join(format!("{id}.jsonl")), lines.join("\n") + "\n").unwrap();
+    (root, id.to_owned())
+}
+
+/// Compaction, end to end. Every piece of it had unit tests — `tail_boundary`,
+/// `window` — while nothing asserted that it ever *runs*. Replacing
+/// `compact_if_needed`, `compact_to` or `persist` with a no-op passed the whole
+/// suite, which means the feature preventing context overflow could have been
+/// switched off silently.
+#[test]
+fn a_resumed_conversation_past_the_context_limit_is_compacted_and_saved() {
+    let (root, session_id) = seeded_session("threshold", 40);
+    let tags = json!({ "models": [ { "name": "test-model" } ] });
+    // Turn 1 answers the summarization request; turn 2 is the real reply.
+    let (base, seen) = fake_ollama_with_context(
+        tags,
+        vec![done_line("A summary of the earlier turns."), done_line("Answer.")],
+        8_192,
+    );
+
+    let harness = OpenHarness::ollama_at(&base)
+        .with_session_dir(&root)
+        // Small enough that the seeded history is over the threshold.
+        .with_context_tokens(2_000);
+
+    let events = collect_resuming(&harness, "and finally?", Some(session_id.clone()));
+
+    let compacted = events.iter().any(|e| {
+        matches!(e, RunEvent::Activity { message, .. } if message.contains("compacted the conversation"))
+    });
+    assert!(compacted, "compaction must actually fire: {events:?}");
+
+    assert!(
+        events.iter().any(|e| matches!(e, RunEvent::Exited { .. })),
+        "the run still completes after compacting"
+    );
+
+    // The summarization request goes to the model like any other turn, so a
+    // compaction that never happened would leave only one chat call.
+    let chats = seen.lock().unwrap().iter().filter(|(u, _)| u.starts_with("/api/chat")).count();
+    assert!(chats >= 2, "summarize + answer, got {chats} chat call(s)");
+
+    // And the compacted transcript is written back, not just held in memory.
+    let saved = std::fs::read_to_string(root.join("sessions").join(format!("{session_id}.jsonl")))
+        .expect("the session file");
+    assert!(
+        saved.contains(r#""role":"compaction""#),
+        "the summary must reach disk, or the next resume replays everything it replaced"
+    );
+
+    // And exactly once. Appending a tail slice after an insert re-saves a turn
+    // that was already on disk, which is how a resumed conversation grows a
+    // duplicate of its own prompt.
+    assert_eq!(
+        saved.matches(r#""content":"and finally?""#).count(),
+        1,
+        "the prompt is saved once, not once per save after a mid-transcript insert"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The same route against a **real** Ollama — what the fake can't catch: vendor

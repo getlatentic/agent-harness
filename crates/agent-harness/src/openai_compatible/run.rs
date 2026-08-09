@@ -366,7 +366,9 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
         // Summarize old turns into a marker if the windowed request would near
         // the limit (the full transcript on disk is untouched), then build the
         // windowed view to send.
-        compact_if_needed(&cfg, &mut transcript, &system_prompt, &on_event, rid, &cancel);
+        if compact_if_needed(&cfg, &mut transcript, &system_prompt, &on_event, rid, &cancel) {
+            persisted = REWRITTEN;
+        }
         let mut sent = window(&system_prompt, &transcript);
         if cfg.mode == RunMode::Ask {
             sent.push(ChatMessage::user(READ_ONLY_REMINDER));
@@ -538,6 +540,11 @@ fn resolve_session(cfg: &LoopConfig, on_event: &RunCallback) -> Result<ResolvedS
 /// best-effort; a write failure surfaces as Activity but never aborts a useful
 /// run. Never lossy: compaction inserts a summary marker, it doesn't drop
 /// messages, so the stored transcript stays the complete history.
+/// `persisted` set to this means the transcript was rewritten in place and the
+/// log no longer corresponds to it position by position, so the next save has
+/// to replace the file rather than extend it.
+pub(crate) const REWRITTEN: usize = usize::MAX;
+
 fn persist(
     cfg: &LoopConfig,
     session_id: &str,
@@ -547,11 +554,12 @@ fn persist(
     rid: &str,
 ) {
     if let Some(store) = &cfg.store {
-        // The transcript normally only grows, so the new tail is all that needs
-        // writing. Compaction is the exception: it replaces a run of old turns
-        // with one summary, leaving the transcript SHORTER than the log, and
-        // there is no append that expresses that.
-        let result = if transcript.len() >= *persisted {
+        // Appending the tail is only correct while the transcript grows at the
+        // END. Compaction inserts a summary in the MIDDLE, which shifts every
+        // later message: the tail slice then re-appends a turn already on disk
+        // and never writes the summary at all. A compacted session resumed that
+        // way replays a duplicate turn and has lost what replaced the rest.
+        let result = if *persisted != REWRITTEN && transcript.len() >= *persisted {
             store.append_messages(session_id, &transcript[*persisted..])
         } else {
             store.replace_messages(session_id, transcript)
@@ -715,9 +723,9 @@ fn compact_if_needed(
     rid: &str,
 
     cancel: &AtomicBool,
-) {
+) -> bool {
     let Some(limit) = cfg.context_tokens.map(|n| n as usize) else {
-        return;
+        return false;
     };
     // Reserve half the window (capped) rather than a quarter: on a ~4K local
     // window a quarter is only ~1K headroom, so the request brushes the limit
@@ -725,9 +733,9 @@ fn compact_if_needed(
     // small window real slack; the cap keeps large windows from over-reserving.
     let reserve = (limit / 2).min(20_000);
     if estimate_tokens(&window(system_prompt, transcript)) <= limit.saturating_sub(reserve) {
-        return;
+        return false;
     }
-    compact_now(cfg, transcript, system_prompt, on_event, rid, cancel, limit);
+    compact_now(cfg, transcript, system_prompt, on_event, rid, cancel, limit)
 }
 
 /// Compact regardless of the estimate — for a provider that has just told us
