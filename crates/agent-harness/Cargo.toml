@@ -19,6 +19,15 @@ categories = ["api-bindings", "command-line-utilities", "development-tools"]
 [lib]
 name = "harness"
 
+# docs.rs builds with default features unless told otherwise, and the defaults
+# here are only the two CLI adapters — which would leave every type in
+# `openai_compatible` (OpenHarness, ApiKey, PromptProfile, the MCP surface)
+# missing from the published documentation. `docsrs` also lets items carry a
+# feature badge via `doc(cfg(...))`.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 # The CLI adapters are on by default. Slim the set with
 # `default-features = false` + the features you
