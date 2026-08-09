@@ -96,6 +96,12 @@ prompt. `OpenHarness::builtin_tool_names()` lists what you can name.
   `TOKENIZERS_PARALLELISM` while passing `AWS_ACCESS_KEY_ID` straight through.
 - **No console window flashes on Windows** (#35). Every child process spawns
   with `CREATE_NO_WINDOW`, via `cli_stream::hidden_command`.
+- **A skill whose description is a YAML block scalar is now readable.** The
+  frontmatter reader handled only a flat `key: value`, so the common
+  `description: >-` followed by indented lines was read as the literal `">-"`.
+  The skill still appeared in the catalog, so nothing looked broken — the model
+  just had nothing to match a task against and never called it. Seven of
+  twenty-one skills on the machine this was found on were in that state.
 - **A rejected request now quotes the provider's explanation.** `ureq`'s
   `Display` for a status error stops at the code, so a failed run reported
   `status code 400` and nothing else — the same message whether the key was
