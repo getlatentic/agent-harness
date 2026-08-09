@@ -49,7 +49,25 @@ runs where an env var is the natural source. `api_key` wins when both are set.
 `credential_required: false` and looked permanently ready. Set it explicitly.
 Leaving it `false` while `api_key_env` is set keeps the old behaviour.
 
-**5. `OpenHarnessConfig` gained `disabled_tools`.** Add
+**5. Instruction files and skills no longer read `$HOME` on their own.**
+Runs used to load `~/.claude/CLAUDE.md` and scan `~/.claude/skills`
+unconditionally. On the machine this was found on that was ~3,400 tokens of
+someone else's product's config on every turn — enough that no local server
+started on the common 4096-token context could run the loop at all. A library
+should not decide to read a user's home directory, so the host names the
+locations now:
+
+```rust
+OpenHarnessConfig {
+    instruction_sources: InstructionSources::discover_global(),  // opt back in
+    global_skill_roots: harness::global_skill_roots(),
+    ..Default::default()
+}
+```
+
+Leave both at their defaults for project-only behaviour.
+
+**6. `OpenHarnessConfig` gained `disabled_tools`.** Add
 `disabled_tools: Vec::new()` — or use `..Default::default()`, which is now
 derived — to keep every built-in tool. Name a tool to withhold it:
 
@@ -75,6 +93,12 @@ prompt. `OpenHarness::builtin_tool_names()` lists what you can name.
 
 ### Added
 
+- **`OpenHarnessConfig.instruction_sources`** and
+  **`OpenHarnessConfig.global_skill_roots`** — where `AGENTS.md` / `CLAUDE.md`
+  and skills are read from. Both default to the working tree only, so **nothing
+  under `$HOME` is read unless the host asks**. `InstructionSources::discover_global()`
+  and `global_skill_roots()` return the conventional per-user locations for a
+  host that wants them.
 - **`OpenHarnessConfig.api_key`** — the secret by value, so a host with an OS
   vault never has to put it in the environment.
 - **`OpenHarnessConfig.disabled_tools`** and

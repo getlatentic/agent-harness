@@ -3,10 +3,10 @@
 //! Mirrors OpenCode's design (MIT): the model gets a name+description
 //! **catalog** in its system prompt and loads a skill's full body **on demand**
 //! with the `skill` tool (progressive disclosure — not preloaded, not a
-//! subagent). Discovered from (first definition of a name wins): the global
-//! `~/.claude/skills` and `~/.agents/skills`, and the project's
-//! `<cwd>/.claude/skills` and `<cwd>/.agents/skills` — so Claude Code skills are
-//! picked up directly. Each skill is a `SKILL.md` with `---` frontmatter
+//! subagent). Discovered from the project's `<cwd>/.claude/skills` and
+//! `<cwd>/.agents/skills`, plus any per-user roots the host opts into via
+//! [`global_skill_roots`] (first definition of a name wins, global before
+//! project). Each skill is a `SKILL.md` with `---` frontmatter
 //! (`name` required, `description` optional) and a Markdown body.
 
 use std::collections::HashSet;
@@ -23,19 +23,30 @@ pub(crate) struct Skill {
     pub body: String,
 }
 
-/// Discover the skills visible from `cwd`. First definition of a given name
-/// wins (global roots are scanned before project roots).
-pub(crate) fn discover(cwd: &Path) -> Vec<Skill> {
-    discover_in(&roots(cwd))
+/// Discover the skills visible from `cwd`, plus any `global_roots` the host
+/// supplied. First definition of a given name wins (global roots are scanned
+/// before project roots).
+///
+/// Every catalogued skill costs prompt tokens on every turn, so the same rule
+/// as instructions applies: nothing under `$HOME` is scanned unless a host
+/// asks. See [`global_skill_roots`].
+pub(crate) fn discover(cwd: &Path, global_roots: &[PathBuf]) -> Vec<Skill> {
+    discover_in(&roots(cwd, global_roots))
+}
+
+/// The conventional per-user skill directories, for a host that wants a user's
+/// existing skills honoured. Opt in by passing these as
+/// [`OpenHarnessConfig::global_skill_roots`](crate::OpenHarnessConfig::global_skill_roots).
+pub fn global_skill_roots() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    vec![home.join(".claude/skills"), home.join(".agents/skills")]
 }
 
 /// The roots scanned for `*/SKILL.md`, in precedence order.
-fn roots(cwd: &Path) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        roots.push(home.join(".claude/skills"));
-        roots.push(home.join(".agents/skills"));
-    }
+fn roots(cwd: &Path, global_roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut roots = global_roots.to_vec();
     roots.push(cwd.join(".claude/skills"));
     roots.push(cwd.join(".agents/skills"));
     roots

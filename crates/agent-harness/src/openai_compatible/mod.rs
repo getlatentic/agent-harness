@@ -36,10 +36,12 @@ use crate::{
 };
 
 mod instructions;
+pub use instructions::InstructionSources;
 mod ollama;
 mod run;
 mod session;
 mod skills;
+pub use skills::global_skill_roots;
 mod tools;
 mod wire;
 
@@ -180,6 +182,10 @@ pub struct OpenHarness {
     api_key: Option<String>,
     /// Tool ids withheld from this agent — see [`OpenHarnessConfig::disabled_tools`].
     disabled_tools: Vec<String>,
+    /// Instruction-file lookup — see [`OpenHarnessConfig::instruction_sources`].
+    instruction_sources: InstructionSources,
+    /// Extra skill roots — see [`OpenHarnessConfig::global_skill_roots`].
+    global_skill_roots: Vec<std::path::PathBuf>,
     /// Whether this endpoint needs a key — see [`OpenHarnessConfig::requires_api_key`].
     requires_api_key: bool,
     discovery: Discovery,
@@ -254,6 +260,15 @@ pub struct OpenHarnessConfig {
     /// different from [`PermissionRule::deny`], which advertises the tool and
     /// refuses the call.
     pub disabled_tools: Vec<String>,
+    /// Where `AGENTS.md` / `CLAUDE.md` are read from, and how much of them is
+    /// kept. Defaults to the working tree only — nothing under `$HOME` is read
+    /// until a host asks, via [`InstructionSources::discover_global`] or its
+    /// own paths.
+    pub instruction_sources: InstructionSources,
+    /// Per-user skill directories scanned in addition to the project's. Empty
+    /// by default; [`global_skill_roots`] returns the usual ones
+    /// for a host that wants them.
+    pub global_skill_roots: Vec<std::path::PathBuf>,
     /// Curated models for the picker; may be empty (free-text ids are allowed,
     /// or call [`OpenHarness::with_models_dev`] for catalog discovery).
     pub models: Vec<HarnessModel>,
@@ -287,6 +302,8 @@ impl OpenHarness {
             api_key_env: None,
             api_key: None,
             disabled_tools: Vec::new(),
+            instruction_sources: InstructionSources::default(),
+            global_skill_roots: Vec::new(),
             // Local Ollama takes no key.
             requires_api_key: false,
             discovery: Discovery::OllamaTags,
@@ -313,6 +330,8 @@ impl OpenHarness {
             api_key_env,
             api_key,
             disabled_tools,
+            instruction_sources,
+            global_skill_roots,
             requires_api_key,
             models,
         } = config;
@@ -327,6 +346,8 @@ impl OpenHarness {
             api_key_env,
             api_key,
             disabled_tools,
+            instruction_sources,
+            global_skill_roots,
             requires_api_key,
             default_model: models.first().map(|m| m.value.clone()),
             discovery: Discovery::Static(models),
@@ -616,6 +637,8 @@ impl Harness for OpenHarness {
             base_url: self.base_url.clone(),
             api_key: self.api_key(),
             disabled_tools: self.disabled_tools.clone(),
+            instruction_sources: self.instruction_sources.clone(),
+            global_skill_roots: self.global_skill_roots.clone(),
             model,
             prompt,
             cwd: cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
