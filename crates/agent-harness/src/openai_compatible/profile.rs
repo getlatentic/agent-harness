@@ -10,10 +10,11 @@
 //! what it saves on plainer instructions; [`PromptProfile::Full`] offers
 //! everything and trusts the model to infer the rest.
 //!
-//! Selection keys on the context window rather than the model's name. The
-//! window is a fact we already fetch (Ollama's `/api/show`), and it is the
-//! thing that actually breaks; a name is a guess that has to be maintained per
-//! vendor.
+//! Selection keys on facts the backend reports — [`ModelFacts`] — not on the
+//! model's name. A name is a guess needing per-vendor upkeep; a window and a
+//! parameter count are measured, and between them they answer both halves of
+//! the question. Neither alone is enough: `llama3.2:1b` advertises a 131k
+//! window, and a 70B model can still be served on a 4k one.
 
 /// Context windows at or below this get [`PromptProfile::Compact`].
 ///
@@ -22,11 +23,34 @@
 /// `llama-server` is typically started with — it is most of the budget.
 pub const COMPACT_AT_OR_BELOW_TOKENS: u64 = 16_384;
 
+/// Models at or below this many billion parameters get [`PromptProfile::Compact`].
+///
+/// A separate question from the window, and the reason both are needed: context
+/// says what a run can *afford* to send, parameters say what the model can be
+/// trusted to *do* with it. `llama3.2:1b` advertises a 131k window and would
+/// pass the context test comfortably, yet handed eleven tool schemas it recites
+/// them back as prose and loops to the turn limit inventing tools. Reliable
+/// tool-calling starts around 7B.
+pub const COMPACT_AT_OR_BELOW_PARAMS_B: f64 = 7.0;
+
+/// What a backend was able to tell us about the model, for choosing a profile.
+/// Both halves are independently optional — no backend reports both, and some
+/// report neither.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ModelFacts {
+    /// Usable context window in tokens. Ollama reports it via `/api/show`,
+    /// OpenRouter via `context_length`; a bare `llama-server` does not.
+    pub context_tokens: Option<u64>,
+    /// Parameter count in billions. Ollama reports it; hosted providers
+    /// generally do not.
+    pub parameters_b: Option<f64>,
+}
+
 /// Which prompt and tool surface a run gets.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PromptProfile {
-    /// Decide from the model's context window, falling back to [`Self::Full`]
-    /// when the window is unknown.
+    /// Decide from [`ModelFacts`], falling back to [`Self::Full`] when the
+    /// backend reported nothing useful.
     #[default]
     Auto,
     /// Every tool, terse instructions.
@@ -45,17 +69,23 @@ pub enum PromptProfile {
 const CORE_TOOLS: &[&str] = &["read", "list", "glob", "grep", "write", "edit", "bash"];
 
 impl PromptProfile {
-    /// The profile to actually use, resolving [`Self::Auto`] against the model's
-    /// context window. An unknown window resolves to [`Self::Full`] — the
-    /// conservative choice for capability, since withholding tools from a model
-    /// that could use them silently narrows what a run can do.
-    pub fn resolve(self, context_tokens: Option<u64>) -> Self {
-        match self {
-            Self::Auto => match context_tokens {
-                Some(tokens) if tokens <= COMPACT_AT_OR_BELOW_TOKENS => Self::Compact,
-                _ => Self::Full,
-            },
-            explicit => explicit,
+    /// The profile to actually use, resolving [`Self::Auto`] against what the
+    /// backend reported.
+    ///
+    /// Either signal alone is enough to choose [`Self::Compact`]: a small window
+    /// cannot fit the full surface, and a small model cannot use it. Facts that
+    /// are absent say nothing — with neither, this resolves to [`Self::Full`],
+    /// because withholding tools from a model that could use them narrows a run
+    /// silently, and a wrong guess in that direction is the harder one to
+    /// notice.
+    pub fn resolve(self, facts: ModelFacts) -> Self {
+        let Self::Auto = self else { return self };
+        let cramped = facts.context_tokens.is_some_and(|t| t <= COMPACT_AT_OR_BELOW_TOKENS);
+        let small = facts.parameters_b.is_some_and(|p| p <= COMPACT_AT_OR_BELOW_PARAMS_B);
+        if cramped || small {
+            Self::Compact
+        } else {
+            Self::Full
         }
     }
 
@@ -144,25 +174,50 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn auto_picks_compact_only_for_a_small_window() {
-        assert_eq!(PromptProfile::Auto.resolve(Some(4_096)), PromptProfile::Compact);
-        assert_eq!(PromptProfile::Auto.resolve(Some(8_192)), PromptProfile::Compact);
-        assert_eq!(PromptProfile::Auto.resolve(Some(COMPACT_AT_OR_BELOW_TOKENS)), PromptProfile::Compact);
-        assert_eq!(PromptProfile::Auto.resolve(Some(32_768)), PromptProfile::Full);
+    fn window(tokens: u64) -> ModelFacts {
+        ModelFacts { context_tokens: Some(tokens), parameters_b: None }
     }
 
     #[test]
-    fn an_unknown_window_keeps_the_full_surface() {
+    fn a_cramped_window_picks_compact() {
+        assert_eq!(PromptProfile::Auto.resolve(window(4_096)), PromptProfile::Compact);
+        assert_eq!(PromptProfile::Auto.resolve(window(8_192)), PromptProfile::Compact);
+        assert_eq!(
+            PromptProfile::Auto.resolve(window(COMPACT_AT_OR_BELOW_TOKENS)),
+            PromptProfile::Compact
+        );
+        assert_eq!(PromptProfile::Auto.resolve(window(32_768)), PromptProfile::Full);
+    }
+
+    #[test]
+    fn a_small_model_picks_compact_however_large_its_window() {
+        // The case the window alone gets wrong, and the reason both facts are
+        // read: llama3.2:1b advertises 131k and cannot use eleven tools.
+        let tiny_but_roomy = ModelFacts { context_tokens: Some(131_072), parameters_b: Some(1.2) };
+        assert_eq!(PromptProfile::Auto.resolve(tiny_but_roomy), PromptProfile::Compact);
+
+        let big_model = ModelFacts { context_tokens: Some(131_072), parameters_b: Some(24.0) };
+        assert_eq!(PromptProfile::Auto.resolve(big_model), PromptProfile::Full);
+    }
+
+    #[test]
+    fn a_big_model_on_a_cramped_window_still_picks_compact() {
+        // The mirror case: capable model, no room. Either fact alone decides.
+        let squeezed = ModelFacts { context_tokens: Some(4_096), parameters_b: Some(70.0) };
+        assert_eq!(PromptProfile::Auto.resolve(squeezed), PromptProfile::Compact);
+    }
+
+    #[test]
+    fn nothing_reported_keeps_the_full_surface() {
         // Withholding tools from a model that could use them narrows the run
         // silently, so an absent signal must not trigger the smaller profile.
-        assert_eq!(PromptProfile::Auto.resolve(None), PromptProfile::Full);
+        assert_eq!(PromptProfile::Auto.resolve(ModelFacts::default()), PromptProfile::Full);
     }
 
     #[test]
-    fn an_explicit_profile_ignores_the_window() {
-        assert_eq!(PromptProfile::Full.resolve(Some(2_048)), PromptProfile::Full);
-        assert_eq!(PromptProfile::Compact.resolve(Some(200_000)), PromptProfile::Compact);
+    fn an_explicit_profile_ignores_every_fact() {
+        assert_eq!(PromptProfile::Full.resolve(window(2_048)), PromptProfile::Full);
+        assert_eq!(PromptProfile::Compact.resolve(window(200_000)), PromptProfile::Compact);
     }
 
     #[test]

@@ -17,7 +17,7 @@ use serde_json::Value;
 use crate::{HarnessError, RunCallback, RunControl, RunEvent, RunMode};
 
 use super::instructions;
-use super::profile::PromptProfile;
+use super::profile::{ModelFacts, PromptProfile};
 use super::ollama;
 use super::session::{self, FileStore};
 use super::skills;
@@ -80,6 +80,10 @@ pub(crate) struct LoopConfig {
     /// The model's context-window size in tokens, when known — enables
     /// compaction near the limit; `None` disables it.
     pub context_tokens: Option<u64>,
+    /// The model's parameter count in billions, when the backend reports it —
+    /// the capability half of [`PromptProfile`] selection. `None` for hosted
+    /// providers, which do not publish it.
+    pub model_parameters_b: Option<f64>,
     /// When set, talk to Ollama's native `/api/chat` with this `num_ctx` instead
     /// of the OpenAI `/v1` endpoint (which ignores it and loads every model at
     /// 4096, truncating the prompt). Always equals `context_tokens` for Ollama;
@@ -226,7 +230,10 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
     // Resolved once: it decides both the tool surface and the base prompt, and
     // the two must agree — a prompt naming a tool the model was not offered is
     // the failure this profile exists to avoid.
-    let profile = cfg.profile.resolve(cfg.context_tokens);
+    let profile = cfg.profile.resolve(ModelFacts {
+        context_tokens: cfg.context_tokens,
+        parameters_b: cfg.model_parameters_b,
+    });
     let mut disabled = cfg.disabled_tools.clone();
     disabled.extend(profile.withheld_tools(&tools::ToolSet::builtin_tool_names()));
     let toolset = tools::ToolSet::new(
@@ -896,6 +903,7 @@ mod tests {
             instruction_sources: instructions::InstructionSources::default(),
             global_skill_roots: Vec::new(),
             profile: PromptProfile::default(),
+            model_parameters_b: None,
             run_id: "t".into(),
             base_url: "http://unused".into(),
             api_key: None,

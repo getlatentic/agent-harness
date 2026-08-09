@@ -39,7 +39,7 @@ mod instructions;
 pub use instructions::InstructionSources;
 mod ollama;
 mod profile;
-pub use profile::{PromptProfile, COMPACT_AT_OR_BELOW_TOKENS};
+pub use profile::{ModelFacts, PromptProfile, COMPACT_AT_OR_BELOW_PARAMS_B, COMPACT_AT_OR_BELOW_TOKENS};
 mod run;
 mod session;
 mod skills;
@@ -418,18 +418,22 @@ impl OpenHarness {
     /// number so the two never disagree. Other providers self-manage the window:
     /// `ollama_num_ctx` is `None` (they use `/v1`) and the compaction limit is
     /// the explicit override or `None`.
-    fn resolve_context(&self, model: &str) -> (Option<u64>, Option<u64>) {
+    fn resolve_context(&self, model: &str) -> (Option<u64>, Option<u64>, Option<f64>) {
         match &self.discovery {
             Discovery::OllamaTags => {
+                // One `/api/show` yields both facts; skip it entirely when the
+                // host already fixed the window and nothing else needs asking.
+                let (probed_window, parameters) = ollama::model_facts(&self.base_url, model);
                 let effective = self
                     .context_tokens
-                    .or_else(|| ollama::context_length(&self.base_url, model).map(|n| n.min(OLLAMA_CTX_CEILING)))
+                    .or_else(|| probed_window.map(|n| n.min(OLLAMA_CTX_CEILING)))
                     .unwrap_or(OLLAMA_CTX_DEFAULT);
-                (Some(effective), Some(effective))
+                (Some(effective), Some(effective), parameters)
             }
-            // Non-Ollama: no per-model context probe here (models.dev carries
-            // limits, but that's a separate enrichment).
-            Discovery::Static(_) | Discovery::ModelsDev(_) => (self.context_tokens, None),
+            // Non-Ollama: no per-model probe here. OpenRouter publishes both a
+            // context_length and a benchmark set, and models.dev carries limits
+            // — both are separate enrichments.
+            Discovery::Static(_) | Discovery::ModelsDev(_) => (self.context_tokens, None, None),
         }
     }
 
@@ -639,7 +643,7 @@ impl Harness for OpenHarness {
                 ))
             })?;
 
-        let (context_tokens, ollama_num_ctx) = self.resolve_context(&model);
+        let (context_tokens, ollama_num_ctx, model_parameters_b) = self.resolve_context(&model);
         let model_cost = self.model_cost_for(&model);
         // Inline images become base64 data URIs the wire attaches to the prompt.
         let image_data_uris: Vec<String> =
@@ -652,6 +656,7 @@ impl Harness for OpenHarness {
             instruction_sources: self.instruction_sources.clone(),
             global_skill_roots: self.global_skill_roots.clone(),
             profile: self.profile,
+            model_parameters_b,
             model,
             prompt,
             cwd: cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),

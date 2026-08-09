@@ -256,14 +256,41 @@ pub(crate) fn list_tags(base: &str) -> Result<Vec<HarnessModel>, String> {
     Ok(models)
 }
 
-/// POST `{base}/api/show` and read the model's context-window size, so both
-/// compaction and the loaded `num_ctx` can auto-configure for local models
-/// without the host hardcoding it. Best-effort: any failure yields `None`.
-pub(crate) fn context_length(base: &str, model: &str) -> Option<u64> {
+/// POST `{base}/api/show` once and read both facts it carries about a model:
+/// its context window and its parameter count. Best-effort — any failure
+/// yields `(None, None)`, and each half is independently optional.
+///
+/// One call for both because they answer different questions and the loop needs
+/// both: the window decides what a run can *afford* to send, the parameter
+/// count how much the model can be *trusted* to do with it.
+pub(crate) fn model_facts(base: &str, model: &str) -> (Option<u64>, Option<f64>) {
     let url = format!("{base}/api/show");
-    let resp = ureq::post(&url).timeout(Duration::from_secs(10)).send_json(json!({ "model": model })).ok()?;
-    let body: Value = resp.into_json().ok()?;
-    context_length_from_show(&body)
+    let Ok(resp) = ureq::post(&url).timeout(Duration::from_secs(10)).send_json(json!({ "model": model }))
+    else {
+        return (None, None);
+    };
+    let Ok(body) = resp.into_json::<Value>() else { return (None, None) };
+    (context_length_from_show(&body), parameters_from_show(&body))
+}
+
+/// A model's parameter count in billions, from `/api/show`. Prefers the exact
+/// `general.parameter_count`, falling back to the human `details.parameter_size`
+/// (`"7.6B"`, `"800M"`) that older Ollama builds report instead.
+fn parameters_from_show(body: &Value) -> Option<f64> {
+    let exact = body
+        .get("model_info")
+        .and_then(|info| info.get("general.parameter_count"))
+        .and_then(Value::as_u64);
+    if let Some(count) = exact {
+        return Some(count as f64 / 1e9);
+    }
+    let text = body.get("details")?.get("parameter_size")?.as_str()?.trim();
+    let (digits, scale) = match text.chars().last() {
+        Some('B' | 'b') => (&text[..text.len() - 1], 1.0),
+        Some('M' | 'm') => (&text[..text.len() - 1], 0.001),
+        _ => (text, 1.0),
+    };
+    digits.trim().parse::<f64>().ok().map(|n| n * scale)
 }
 
 /// Read a model's context window from an `/api/show` body: the value lives in

@@ -38,6 +38,16 @@ fn fake_ollama(tags: Value, chat_turns: Vec<String>) -> (String, Seen) {
 /// As [`fake_ollama`], with the context window `/api/show` reports — the signal
 /// `PromptProfile::Auto` keys on.
 fn fake_ollama_with_context(tags: Value, chat_turns: Vec<String>, context_length: u64) -> (String, Seen) {
+    fake_ollama_full(tags, chat_turns, context_length, 24_000_000_000)
+}
+
+/// As [`fake_ollama`], reporting both facts `PromptProfile::Auto` keys on.
+fn fake_ollama_full(
+    tags: Value,
+    chat_turns: Vec<String>,
+    context_length: u64,
+    parameter_count: u64,
+) -> (String, Seen) {
     let server = tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port");
     let base = format!("http://{}", server.server_addr());
     let seen: Seen = Arc::default();
@@ -58,7 +68,13 @@ fn fake_ollama_with_context(tags: Value, chat_turns: Vec<String>, context_length
                 // Ollama keys this by architecture (`qwen2.context_length`), and the
                 // parser scans for that suffix — a bare `context_length` silently
                 // falls back to the default and makes this stub decorative.
-                json!({ "model_info": { "qwen2.context_length": context_length } }).to_string()
+                json!({
+                    "model_info": {
+                        "qwen2.context_length": context_length,
+                        "general.parameter_count": parameter_count,
+                    }
+                })
+                .to_string()
             } else if url.starts_with("/api/chat") {
                 match turns.lock().unwrap().next() {
                     Some(ndjson) => ndjson,
@@ -269,6 +285,25 @@ fn a_small_context_window_narrows_the_tools_actually_sent() {
         assert!(!small.contains(&optional.to_owned()), "{optional} should be withheld: {small:?}");
         assert!(big.contains(&optional.to_owned()), "{optional} expected at full surface: {big:?}");
     }
+}
+
+/// The window's blind spot: a tiny model that advertises a huge context. It
+/// passes the context test and still cannot use a full tool surface, so the
+/// parameter count has to be read too.
+#[test]
+fn a_tiny_model_gets_the_small_surface_despite_a_huge_window() {
+    let tags = json!({ "models": [ { "name": "test-model" } ] });
+    let (url, seen) =
+        fake_ollama_full(tags, vec![done_line("ok")], 131_072, 1_200_000_000);
+
+    let _ = collect(&OpenHarness::ollama_at(&url), "hello");
+
+    let offered = offered_tools(&seen);
+    assert!(offered.contains(&"read".to_owned()), "core survives: {offered:?}");
+    assert!(
+        !offered.contains(&"webfetch".to_owned()),
+        "a 1.2B model must not be handed the full surface just because its window is large: {offered:?}"
+    );
 }
 
 /// The same route against a **real** Ollama — what the fake can't catch: vendor
