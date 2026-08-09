@@ -17,7 +17,7 @@ use serde_json::Value;
 use crate::{HarnessError, RunCallback, RunControl, RunEvent, RunMode};
 
 use super::instructions;
-use super::profile::{ModelFacts, PromptProfile};
+use super::profile::{self, ModelFacts, PromptProfile};
 use super::ollama;
 use super::session::{self, FileStore};
 use super::skills;
@@ -233,6 +233,7 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
     let profile = cfg.profile.resolve(ModelFacts {
         context_tokens: cfg.context_tokens,
         parameters_b: cfg.model_parameters_b,
+        served_locally: profile::is_local_endpoint(&cfg.base_url),
     });
     let mut disabled = cfg.disabled_tools.clone();
     disabled.extend(profile.withheld_tools(&tools::ToolSet::builtin_tool_names()));

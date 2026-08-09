@@ -33,9 +33,11 @@ pub const COMPACT_AT_OR_BELOW_TOKENS: u64 = 16_384;
 /// tool-calling starts around 7B.
 pub const COMPACT_AT_OR_BELOW_PARAMS_B: f64 = 7.0;
 
-/// What a backend was able to tell us about the model, for choosing a profile.
-/// Both halves are independently optional — no backend reports both, and some
-/// report neither.
+/// What a backend was able to tell us about a model and how it is served.
+///
+/// Both measurements are independently optional: no backend reports both, and
+/// a bare `llama-server` reports neither. `served_locally` is always known, and
+/// is what decides the case where the measurements are absent.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ModelFacts {
     /// Usable context window in tokens. Ollama reports it via `/api/show`,
@@ -44,6 +46,52 @@ pub struct ModelFacts {
     /// Parameter count in billions. Ollama reports it; hosted providers
     /// generally do not.
     pub parameters_b: Option<f64>,
+    /// Whether the endpoint is a model served on this machine or the local
+    /// network. Decides the profile when neither measurement is available: what
+    /// people run locally is small and configured modestly, and the observed
+    /// failure there is a hard refusal rather than a slightly narrower run.
+    pub served_locally: bool,
+}
+
+/// Whether `base_url` points at a locally served model — this machine or the
+/// local network.
+///
+/// Not a security boundary; it only picks a default. A private address is
+/// included because "Ollama on the box under the desk" is the same situation as
+/// Ollama on this one: a self-hosted model, modestly configured, with no
+/// catalog to ask about it.
+pub fn is_local_endpoint(base_url: &str) -> bool {
+    is_local_host(host_of(base_url))
+}
+
+/// The host part of a URL: after the scheme, before the path, without the port
+/// or IPv6 brackets.
+fn host_of(base_url: &str) -> &str {
+    let after_scheme = base_url.split_once("//").map_or(base_url, |(_, rest)| rest);
+    let authority = after_scheme.split('/').next().unwrap_or("");
+    // An IPv6 literal is bracketed and full of colons, so unwrap it before
+    // trying to strip a port.
+    match authority.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(rest),
+        None => authority.rsplit_once(':').map_or(authority, |(host, _)| host),
+    }
+}
+
+fn is_local_host(host: &str) -> bool {
+    if matches!(host, "localhost" | "::1" | "0.0.0.0") || host.ends_with(".local") {
+        return true;
+    }
+    // Every label must be an octet, or this is a name that merely looks numeric
+    // (`172.1.2.3.example.com` is somebody's public host).
+    let Some(octets) = host.split('.').map(|label| label.parse::<u8>().ok()).collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    match octets[..] {
+        [127, ..] | [10, _, _, _] | [192, 168, _, _] => true,
+        [172, second, _, _] => (16..=31).contains(&second),
+        _ => false,
+    }
 }
 
 /// Which prompt and tool surface a run gets.
@@ -72,17 +120,23 @@ impl PromptProfile {
     /// The profile to actually use, resolving [`Self::Auto`] against what the
     /// backend reported.
     ///
-    /// Either signal alone is enough to choose [`Self::Compact`]: a small window
-    /// cannot fit the full surface, and a small model cannot use it. Facts that
-    /// are absent say nothing — with neither, this resolves to [`Self::Full`],
-    /// because withholding tools from a model that could use them narrows a run
-    /// silently, and a wrong guess in that direction is the harder one to
-    /// notice.
+    /// Either measurement alone is enough to choose [`Self::Compact`]: a small
+    /// window cannot fit the full surface, and a small model cannot use it.
+    ///
+    /// When neither is available the endpoint decides. A hosted one gets
+    /// [`Self::Full`] — withholding tools from a frontier model narrows the run
+    /// silently, which is the harder error to notice. A local one gets
+    /// [`Self::Compact`], because a self-hosted model is usually small and
+    /// started on a modest context, and there the error is loud: `llama-server`
+    /// refuses the whole request rather than answering a little worse.
+    ///
+    /// A host that knows better overrides with an explicit profile.
     pub fn resolve(self, facts: ModelFacts) -> Self {
         let Self::Auto = self else { return self };
         let cramped = facts.context_tokens.is_some_and(|t| t <= COMPACT_AT_OR_BELOW_TOKENS);
         let small = facts.parameters_b.is_some_and(|p| p <= COMPACT_AT_OR_BELOW_PARAMS_B);
-        if cramped || small {
+        let unmeasured = facts.context_tokens.is_none() && facts.parameters_b.is_none();
+        if cramped || small || (unmeasured && facts.served_locally) {
             Self::Compact
         } else {
             Self::Full
@@ -175,7 +229,7 @@ mod tests {
     }
 
     fn window(tokens: u64) -> ModelFacts {
-        ModelFacts { context_tokens: Some(tokens), parameters_b: None }
+        ModelFacts { context_tokens: Some(tokens), ..ModelFacts::default() }
     }
 
     #[test]
@@ -193,25 +247,64 @@ mod tests {
     fn a_small_model_picks_compact_however_large_its_window() {
         // The case the window alone gets wrong, and the reason both facts are
         // read: llama3.2:1b advertises 131k and cannot use eleven tools.
-        let tiny_but_roomy = ModelFacts { context_tokens: Some(131_072), parameters_b: Some(1.2) };
+        let tiny_but_roomy =
+            ModelFacts { context_tokens: Some(131_072), parameters_b: Some(1.2), ..Default::default() };
         assert_eq!(PromptProfile::Auto.resolve(tiny_but_roomy), PromptProfile::Compact);
 
-        let big_model = ModelFacts { context_tokens: Some(131_072), parameters_b: Some(24.0) };
+        let big_model =
+            ModelFacts { context_tokens: Some(131_072), parameters_b: Some(24.0), ..Default::default() };
         assert_eq!(PromptProfile::Auto.resolve(big_model), PromptProfile::Full);
     }
 
     #[test]
     fn a_big_model_on_a_cramped_window_still_picks_compact() {
         // The mirror case: capable model, no room. Either fact alone decides.
-        let squeezed = ModelFacts { context_tokens: Some(4_096), parameters_b: Some(70.0) };
+        let squeezed =
+            ModelFacts { context_tokens: Some(4_096), parameters_b: Some(70.0), ..Default::default() };
         assert_eq!(PromptProfile::Auto.resolve(squeezed), PromptProfile::Compact);
     }
 
     #[test]
-    fn nothing_reported_keeps_the_full_surface() {
-        // Withholding tools from a model that could use them narrows the run
-        // silently, so an absent signal must not trigger the smaller profile.
+    fn nothing_reported_from_a_hosted_endpoint_keeps_the_full_surface() {
+        // Withholding tools from a frontier model narrows the run silently, so
+        // an absent measurement must not by itself trigger the smaller profile.
         assert_eq!(PromptProfile::Auto.resolve(ModelFacts::default()), PromptProfile::Full);
+    }
+
+    #[test]
+    fn nothing_reported_from_a_local_endpoint_gets_guidance() {
+        // The llama-server case: it reports no window, and guessing Full there
+        // produced a 400 for the whole request rather than a worse answer.
+        let local = ModelFacts { served_locally: true, ..Default::default() };
+        assert_eq!(PromptProfile::Auto.resolve(local), PromptProfile::Compact);
+
+        // A measurement still wins over the location.
+        let roomy_local =
+            ModelFacts { context_tokens: Some(131_072), parameters_b: Some(24.0), served_locally: true };
+        assert_eq!(PromptProfile::Auto.resolve(roomy_local), PromptProfile::Full);
+    }
+
+    #[test]
+    fn local_endpoints_are_recognised_by_address() {
+        for local in [
+            "http://localhost:11434",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+            "http://192.168.1.14:11434",
+            "http://10.0.0.5:8080",
+            "http://172.16.4.2:8080",
+            "http://studio.local:1234",
+        ] {
+            assert!(is_local_endpoint(local), "{local} should read as local");
+        }
+        for hosted in [
+            "https://openrouter.ai/api",
+            "https://api.deepseek.com",
+            "https://172.1.2.3.example.com",
+            "https://api.together.xyz/v1",
+        ] {
+            assert!(!is_local_endpoint(hosted), "{hosted} should read as hosted");
+        }
     }
 
     #[test]
