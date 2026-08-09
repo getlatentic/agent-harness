@@ -126,6 +126,11 @@ prompt. `OpenHarness::builtin_tool_names()` lists what you can name.
   The skill still appeared in the catalog, so nothing looked broken — the model
   just had nothing to match a task against and never called it. Seven of
   twenty-one skills on the machine this was found on were in that state.
+- **Claude's `fable` alias is selectable.** The curated list held
+  `sonnet`/`opus`/`haiku` only. Online it went unnoticed, because models.dev
+  supplies `claude-fable-5` — but that list *is* the picker when models.dev is
+  unreachable, and `allows_custom_model` is `false` for Claude, so offline or on
+  a cold cache Fable could be neither picked nor typed.
 - **A rejected request now quotes the provider's explanation.** `ureq`'s
   `Display` for a status error stops at the code, so a failed run reported
   `status code 400` and nothing else — the same message whether the key was

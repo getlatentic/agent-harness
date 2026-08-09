@@ -59,9 +59,14 @@ impl Harness for ClaudeHarness {
                 // free-text) + a turn cap; no reasoning-effort flag.
                 credential_required: false,
                 previews_edits: false,
+                // The aliases `claude --help` documents. This list is the whole
+                // picker when models.dev is unreachable, and `allows_custom_model`
+                // is false, so anything missing here is unreachable — not merely
+                // unlisted.
                 models: vec![
                     HarnessModel { value: "sonnet".to_owned(), label: "Sonnet (latest)".to_owned() },
                     HarnessModel { value: "opus".to_owned(), label: "Opus (latest)".to_owned() },
+                    HarnessModel { value: "fable".to_owned(), label: "Fable (latest)".to_owned() },
                     HarnessModel { value: "haiku".to_owned(), label: "Haiku (latest)".to_owned() },
                 ],
                 allows_custom_model: false,
@@ -300,6 +305,26 @@ mod tests {
         assert!(hint.command.is_some_and(|c| c.contains("claude.ai/install.sh")));
         // Claude manages its own auth — Compose doesn't require a key.
         assert!(!h.credential().required);
+    }
+
+    #[test]
+    fn every_documented_alias_is_offered() {
+        // These are the aliases `claude --help` names. The list matters more
+        // than it looks: models.dev supplies the exact ids, but when it is
+        // unreachable — offline, or a first launch with a cold cache — this
+        // vec IS the picker. Combined with `allows_custom_model: false`, an
+        // alias missing here cannot be selected or typed. `fable` was absent
+        // and therefore unreachable in exactly that state.
+        let caps = ClaudeHarness::new().info().capabilities;
+        let offered: Vec<&str> = caps.models.iter().map(|m| m.value.as_str()).collect();
+        for alias in ["sonnet", "opus", "fable", "haiku"] {
+            assert!(offered.contains(&alias), "`--model {alias}` is documented, got {offered:?}");
+        }
+        assert!(
+            !caps.allows_custom_model,
+            "if free-text entry is ever allowed, an omission above stops being unreachable \
+             and this test can relax"
+        );
     }
 
     /// Value of the arg immediately following `flag`, if present.
