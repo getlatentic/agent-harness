@@ -7,3 +7,6 @@
 
 # Working notes and runbooks — local only, not part of the published crate.
 /internal/
+
+# cargo-mutants working directory.
+mutants.out*/

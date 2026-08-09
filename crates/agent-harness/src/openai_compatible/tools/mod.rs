@@ -1308,6 +1308,76 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_timeout_falls_back_to_the_default_rather_than_killing_instantly() {
+        // `timeout.filter(|&t| t > 0)` treats 0 as "unset". Relaxing that to
+        // `>= 0` accepts it, and a zero-millisecond budget kills every command
+        // the moment it starts — a model that passes 0 gets a tool that never
+        // works, with a timeout message rather than an argument error.
+        let dir = scratch("bash-zero-timeout");
+        let out = run("bash", json!({ "command": "echo hi", "timeout": 0 }), &dir, RunMode::Edit);
+        assert!(out.ok, "a zero timeout must mean the default, got: {}", out.output);
+        assert_eq!(out.output.trim(), "hi");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stdout_and_stderr_are_joined_without_running_together() {
+        // Three mutants lived in this one condition: `&&` to `||`, and either
+        // `!` deleted. Each produces output the model reads as one stream —
+        // a missing separator glues the last line of stdout to the [stderr]
+        // header, and a spurious one puts a blank line before it.
+        let dir = scratch("bash-streams");
+
+        // stdout with no trailing newline, then stderr: exactly one newline.
+        let both = run(
+            "bash",
+            json!({ "command": "printf out; printf err >&2" }),
+            &dir,
+            RunMode::Edit,
+        );
+        assert!(both.ok, "{}", both.output);
+        assert!(both.output.contains("out\n[stderr]"), "one separator: {:?}", both.output);
+
+        // stderr alone: no leading blank line, because there is no stdout to
+        // separate it from.
+        let only_err = run("bash", json!({ "command": "printf err >&2" }), &dir, RunMode::Edit);
+        assert!(only_err.ok, "{}", only_err.output);
+        assert!(
+            only_err.output.starts_with("[stderr]"),
+            "nothing to separate from: {:?}",
+            only_err.output
+        );
+
+        // stdout alone: the marker never appears.
+        let only_out = run("bash", json!({ "command": "printf out" }), &dir, RunMode::Edit);
+        assert!(!only_out.output.contains("[stderr]"), "{:?}", only_out.output);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_bash_schema_tells_the_model_how_to_call_it() {
+        // An empty schema is worse than a missing tool: the model is invited to
+        // call something it cannot form arguments for.
+        let set = ToolSet::builtin();
+        let defs = set.defs(RunMode::Edit, "test-model", AgentContext::Main);
+        let bash = defs
+            .iter()
+            .find(|d| d["function"]["name"] == "bash")
+            .expect("bash is offered in Edit mode");
+
+        assert!(
+            bash["function"]["parameters"]["properties"]["command"].is_object(),
+            "the schema must declare `command`: {}",
+            bash["function"]["parameters"]
+        );
+        let description = bash["function"]["description"].as_str().unwrap_or_default();
+        assert!(
+            description.len() > 20 && description.to_lowercase().contains("command"),
+            "a tool with no description is one the model cannot choose deliberately: {description:?}"
+        );
+    }
+
+    #[test]
     fn bash_runs_reports_exit_and_times_out() {
         use std::time::{Duration, Instant};
         let dir = scratch("bash");
