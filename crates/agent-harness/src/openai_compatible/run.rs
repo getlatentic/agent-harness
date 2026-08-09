@@ -861,6 +861,48 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
+    fn the_prompt_prefix_is_byte_stable_and_ends_with_the_volatile_part() {
+        // Prompt caching — Anthropic's, DeepSeek's, and the KV cache a local
+        // Ollama or llama.cpp keeps — reuses whatever prefix is byte-identical
+        // to last time. Two properties buy that, and neither is self-evident
+        // from reading the assembly, so both are asserted here.
+        let dir = std::env::temp_dir().join(format!("hl-prefix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "project rules").unwrap();
+        let skills_dir = dir.join(".claude/skills");
+        for name in ["gamma", "alpha"] {
+            std::fs::create_dir_all(skills_dir.join(name)).unwrap();
+            std::fs::write(
+                skills_dir.join(name).join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: does {name}\n---\nbody"),
+            )
+            .unwrap();
+        }
+        let sources = instructions::InstructionSources::default();
+
+        // 1. Rebuilding it produces the same bytes. Anything order-dependent —
+        //    a directory walk, a map iteration — would show up here.
+        let build = || {
+            let skills = skills::discover(&dir, &[]);
+            build_system_prompt(SYSTEM_PROMPT, &dir, &skills, &sources)
+        };
+        let first = build();
+        for _ in 0..5 {
+            assert_eq!(build(), first, "the cacheable prefix must not drift between runs");
+        }
+
+        // 2. The working directory is appended after it, never woven in. It is
+        //    the one part that changes per workspace, so everything above stays
+        //    shared even when it differs.
+        assert!(!first.contains(&dir.display().to_string()), "cwd must not leak into the prefix");
+        let full = format!("{first}{}", environment_block(&dir));
+        assert!(full.ends_with(&environment_block(&dir)), "the volatile block goes last");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn system_prompt_joins_cleanly_and_states_the_rules() {
         // The `\`-continued literal must read as clean prose (no mashed words,
         // no leaked indentation) and carry the behavioural rules that keep a

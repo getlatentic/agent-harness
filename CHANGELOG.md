@@ -154,6 +154,12 @@ prompt. `OpenHarness::builtin_tool_names()` lists what you can name.
   `TOKENIZERS_PARALLELISM` while passing `AWS_ACCESS_KEY_ID` straight through.
 - **No console window flashes on Windows** (#35). Every child process spawns
   with `CREATE_NO_WINDOW`, via `cli_stream::hidden_command`.
+- **Skill discovery is ordered, so the prompt prefix stays byte-stable.** The
+  catalog sits ahead of the volatile working-directory block, which makes it
+  part of the prefix every request shares. Discovery took whatever order the
+  directory walk produced — stable enough locally to look fine, not guaranteed
+  across machines — and one reordered line changes the bytes, misses the cache
+  and pays a full re-prefill of everything above it.
 - **A skill whose description is a YAML block scalar is now readable.** The
   frontmatter reader handled only a flat `key: value`, so the common
   `description: >-` followed by indented lines was read as the literal `">-"`.

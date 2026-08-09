@@ -90,12 +90,21 @@ pub(crate) fn catalog(skills: &[Skill]) -> Option<String> {
 
 /// Every `SKILL.md` under `root`. Standard filters are off — skills live in
 /// dot-directories (`.claude`), which the default gitignore/hidden filters skip.
+///
+/// Sorted, and that matters beyond tidiness. The catalog these produce sits in
+/// the system prompt ahead of the volatile working-directory block, so it is
+/// part of the cacheable prefix every request shares. Directory order is
+/// whatever `readdir` returns — stable enough to look fine locally, not
+/// guaranteed across machines or after a directory is rewritten — and a single
+/// reordered line changes the prompt bytes, missing the KV cache and paying a
+/// full re-prefill of everything before it.
 fn skill_files(root: &Path) -> Vec<PathBuf> {
     if !root.is_dir() {
         return Vec::new();
     }
     WalkBuilder::new(root)
         .standard_filters(false)
+        .sort_by_file_name(std::ffi::OsStr::cmp)
         .build()
         .filter_map(Result::ok)
         .filter(|e| e.file_name() == "SKILL.md")
@@ -246,6 +255,32 @@ mod tests {
         let skills = vec![Skill { name: "x".into(), description: Some("does x".into()), body: "b".into() }];
         let c = catalog(&skills).unwrap();
         assert!(c.contains("`x`") && c.contains("does x"));
+    }
+
+    #[test]
+    fn the_catalog_is_byte_identical_across_discoveries() {
+        // The catalog is part of the cacheable prompt prefix. If discovery
+        // order can drift, the bytes drift with it and every request pays a
+        // re-prefill for a list that did not actually change.
+        let root = scratch("stable");
+        let skills_dir = root.join(".claude/skills");
+        for name in ["zebra", "alpha", "middle", "beta"] {
+            let dir = skills_dir.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), format!("---\nname: {name}\ndescription: does {name}\n---\nbody"))
+                .unwrap();
+        }
+
+        let first = catalog(&discover(&root, &[])).expect("catalog");
+        for _ in 0..5 {
+            assert_eq!(catalog(&discover(&root, &[])).unwrap(), first, "discovery must be stable");
+        }
+        // Sorted, so the order is a property of the names rather than of the
+        // filesystem that happened to hand them over.
+        let order: Vec<usize> =
+            ["alpha", "beta", "middle", "zebra"].iter().map(|n| first.find(n).expect(n)).collect();
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "expected name order, got:\n{first}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
