@@ -9,16 +9,24 @@
 //! Persistence is **opt-in**: a harness with no session dir runs ephemerally
 //! (no disk writes); one configured via `OpenHarness::with_session_dir`
 //! persists here and can resume by id. Layout under the root:
-//! `sessions/<id>.json` (metadata, cheap to list) + `messages/<id>.jsonl` (the
-//! transcript — everything after the regenerated system prompt, one message per
-//! line, appended).
+//! `sessions/<id>.jsonl` — one file per session: a `session` header line, then
+//! one `message` line per turn, appended. Pi stores sessions this way; Codex
+//! and Claude Code likewise keep a session to one JSONL file.
 //!
-//! JSONL for the transcript, matching Codex and Claude Code. A whole-array file
-//! has to be rewritten to record one exchange, which is O(n) per turn and, more
-//! importantly, only valid as a complete document: a process killed mid-write
-//! left JSON that no longer parsed, losing the conversation rather than the
-//! turn. A torn append costs the final line. `<id>.json` is still read so
-//! sessions written by an older build resume.
+//! Two properties come from that shape. Appending is O(1) in the length of the
+//! conversation, where rewriting a whole-array file to record one exchange is
+//! O(n) — and a whole-array file is only meaningful complete, so a process
+//! killed mid-write lost the conversation rather than the turn. A torn append
+//! costs the final line. And with the metadata in the same file as the
+//! transcript, the two cannot disagree; as separate writes they could, if the
+//! process died between them.
+//!
+//! Listing reads only each file's first line, so it never parses transcripts.
+//! (Codex goes further with one global index — a single read for any number of
+//! sessions — which is the better answer at large session counts.)
+//!
+//! The earlier two-file layout (`sessions/<id>.json` + `messages/<id>.{jsonl,json}`)
+//! is still read, so sessions written by an older build resume.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -99,32 +107,40 @@ impl FileStore {
         Self { root: root.into() }
     }
 
-    fn session_path(&self, id: &str) -> PathBuf {
+    /// A session is one file: a header record, then one message per line.
+    fn log_path(&self, id: &str) -> PathBuf {
+        self.root.join("sessions").join(format!("{id}.jsonl"))
+    }
+
+    /// The two-file layout this replaced — a metadata `.json` beside a
+    /// transcript under `messages/`. Read so existing sessions still resume.
+    fn legacy_record_path(&self, id: &str) -> PathBuf {
         self.root.join("sessions").join(format!("{id}.json"))
     }
-    /// The transcript log — one JSON message per line, appended.
-    fn messages_path(&self, id: &str) -> PathBuf {
-        self.root.join("messages").join(format!("{id}.jsonl"))
+    fn legacy_messages_paths(&self, id: &str) -> [PathBuf; 2] {
+        let dir = self.root.join("messages");
+        [dir.join(format!("{id}.jsonl")), dir.join(format!("{id}.json"))]
     }
 
-    /// The pre-JSONL whole-array file, still read so existing sessions resume.
-    fn legacy_messages_path(&self, id: &str) -> PathBuf {
-        self.root.join("messages").join(format!("{id}.json"))
-    }
-
-    /// Write a session's metadata record (create or overwrite).
+    /// Write a session's header. Creates the file, or rewrites the header in
+    /// place when a host renames a session — rare enough that the rewrite does
+    /// not matter, unlike the per-turn append.
     pub(crate) fn put_record(&self, record: &SessionRecord) -> Result<(), String> {
-        write_json(&self.session_path(&record.id), record)
+        let messages = self.load_messages(&record.id)?;
+        self.write_log(&record.id, record, &messages)
     }
 
-    /// Read a session's metadata, or `None` if it doesn't exist.
+    /// Read a session's metadata: the header line, or the legacy file.
     pub(crate) fn get_record(&self, id: &str) -> Result<Option<SessionRecord>, String> {
-        read_json_opt(&self.session_path(id))
+        match read_header(&self.log_path(id)) {
+            Some(record) => Ok(Some(record)),
+            None => read_json_opt(&self.legacy_record_path(id)),
+        }
     }
 
-    /// All known sessions, newest-updated first. An unreadable record is
-    /// skipped rather than failing the whole list (a half-written file
-    /// shouldn't hide every other session).
+    /// All known sessions, newest-updated first. An unreadable header is
+    /// skipped rather than failing the whole list — a half-written file
+    /// shouldn't hide every other session.
     pub(crate) fn list_records(&self) -> Result<Vec<SessionRecord>, String> {
         let dir = self.root.join("sessions");
         let entries = match std::fs::read_dir(&dir) {
@@ -134,116 +150,165 @@ impl FileStore {
         };
         let mut out: Vec<SessionRecord> = entries
             .flatten()
-            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
-            .filter_map(|e| read_json_opt::<SessionRecord>(&e.path()).ok().flatten())
+            .filter_map(|entry| {
+                let path = entry.path();
+                match path.extension().and_then(|x| x.to_str()) {
+                    // Only the header is read, so listing does not parse
+                    // transcripts however long they are.
+                    Some("jsonl") => read_header(&path),
+                    Some("json") => read_json_opt::<SessionRecord>(&path).ok().flatten(),
+                    _ => None,
+                }
+            })
             .collect();
         out.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
         Ok(out)
     }
 
-    /// Bump a session's `updated_at`. No-op if the record is absent. Best-effort
-    /// metadata, so callers ignore the result.
+    /// Bump a session's `updated_at`. No-op if the session is absent.
     pub(crate) fn touch(&self, id: &str, updated_at: u64) -> Result<(), String> {
-        if let Some(mut rec) = self.get_record(id)? {
-            rec.updated_at = updated_at;
-            self.put_record(&rec)?;
+        if let Some(mut record) = self.get_record(id)? {
+            record.updated_at = updated_at;
+            self.put_record(&record)?;
         }
         Ok(())
     }
 
-    /// Load a session's transcript (the messages after the system prompt), or an
-    /// empty vec if it has none yet.
-    /// A session's transcript. Reads the JSONL log, falling back to the
-    /// pre-JSONL whole-array file so a session written by an older build still
-    /// resumes.
+    /// A session's transcript, from the header file or the legacy layout.
     ///
     /// A trailing partial line is dropped rather than failing the read: it is
     /// the signature of a process killed mid-append, and the turns before it
     /// are intact and worth keeping.
     pub(crate) fn load_messages(&self, id: &str) -> Result<Vec<ChatMessage>, String> {
-        let path = self.messages_path(id);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(read_json_opt(&self.legacy_messages_path(id))?.unwrap_or_default())
-            }
-            Err(e) => return Err(format!("reading {}: {e}", path.display())),
-        };
-        Ok(text.lines().filter_map(|line| serde_json::from_str(line).ok()).collect())
+        if let Some(text) = read_to_string_opt(&self.log_path(id))? {
+            return Ok(text.lines().filter_map(|line| parse_line(line).message()).collect());
+        }
+        let [jsonl, json] = self.legacy_messages_paths(id);
+        if let Some(text) = read_to_string_opt(&jsonl)? {
+            return Ok(text.lines().filter_map(|line| serde_json::from_str(line).ok()).collect());
+        }
+        Ok(read_json_opt(&json)?.unwrap_or_default())
     }
 
-    /// Append the messages added since the last save.
-    ///
-    /// Append rather than rewrite, which is how Codex and Claude Code store
-    /// theirs: a full rewrite costs O(n) per turn and re-serialises the whole
-    /// conversation to record one exchange. It is also the safer failure —
-    /// a kill mid-append truncates the last line, where a kill mid-rewrite
-    /// used to leave a JSON document that no longer parsed at all.
+    /// Append the messages added since the last save — O(1) in the length of
+    /// the conversation, where rewriting the whole transcript to record one
+    /// exchange was O(n), and where a kill mid-append costs the final line
+    /// rather than a document that no longer parses.
     pub(crate) fn append_messages(&self, id: &str, messages: &[ChatMessage]) -> Result<(), String> {
         if messages.is_empty() {
             return Ok(());
         }
-        let path = self.messages_path(id);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
-        }
-        let mut encoded = String::new();
-        for message in messages {
-            let line = serde_json::to_string(message)
-                .map_err(|e| format!("serializing a message for {}: {e}", path.display()))?;
-            encoded.push_str(&line);
-            encoded.push('\n');
-        }
+        let path = self.log_path(id);
+        ensure_parent(&path)?;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
             .map_err(|e| format!("opening {}: {e}", path.display()))?;
-        std::io::Write::write_all(&mut file, encoded.as_bytes())
+        std::io::Write::write_all(&mut file, encode_messages(messages)?.as_bytes())
             .map_err(|e| format!("appending to {}: {e}", path.display()))
     }
 
-    /// Replace a session's transcript wholesale — for compaction, which
-    /// rewrites history rather than extending it.
+    /// Replace a session's transcript wholesale, keeping its header — for
+    /// compaction, which replaces old turns with a summary rather than
+    /// extending them.
     pub(crate) fn replace_messages(&self, id: &str, messages: &[ChatMessage]) -> Result<(), String> {
-        let path = self.messages_path(id);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
+        let header = self.get_record(id)?;
+        match header {
+            Some(record) => self.write_log(id, &record, messages),
+            // No header yet (a subagent's transcript is written before one
+            // exists): the messages alone are still worth keeping.
+            None => {
+                let path = self.log_path(id);
+                ensure_parent(&path)?;
+                write_atomic(&path, &encode_messages(messages)?)
+            }
         }
-        let mut encoded = String::new();
-        for message in messages {
-            let line = serde_json::to_string(message)
-                .map_err(|e| format!("serializing a message for {}: {e}", path.display()))?;
-            encoded.push_str(&line);
-            encoded.push('\n');
-        }
-        let temp = path.with_extension(format!("{}.tmp", std::process::id()));
-        std::fs::write(&temp, encoded).map_err(|e| format!("writing {}: {e}", temp.display()))?;
-        std::fs::rename(&temp, &path).map_err(|e| {
-            let _ = std::fs::remove_file(&temp);
-            format!("replacing {}: {e}", path.display())
-        })
+    }
+
+    /// Rewrite a session file as header + messages.
+    fn write_log(&self, id: &str, record: &SessionRecord, messages: &[ChatMessage]) -> Result<(), String> {
+        let path = self.log_path(id);
+        ensure_parent(&path)?;
+        let header = serde_json::to_string(&LogLine::Session(record.clone()))
+            .map_err(|e| format!("serializing the header for {}: {e}", path.display()))?;
+        write_atomic(&path, &format!("{header}\n{}", encode_messages(messages)?))
     }
 }
 
-/// Write JSON atomically: a sibling temp file, then a rename.
-///
-/// A transcript is rewritten in full after every turn, and a plain truncating
-/// write is only whole between the truncate and the last byte. A crash, a
-/// SIGKILL or a full disk inside that window leaves a partial file — and since
-/// the document has to parse as one value, the loss is the entire conversation
-/// rather than the turn in flight. Rename is atomic on POSIX and on Windows for
-/// a same-directory replace, so a reader sees the old file or the new one.
-fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+/// One line of a session file, tagged so the header and the messages can share
+/// it. Pi's sessions are shaped this way; keeping metadata in the same file as
+/// the transcript is what makes it impossible for the two to disagree after a
+/// crash between two separate writes.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum LogLine {
+    Session(SessionRecord),
+    Message(ChatMessage),
+}
+
+impl LogLine {
+    fn message(self) -> Option<ChatMessage> {
+        match self {
+            Self::Message(message) => Some(message),
+            Self::Session(_) => None,
+        }
+    }
+}
+
+fn parse_line(line: &str) -> LogLine {
+    serde_json::from_str(line).unwrap_or(LogLine::Session(SessionRecord {
+        id: String::new(),
+        title: None,
+        model: None,
+        cwd: None,
+        parent_id: None,
+        created_at: 0,
+        updated_at: 0,
+    }))
+}
+
+/// The header of a session file, without reading past the first line.
+fn read_header(path: &Path) -> Option<SessionRecord> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut first = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(file), &mut first).ok()?;
+    match serde_json::from_str(&first).ok()? {
+        LogLine::Session(record) if !record.id.is_empty() => Some(record),
+        _ => None,
+    }
+}
+
+fn encode_messages(messages: &[ChatMessage]) -> Result<String, String> {
+    let mut out = String::new();
+    for message in messages {
+        let line = serde_json::to_string(&LogLine::Message(message.clone()))
+            .map_err(|e| format!("serializing a message: {e}"))?;
+        out.push_str(&line);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn ensure_parent(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
     }
-    let json = serde_json::to_string_pretty(value).map_err(|e| format!("serializing {}: {e}", path.display()))?;
+    Ok(())
+}
 
-    // Same directory, so the rename cannot cross a filesystem boundary. The pid
-    // keeps two processes writing the same session from colliding on the temp.
+fn read_to_string_opt(path: &Path) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("reading {}: {e}", path.display())),
+    }
+}
+
+/// Replace a file's contents atomically: sibling temp, then rename.
+fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
     let temp = path.with_extension(format!("{}.tmp", std::process::id()));
-    std::fs::write(&temp, json).map_err(|e| format!("writing {}: {e}", temp.display()))?;
+    std::fs::write(&temp, contents).map_err(|e| format!("writing {}: {e}", temp.display()))?;
     std::fs::rename(&temp, path).map_err(|e| {
         let _ = std::fs::remove_file(&temp);
         format!("replacing {}: {e}", path.display())
@@ -286,6 +351,35 @@ mod tests {
     }
 
     #[test]
+    fn the_header_and_the_transcript_live_in_one_file() {
+        // The reason for the layout: two files written separately can disagree
+        // if the process dies between them. One file makes that impossible,
+        // and listing still only reads the first line.
+        let dir = scratch("onefile");
+        let store = FileStore::new(&dir);
+        let record = SessionRecord {
+            id: "s1".to_owned(),
+            title: Some("a chat".to_owned()),
+            model: Some("m".to_owned()),
+            cwd: None,
+            parent_id: None,
+            created_at: 1,
+            updated_at: 2,
+        };
+        store.put_record(&record).unwrap();
+        store.append_messages("s1", &[ChatMessage::user("hello")]).unwrap();
+
+        assert!(dir.join("sessions").join("s1.jsonl").is_file());
+        assert!(!dir.join("messages").exists(), "no second file to fall out of step");
+
+        let listed = store.list_records().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].title.as_deref(), Some("a chat"));
+        assert_eq!(store.load_messages("s1").unwrap().len(), 1, "the header is not a message");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_truncated_last_line_costs_only_that_turn() {
         // The failure a full rewrite could not survive: a process killed
         // mid-write. Appending makes the damage the final line, and the turns
@@ -296,7 +390,7 @@ mod tests {
             .append_messages("s1", &[ChatMessage::user("first"), ChatMessage::user("second")])
             .unwrap();
 
-        let path = dir.join("messages").join("s1.jsonl");
+        let path = dir.join("sessions").join("s1.jsonl");
         let mut raw = std::fs::read_to_string(&path).unwrap();
         raw.push_str("{\"role\":\"user\",\"cont"); // killed mid-append
         std::fs::write(&path, raw).unwrap();
@@ -309,8 +403,8 @@ mod tests {
 
     #[test]
     fn a_session_written_by_an_older_build_still_loads() {
-        // Pre-JSONL sessions are a whole-array `.json`. Dropping them would
-        // silently lose every conversation a user already had.
+        // The two-file layout: a whole-array transcript under `messages/`.
+        // Dropping it would silently lose every conversation a user had.
         let dir = scratch("legacy");
         let store = FileStore::new(&dir);
         let legacy = dir.join("messages").join("s1.json");
