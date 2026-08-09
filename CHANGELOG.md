@@ -126,6 +126,14 @@ prompt. `OpenHarness::builtin_tool_names()` lists what you can name.
   under `$HOME` is read unless the host asks**. `InstructionSources::discover_global()`
   and `global_skill_roots()` return the conventional per-user locations for a
   host that wants them.
+- **A large MCP surface is deferred behind a `tool_search` tool.** Every tool
+  costs its schema in every request; built-ins are a fixed handful a coding task
+  needs, but MCP is open-ended — three servers with twenty tools each is sixty
+  schemas whether or not the task touches one. Past 4 KB of MCP schema they
+  leave the initial list and one search tool takes their place; the model
+  describes what it wants and gets back the matching schemas, ready to call. A
+  deferred tool stays callable throughout. Built-ins are never deferred. Ranking
+  is BM25, implemented in-crate — no new dependency.
 - **The skills catalog is inlined only while it fits.** One line per skill,
   paid on every request: twenty skills is ~9 KB, which is nothing against a 128k
   window and most of a 4k one. Past the profile's budget (8 KB full, 1 KB

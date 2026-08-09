@@ -34,6 +34,7 @@ use crate::{RunEvent, RunMode, ToolKind};
 
 mod fetch;
 mod file;
+pub(crate) mod discovery;
 pub(crate) mod mcp;
 mod patch;
 mod question;
@@ -129,6 +130,14 @@ fn builtins() -> Vec<Box<dyn Tool>> {
     ]
 }
 
+/// One tool's OpenAI function definition.
+fn tool_def(tool: &dyn Tool) -> Value {
+    json!({
+        "type": "function",
+        "function": { "name": tool.id(), "description": tool.description(), "parameters": tool.parameters() }
+    })
+}
+
 /// Whether [`ToolSet::defs`] builds the tool list for the main agent or a `task`
 /// subagent — a subagent's set drops the opt-out tools (`task`, `question`), so
 /// it can neither spawn its own children nor stop to ask the user.
@@ -142,10 +151,29 @@ pub(crate) enum AgentContext {
 /// MCP servers. Built once per run and shared with subagents, so a dynamic tool
 /// source (MCP) slots in beside the static built-ins behind one type — no
 /// central match to grow.
+/// The name of the search tool offered when tools are deferred.
+pub(crate) const TOOL_SEARCH: &str = "tool_search";
+
+/// Matches returned per tool search. Enough to choose from, few enough that the
+/// reply stays smaller than the schemas it replaced.
+const TOOL_SEARCH_LIMIT: usize = 8;
+
+/// MCP schema bytes past which MCP tools move behind [`TOOL_SEARCH`].
+///
+/// Under this, deferral costs more than it saves: the search tool's own schema
+/// plus a round trip to find what was already in the prompt. Claude Code makes
+/// the same call with a character threshold behind `ENABLE_TOOL_SEARCH=auto:N`.
+const DEFER_MCP_ABOVE_BYTES: usize = 4_096;
+
 pub(crate) struct ToolSet {
     tools: Vec<Box<dyn Tool>>,
     permissions: Vec<crate::openai_compatible::PermissionRule>,
     permission_prompt: Option<crate::openai_compatible::PermissionPrompt>,
+    /// Ids registered and callable but kept out of the initial tool list. Empty
+    /// unless the MCP surface is large enough to be worth hiding.
+    deferred: std::collections::HashSet<String>,
+    /// Ranked lookup over the deferred tools.
+    index: discovery::Index,
 }
 
 impl ToolSet {
@@ -154,6 +182,8 @@ impl ToolSet {
     #[cfg(test)]
     pub(crate) fn builtin() -> Self {
         Self {
+            deferred: std::collections::HashSet::new(),
+            index: discovery::Index::build(Vec::new()),
             tools: builtins(),
             permissions: Vec::new(),
             permission_prompt: None,
@@ -170,16 +200,48 @@ impl ToolSet {
         disabled: &[String],
     ) -> Self {
         let mut tools = builtins();
+        let builtin_count = tools.len();
         tools.extend(mcp);
         // Withheld at construction, not refused at call time. A tool the host
         // disabled should never reach the model at all: an advertised-then-
         // refused tool still costs its schema in every request, and still
         // invites the model to try.
         tools.retain(|t| !disabled.iter().any(|name| name == t.id()));
+
+        // Only MCP tools are candidates: the built-ins are a fixed handful that
+        // a coding task needs, where an MCP surface is open-ended and mostly
+        // irrelevant to any given request.
+        let mcp_ids: Vec<String> = tools
+            .iter()
+            .skip(builtin_count)
+            .map(|t| t.id().to_owned())
+            .collect();
+        let mcp_bytes: usize = tools
+            .iter()
+            .filter(|t| mcp_ids.iter().any(|id| id == t.id()))
+            .map(|t| t.description().len() + t.parameters().to_string().len())
+            .sum();
+
+        let (deferred, index) = if mcp_bytes > DEFER_MCP_ABOVE_BYTES {
+            let entries = tools
+                .iter()
+                .filter(|t| mcp_ids.iter().any(|id| id == t.id()))
+                .map(|t| discovery::Entry {
+                    id: t.id().to_owned(),
+                    text: format!("{} {}", t.id(), t.description()),
+                })
+                .collect();
+            (mcp_ids.into_iter().collect(), discovery::Index::build(entries))
+        } else {
+            (std::collections::HashSet::new(), discovery::Index::build(Vec::new()))
+        };
+
         Self {
             tools,
             permissions,
             permission_prompt,
+            deferred,
+            index,
         }
     }
 
@@ -199,18 +261,68 @@ impl ToolSet {
     /// (`task`, `question`).
     pub(crate) fn defs(&self, mode: RunMode, model: &str, context: AgentContext) -> Vec<Value> {
         let subagent = matches!(context, AgentContext::Subagent);
-        self.tools
+        let mut defs: Vec<Value> = self
+            .tools
             .iter()
             .filter(|t| t.offered(mode, model))
             .filter(|t| !subagent || t.in_subagent())
             .filter(|t| !(t.mutating() && matches!(mode, RunMode::Ask)))
-            .map(|t| {
-                json!({
-                    "type": "function",
-                    "function": { "name": t.id(), "description": t.description(), "parameters": t.parameters() }
-                })
-            })
-            .collect()
+            // Deferred tools stay registered and callable; they are simply not
+            // advertised. `tool_search` is how the model reaches them.
+            .filter(|t| !self.deferred.contains(t.id()))
+            .map(|t| tool_def(t.as_ref()))
+            .collect();
+        if !self.deferred.is_empty() {
+            defs.push(self.search_def());
+        }
+        defs
+    }
+
+    /// The `tool_search` schema, naming how many tools are behind it so the
+    /// model can judge whether searching is worth a turn.
+    fn search_def(&self) -> Value {
+        json!({
+            "type": "function",
+            "function": {
+                "name": TOOL_SEARCH,
+                "description": format!(
+                    "Find tools that are available but not listed here — {} of them, from connected \
+                     integrations. Describe the task in a few words (\"file a github issue\", \"query \
+                     the database\") and the matching tools are returned with their full schemas, ready \
+                     to call. Search before concluding something cannot be done.",
+                    self.deferred.len()
+                ),
+                "parameters": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {
+                        "query": { "type": "string", "description": "What you are trying to do." }
+                    }
+                }
+            }
+        })
+    }
+
+    /// Answer a `tool_search` call with the schemas of the best matches.
+    fn search_tools(&self, args: &Value) -> ToolOutcome {
+        let Some(query) = args.get("query").and_then(Value::as_str) else {
+            return ToolOutcome::err(format!("{TOOL_SEARCH}: `query` is required"));
+        };
+        let matched = self.index.search(query, TOOL_SEARCH_LIMIT);
+        if matched.is_empty() {
+            return ToolOutcome::ok(format!(
+                "No available tool matches \"{query}\". Do not search again for the same thing."
+            ));
+        }
+        let defs: Vec<Value> = matched
+            .iter()
+            .filter_map(|id| self.tools.iter().find(|t| t.id() == *id))
+            .map(|t| tool_def(t.as_ref()))
+            .collect();
+        ToolOutcome::ok(
+            serde_json::to_string_pretty(&defs)
+                .unwrap_or_else(|_| "could not encode the matching tools".to_owned()),
+        )
     }
 
     /// The neutral [`ToolKind`] for a tool name, so the host routes the card
@@ -227,6 +339,9 @@ impl ToolSet {
     /// hallucinates a mutating tool in `Ask` mode is refused even though it
     /// wasn't offered. Output past the caps is truncated (+ spilled) here.
     pub(crate) fn execute(&self, name: &str, args: &Value, ctx: &ToolCtx) -> ToolOutcome {
+        if name == TOOL_SEARCH {
+            return self.search_tools(args);
+        }
         let Some(tool) = self.tools.iter().find(|t| t.id() == name) else {
             return ToolOutcome::err(format!("unknown tool `{name}`"));
         };
@@ -719,6 +834,121 @@ mod tests {
             model: None,
         };
         assert!(!set.execute("bash", &json!({ "command": "echo hi" }), &ctx).ok);
+    }
+
+    /// Tool names in the list the model is actually shown.
+    fn offered_names(set: &ToolSet) -> Vec<String> {
+        set.defs(RunMode::Ask, "test-model", AgentContext::Main)
+            .iter()
+            .filter_map(|d| d["function"]["name"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// A ToolCtx for a search or a direct call in these tests.
+    fn search_ctx(cancel: &AtomicBool) -> ToolCtx<'_> {
+        ToolCtx {
+            cwd: any_cwd(),
+            mode: RunMode::Ask,
+            cancel,
+            run_id: "t",
+            call_id: "c",
+            skills: &[],
+            subagent: None,
+            model: None,
+        }
+    }
+
+    /// A stand-in MCP tool with a schema big enough to matter.
+    struct FakeMcp {
+        id: String,
+        description: String,
+    }
+    impl Tool for FakeMcp {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn description(&self) -> &str {
+            &self.description
+        }
+        fn parameters(&self) -> Value {
+            json!({ "type": "object", "properties": { "padding": { "type": "string" } } })
+        }
+        fn kind(&self) -> ToolKind {
+            ToolKind::Other
+        }
+        fn mutating(&self) -> bool {
+            false
+        }
+        fn execute(&self, _args: &Value, _ctx: &ToolCtx) -> ToolOutcome {
+            ToolOutcome::ok("called")
+        }
+    }
+
+    fn many_mcp_tools() -> Vec<Box<dyn Tool>> {
+        let subjects = ["github issue", "slack message", "database query", "calendar event", "email draft"];
+        (0..20)
+            .map(|i| {
+                let subject = subjects[i % subjects.len()];
+                Box::new(FakeMcp {
+                    id: format!("mcp_tool_{i:02}"),
+                    description: format!(
+                        "Work with a {subject}. {}",
+                        "This description is long enough to make the surface worth deferring. ".repeat(3)
+                    ),
+                }) as Box<dyn Tool>
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_small_mcp_surface_stays_in_the_prompt() {
+        // Below the threshold, deferral costs more than it saves: the search
+        // tool's own schema plus a round trip to find what was already there.
+        let one = vec![Box::new(FakeMcp { id: "solo".into(), description: "does one thing".into() })
+            as Box<dyn Tool>];
+        let set = ToolSet::new(one, Vec::new(), None, &[]);
+        let names = offered_names(&set);
+        assert!(names.contains(&"solo".to_owned()), "a small surface is listed: {names:?}");
+        assert!(!names.contains(&TOOL_SEARCH.to_owned()), "and needs no search tool");
+    }
+
+    #[test]
+    fn a_large_mcp_surface_is_deferred_behind_one_search_tool() {
+        let set = ToolSet::new(many_mcp_tools(), Vec::new(), None, &[]);
+        let names = offered_names(&set);
+
+        assert!(names.contains(&TOOL_SEARCH.to_owned()), "the search tool is offered: {names:?}");
+        assert!(!names.iter().any(|n| n.starts_with("mcp_tool_")), "no MCP schema rides along: {names:?}");
+        // The built-ins are not candidates — a coding task needs them.
+        assert!(names.contains(&"read".to_owned()) && names.contains(&"list".to_owned()));
+    }
+
+    #[test]
+    fn searching_returns_callable_schemas_for_what_matches() {
+        let set = ToolSet::new(many_mcp_tools(), Vec::new(), None, &[]);
+
+        let found = set.execute(TOOL_SEARCH, &json!({ "query": "file a github issue" }), &search_ctx(&AtomicBool::new(false)));
+        assert!(found.ok, "search should succeed: {}", found.output);
+        let defs: Vec<Value> = serde_json::from_str(&found.output).expect("a JSON array of tool defs");
+        assert!(!defs.is_empty(), "a matching query returns tools");
+        assert!(
+            defs.iter().all(|d| d["function"]["parameters"].is_object()),
+            "each result carries the schema needed to call it"
+        );
+
+        // And a deferred tool remains callable even though it was never listed.
+        let name = defs[0]["function"]["name"].as_str().unwrap().to_owned();
+        let called = set.execute(&name, &json!({}), &search_ctx(&AtomicBool::new(false)));
+        assert!(called.ok, "deferred does not mean unavailable: {}", called.output);
+    }
+
+    #[test]
+    fn a_search_matching_nothing_says_so_rather_than_guessing() {
+        let set = ToolSet::new(many_mcp_tools(), Vec::new(), None, &[]);
+        let out = set.execute(TOOL_SEARCH, &json!({ "query": "photosynthesis" }), &search_ctx(&AtomicBool::new(false)));
+        assert!(out.ok);
+        assert!(out.output.contains("No available tool matches"), "got {}", out.output);
+        assert!(out.output.contains("Do not search again"), "a repeat search would burn turns");
     }
 
     #[test]
