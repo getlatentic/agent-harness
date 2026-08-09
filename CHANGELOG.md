@@ -188,6 +188,15 @@ prompt. `OpenHarness::builtin_tool_names()` lists what you can name.
   supplies `claude-fable-5` — but that list *is* the picker when models.dev is
   unreachable, and `allows_custom_model` is `false` for Claude, so offline or on
   a cold cache Fable could be neither picked nor typed.
+- **A prompt the provider says is too long now compacts and retries.**
+  Compaction fired on an estimate, and an estimate against a tokenizer we do not
+  have is sometimes wrong — at which point the provider refused and the run
+  ended. A refusal that names a context overflow is now a third reason to
+  compact, alongside the threshold, and the turn is sent again. Pi has had this
+  as `overflow` beside `manual` and `threshold`; it only became possible here
+  once errors carried the provider's own words. If there is nothing left to
+  summarize the original error is reported rather than retrying into the same
+  refusal.
 - **A rejected request now quotes the provider's explanation.** `ureq`'s
   `Display` for a status error stops at the code, so a failed run reported
   `status code 400` and nothing else — the same message whether the key was

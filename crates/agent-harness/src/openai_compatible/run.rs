@@ -198,6 +198,66 @@ fn build_response_format(schema: Option<&Value>) -> Option<Value> {
     })
 }
 
+/// Whether a provider's refusal says the prompt was too long.
+///
+/// Every backend words this differently and none of them give a machine-readable
+/// code through the OpenAI shape, so this matches on the phrases they actually
+/// send. The strings come from real refusals, not guesses — see the test.
+fn is_context_overflow(message: &str) -> bool {
+    const PHRASES: &[&str] = &[
+        "exceeds the available context size", // llama.cpp
+        "exceed_context_size_error",          // llama.cpp, typed
+        "maximum context length",             // OpenAI
+        "context_length_exceeded",            // OpenAI, typed
+        "prompt is too long",                 // Anthropic
+        "too many tokens",
+        "reduce the length of the messages",
+    ];
+    let lowered = message.to_lowercase();
+    PHRASES.iter().any(|phrase| lowered.contains(phrase))
+}
+
+/// Send one turn, choosing Ollama's native endpoint or the OpenAI shape.
+#[allow(clippy::too_many_arguments)]
+fn send_turn(
+    cfg: &LoopConfig,
+    sent: &[ChatMessage],
+    tool_defs: &[Value],
+    response_format: Option<&Value>,
+    cancel: &AtomicBool,
+    on_event: &RunCallback,
+    rid: &str,
+) -> Result<(ChatMessage, Option<wire::Usage>), String> {
+    let extras = wire::RequestExtras {
+        response_format,
+        image_data_uris: &cfg.image_data_uris,
+        reasoning_tag: cfg.reasoning_tag.as_deref(),
+        cache: cfg.prompt_cache,
+    };
+    match cfg.ollama_num_ctx {
+        Some(num_ctx) => ollama::post_chat_stream(
+            &cfg.base_url,
+            &cfg.model,
+            sent,
+            tool_defs,
+            num_ctx,
+            extras,
+            cancel,
+            |fragment| emit_fragment(on_event, rid, fragment),
+        ),
+        None => wire::post_chat_stream(
+            &cfg.base_url,
+            cfg.api_key.as_deref(),
+            &cfg.model,
+            sent,
+            tool_defs,
+            extras,
+            cancel,
+            |fragment| emit_fragment(on_event, rid, fragment),
+        ),
+    }
+}
+
 /// A resolved session: its id and the transcript to replay before the new
 /// prompt (empty for a fresh session, the stored history for a resume).
 struct ResolvedSession {
@@ -306,35 +366,32 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
 
         // Stream the turn: text deltas surface as `RunEvent::Text` as they
         // arrive; the assembled message (with tool calls) drives the dispatch.
-        let extras = wire::RequestExtras {
-            response_format: response_format.as_ref(),
-            image_data_uris: &cfg.image_data_uris,
-            reasoning_tag: cfg.reasoning_tag.as_deref(),
-                    cache: cfg.prompt_cache,
-        };
-        // Ollama gets its native `/api/chat` so `num_ctx` actually applies; every
-        // other provider speaks the OpenAI `/v1` shape.
-        let streamed = match cfg.ollama_num_ctx {
-            Some(num_ctx) => ollama::post_chat_stream(
-                &cfg.base_url,
-                &cfg.model,
-                &sent,
-                &tool_defs,
-                num_ctx,
-                extras,
-                &cancel,
-                |fragment| emit_fragment(&on_event, rid, fragment),
-            ),
-            None => wire::post_chat_stream(
-                &cfg.base_url,
-                cfg.api_key.as_deref(),
-                &cfg.model,
-                &sent,
-                &tool_defs,
-                extras,
-                &cancel,
-                |fragment| emit_fragment(&on_event, rid, fragment),
-            ),
+        let streamed =
+            send_turn(&cfg, &sent, &tool_defs, response_format.as_ref(), &cancel, &on_event, rid);
+        // A provider that says the prompt was too long has told us something
+        // the estimate got wrong. Compact against what it actually said and try
+        // the turn once more, rather than ending the run on a guess.
+        let streamed = match streamed {
+            Err(message) if is_context_overflow(&message) => {
+                let limit = cfg.context_tokens.map_or(0, |n| n as usize);
+                let shrank = limit > 0
+                    && compact_now(&cfg, &mut transcript, &system_prompt, &on_event, rid, &cancel, limit);
+                if !shrank {
+                    // Nothing left to summarize — retrying would send the same
+                    // request and get the same refusal.
+                    return finish_error(&on_event, rid, message);
+                }
+                (*on_event)(RunEvent::Activity {
+                    run_id: rid.to_owned(),
+                    message: "the request was over the model's context; compacted and retrying".to_owned(),
+                });
+                let mut retry = window(&system_prompt, &transcript);
+                if cfg.mode == RunMode::Ask {
+                    retry.push(ChatMessage::user(READ_ONLY_REMINDER));
+                }
+                send_turn(&cfg, &retry, &tool_defs, response_format.as_ref(), &cancel, &on_event, rid)
+            }
+            other => other,
         };
         let (msg, usage) = match streamed {
             Ok(pair) => pair,
@@ -656,6 +713,43 @@ fn compact_if_needed(
     if estimate_tokens(&window(system_prompt, transcript)) <= limit.saturating_sub(reserve) {
         return;
     }
+    compact_now(cfg, transcript, system_prompt, on_event, rid, cancel, limit);
+}
+
+/// Compact regardless of the estimate — for a provider that has just told us
+/// the request was too long.
+///
+/// The threshold path guesses with [`estimate_tokens`], and a guess against a
+/// tokenizer we do not have will sometimes be wrong. Pi treats a real overflow
+/// as its own reason to compact, alongside `manual` and `threshold`; without
+/// that the run simply dies at the point the guess was optimistic.
+///
+/// Returns whether the transcript actually shrank, so a caller knows a retry is
+/// worth attempting rather than looping on the same request.
+fn compact_now(
+    cfg: &LoopConfig,
+    transcript: &mut Vec<ChatMessage>,
+    system_prompt: &str,
+    on_event: &RunCallback,
+    rid: &str,
+    cancel: &AtomicBool,
+    limit: usize,
+) -> bool {
+    let before = transcript.len();
+    compact_to(cfg, transcript, system_prompt, on_event, rid, cancel, limit);
+    transcript.len() != before
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compact_to(
+    cfg: &LoopConfig,
+    transcript: &mut Vec<ChatMessage>,
+    system_prompt: &str,
+    on_event: &RunCallback,
+    rid: &str,
+    cancel: &AtomicBool,
+    limit: usize,
+) {
     let preserve = (limit / 4).clamp(2_000, 8_000);
     // Summarize only the turns after the last marker; keep the recent tail verbatim.
     let min = transcript.iter().rposition(|m| m.role == COMPACTION_ROLE).map_or(0, |m| m + 1);
@@ -1101,6 +1195,34 @@ mod tests {
             Subagent { cfg: &c, parent_session_id: "ses_parent", skills: &[], on_event: &cb, toolset: &toolset };
         let err = run_subagent(&runner, Some("nope"), "do it", &cancel).unwrap_err();
         assert!(err.contains("unknown subagent_type") && err.contains("reviewer"), "got: {err}");
+    }
+
+    #[test]
+    fn a_context_refusal_is_recognised_across_backends() {
+        // Real refusals, not invented ones: the llama.cpp string is what our
+        // own example produced against a 4096-token server this morning, and it
+        // only became visible once the error carried the provider's body.
+        for real in [
+            "chat request to http://localhost:8080/v1/chat/completions failed: status 400: \
+             {\"error\":{\"code\":400,\"message\":\"request (6406 tokens) exceeds the available \
+             context size (4096 tokens), try increasing it\",\"type\":\"exceed_context_size_error\"}}",
+            "This model's maximum context length is 128000 tokens, however you requested 130000",
+            "{\"error\":{\"code\":\"context_length_exceeded\"}}",
+            "prompt is too long: 210000 tokens > 200000 maximum",
+        ] {
+            assert!(is_context_overflow(real), "should be recognised: {real}");
+        }
+
+        // Things that are emphatically not an overflow — treating them as one
+        // would compact the conversation and retry for no reason.
+        for other in [
+            "chat request failed: status 401: invalid api key",
+            "chat request failed: status 404: model not found",
+            "connection refused",
+            "the model returned an empty response",
+        ] {
+            assert!(!is_context_overflow(other), "should not be recognised: {other}");
+        }
     }
 
     #[test]
