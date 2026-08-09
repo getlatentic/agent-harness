@@ -96,6 +96,12 @@ prompt. `OpenHarness::builtin_tool_names()` lists what you can name.
   `TOKENIZERS_PARALLELISM` while passing `AWS_ACCESS_KEY_ID` straight through.
 - **No console window flashes on Windows** (#35). Every child process spawns
   with `CREATE_NO_WINDOW`, via `cli_stream::hidden_command`.
+- **A rejected request now quotes the provider's explanation.** `ureq`'s
+  `Display` for a status error stops at the code, so a failed run reported
+  `status code 400` and nothing else — the same message whether the key was
+  refused, the model id was unknown, or the prompt was too long. The body is
+  where a provider says which it was, and it now reaches the `RunEvent::Error`
+  message (truncated to 500 characters).
 
 ## [0.4.0] - 2026-08-08
 

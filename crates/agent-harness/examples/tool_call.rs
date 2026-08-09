@@ -16,6 +16,9 @@
 
 use harness::{Harness, HarnessError, OpenHarness, RunEvent, RunMode, RunRequest, RunTuning};
 
+#[path = "common/mod.rs"]
+mod common;
+
 fn main() -> Result<(), HarnessError> {
     let agent = OpenHarness::ollama();
 
@@ -27,8 +30,8 @@ fn main() -> Result<(), HarnessError> {
 
     let model = match std::env::var("OLLAMA_MODEL") {
         Ok(m) if !m.trim().is_empty() => m,
-        _ => match agent.list_models()?.into_iter().next() {
-            Some(first) => first.value,
+        _ => match common::largest_installed(&agent)? {
+            Some(name) => name,
             None => {
                 eprintln!("No models installed. Try `ollama pull qwen3:4b`.");
                 return Ok(());

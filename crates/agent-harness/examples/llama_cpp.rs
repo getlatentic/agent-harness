@@ -21,11 +21,25 @@ fn main() -> Result<(), HarnessError> {
     let base_url = std::env::var("LLAMA_SERVER_URL")
         .unwrap_or_else(|_| "http://localhost:8080".into());
 
+    // Every tool the loop offers costs prompt tokens before the model reads a
+    // word of your prompt, and a local server is usually started on a small
+    // context. Name the ones you do not need for the job:
+    //   LLAMA_DISABLE_TOOLS=webfetch,todowrite,bash,write,edit
+    // `OpenHarness::builtin_tool_names()` lists what you can name here.
+    let disabled_tools: Vec<String> = std::env::var("LLAMA_DISABLE_TOOLS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect();
+
     let llama = OpenHarness::custom(OpenHarnessConfig {
         id: "llama-cpp".into(),
         display_name: "llama.cpp".into(),
         base_url: base_url.clone(),
         api_key_env: None, // a local server needs no key
+        disabled_tools,
         ..Default::default()
     });
 
@@ -40,9 +54,14 @@ fn main() -> Result<(), HarnessError> {
     let (_handle, events) = llama.run(RunRequest {
         run_id: "demo".into(),
         prompt: "In one sentence, what is llama.cpp?".into(),
-        // Whatever the server loaded. llama.cpp ignores this and serves its
-        // one model, so it is a label rather than a selection.
-        tuning: RunTuning { model: Some("local".into()), ..Default::default() },
+        // A plain `llama-server` serves the one model it loaded and ignores
+        // this, so `"local"` is a label. A front end that fronts several
+        // (`llama serve --models-preset`, LM Studio) does resolve it, and
+        // rejects a name it does not know — set `LLAMA_MODEL` there.
+        tuning: RunTuning {
+            model: Some(std::env::var("LLAMA_MODEL").unwrap_or_else(|_| "local".into())),
+            ..Default::default()
+        },
         ..Default::default()
     })?;
 
@@ -53,8 +72,20 @@ fn main() -> Result<(), HarnessError> {
             RunEvent::ToolStart { title, .. } => eprintln!("\n[tool] {title}"),
             RunEvent::Error { message, .. } => {
                 eprintln!("\n[error] {message}");
-                eprintln!("Is llama-server running at {base_url}?");
-                eprintln!("Start one with: llama-server -m model.gguf --port 8080 --jinja");
+                // A local server fails in two ways worth telling apart, and a
+                // rejected request means it is running, so do not ask whether
+                // it is. The agent loop sends the system prompt plus nine tool
+                // schemas — several thousand tokens before your prompt — which
+                // overflows a server started on the 4096-token default.
+                if message.contains("context size") {
+                    eprintln!("Give llama-server a bigger context: -c 16384.");
+                    eprintln!("Or send fewer tools: OpenHarnessConfig::disabled_tools.");
+                } else if message.contains("status ") {
+                    eprintln!("The server rejected the request; the body above says why.");
+                } else {
+                    eprintln!("Is llama-server running at {base_url}?");
+                    eprintln!("Start one with: llama-server -m model.gguf --port 8080 --jinja");
+                }
             }
             RunEvent::Exited { .. } => break,
             _ => {}

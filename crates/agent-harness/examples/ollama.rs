@@ -14,6 +14,9 @@
 
 use harness::{Harness, HarnessError, OpenHarness, RunEvent, RunMode, RunRequest, RunTuning};
 
+#[path = "common/mod.rs"]
+mod common;
+
 fn main() -> Result<(), HarnessError> {
     // Local Ollama on its default port (no API key). For a hosted endpoint:
     //   OpenHarness::custom(OpenHarnessConfig {
@@ -32,14 +35,20 @@ fn main() -> Result<(), HarnessError> {
     }
 
     // Ollama has no default model, so a run must name one. Take it from the
-    // environment, else the first model actually installed — hardcoding an id
-    // here would fail on any machine that pulled something else.
+    // environment, else the largest model installed — hardcoding an id here
+    // would fail on any machine that pulled something else.
+    //
+    // Largest, not first: this loop offers the model nine tool schemas, and a
+    // very small model answers by reciting them back as prose instead of
+    // calling one. Ollama's `capabilities` does not separate the two — a 1B
+    // model reports `tools` because its template has the syntax, not because
+    // it can use it — so size is the signal available.
     let chosen = match std::env::var("OLLAMA_MODEL") {
         Ok(model) if !model.trim().is_empty() => model,
-        _ => match model.list_models()?.into_iter().next() {
-            Some(first) => first.value,
+        _ => match common::largest_installed(&model)? {
+            Some(name) => name,
             None => {
-                eprintln!("No models installed. Try `ollama pull llama3.2:1b`.");
+                eprintln!("No models installed. Try `ollama pull qwen2.5:7b-instruct`.");
                 return Ok(());
             }
         },

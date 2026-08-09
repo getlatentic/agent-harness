@@ -131,9 +131,34 @@ pub(super) fn send_with_retry(url: &str, make: impl Fn() -> Result<ureq::Respons
                 std::thread::sleep(backoff);
                 attempt += 1;
             }
-            Err(e) => return Err(format!("chat request to {url} failed: {e}")),
+            Err(e) => return Err(describe_failure(url, e)),
         }
     }
+}
+
+/// Maximum characters of a provider's error body to quote.
+const MAX_BODY_SNIPPET: usize = 500;
+
+/// A failed request, carrying the provider's own explanation when it sent one.
+///
+/// `ureq`'s `Display` for a status error stops at the code, and the body is
+/// where a provider names the field it rejected — which model id is unknown,
+/// which tool schema it would not accept, why the key was refused. Discarding
+/// it leaves a bare "status code 400" that could mean anything.
+fn describe_failure(url: &str, error: Box<ureq::Error>) -> String {
+    let ureq::Error::Status(code, response) = *error else {
+        return format!("chat request to {url} failed: {error}");
+    };
+    let body = response.into_string().unwrap_or_default();
+    let body = body.trim();
+    if body.is_empty() {
+        return format!("chat request to {url} failed: status {code}");
+    }
+    let mut snippet: String = body.chars().take(MAX_BODY_SNIPPET).collect();
+    if body.chars().nth(MAX_BODY_SNIPPET).is_some() {
+        snippet.push('…');
+    }
+    format!("chat request to {url} failed: status {code}: {snippet}")
 }
 
 fn is_retryable(e: &ureq::Error) -> bool {
@@ -658,5 +683,42 @@ mod tests {
         // pull happens, its chunk is discarded, and the read ends.
         assert_eq!(seen, 1, "the poll after the first pull saw the flag");
         assert!(msg.content.as_deref().unwrap_or("").is_empty());
+    }
+
+    fn status_error(code: u16, body: &str) -> Box<ureq::Error> {
+        let response = ureq::Response::new(code, "Bad Request", body).expect("build response");
+        Box::new(ureq::Error::Status(code, response))
+    }
+
+    #[test]
+    fn a_rejected_request_quotes_the_providers_explanation() {
+        // The reason this exists: `ureq`'s Display stops at the status code, so
+        // a real llama.cpp context overflow read as a bare "status code 400" —
+        // indistinguishable from a bad key or an unknown model.
+        let body = r#"{"error":{"message":"request (6406 tokens) exceeds the available context size (4096 tokens)","type":"exceed_context_size_error"}}"#;
+        let message = describe_failure("http://localhost:8080/v1/chat/completions", status_error(400, body));
+
+        assert!(message.contains("status 400"), "keeps the code: {message}");
+        assert!(message.contains("exceeds the available context size"), "quotes the body: {message}");
+        assert!(message.contains("localhost:8080"), "names the endpoint: {message}");
+    }
+
+    #[test]
+    fn a_long_body_is_truncated_rather_than_dumped() {
+        let body = "x".repeat(MAX_BODY_SNIPPET * 3);
+        let message = describe_failure("http://host/v1", status_error(400, &body));
+
+        assert!(message.ends_with('…'), "marks the truncation: {message}");
+        assert!(
+            message.len() < body.len(),
+            "a provider that returns an HTML error page must not become the whole message"
+        );
+    }
+
+    #[test]
+    fn an_empty_body_still_reports_the_status() {
+        let message = describe_failure("http://host/v1", status_error(401, ""));
+        assert!(message.contains("status 401"), "{message}");
+        assert!(!message.trim_end().ends_with(':'), "no dangling colon: {message}");
     }
 }
