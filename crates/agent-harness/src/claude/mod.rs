@@ -49,20 +49,40 @@ impl Default for ClaudeHarness {
     }
 }
 
-impl ClaudeHarness {
-    pub fn new() -> Self {
+/// What this adapter is, as opposed to what is layered onto it — the same
+/// split as [`AcpHarnessConfig`](crate::AcpHarnessConfig) and
+/// [`OpenHarnessConfig`](crate::OpenHarnessConfig).
+#[derive(Clone, Debug)]
+pub struct ClaudeHarnessConfig {
+    /// Program to spawn. A bare name is resolved on PATH; a path is used as
+    /// given. Everything else about the adapter — arguments, output parsing,
+    /// auth probing — is unchanged, so a rename upstream, a fork, a wrapper
+    /// script or a test stub costs a field here rather than a release.
+    pub command: String,
+}
+
+impl Default for ClaudeHarnessConfig {
+    fn default() -> Self {
         Self { command: DEFAULT_CLAUDE_COMMAND.to_owned() }
     }
+}
 
-    /// Drive a differently named or relocated binary: a rename upstream, a
-    /// fork, a wrapper script, or a stub in a test. Everything else about the
-    /// adapter — arguments, output parsing, auth probing — is unchanged, so a
-    /// rename costs a call here rather than a release.
+impl ClaudeHarness {
+    /// Drives `claude` from PATH.
+    pub fn new() -> Self {
+        Self::custom(ClaudeHarnessConfig::default())
+    }
+
+    /// Drives a binary the host names:
     ///
-    /// A bare name is resolved on PATH; a path is used as given.
-    pub fn with_command(mut self, command: impl Into<String>) -> Self {
-        self.command = command.into();
-        self
+    /// ```no_run
+    /// use harness::{ClaudeHarness, ClaudeHarnessConfig};
+    /// let claude = ClaudeHarness::custom(ClaudeHarnessConfig {
+    ///     command: "/opt/forks/claude-next".into(),
+    /// });
+    /// ```
+    pub fn custom(config: ClaudeHarnessConfig) -> Self {
+        Self { command: config.command }
     }
 }
 
@@ -338,7 +358,9 @@ mod tests {
         // rather than a release. A name nothing can resolve must read as "not
         // installed" — proving readiness consults the configured command and
         // not a baked-in "claude".
-        let renamed = ClaudeHarness::new().with_command("definitely-not-a-real-binary-xyz");
+        let renamed = ClaudeHarness::custom(ClaudeHarnessConfig {
+            command: "definitely-not-a-real-binary-xyz".into(),
+        });
         let readiness = renamed.readiness();
         assert!(!readiness.installed, "an unresolvable command cannot report installed");
 

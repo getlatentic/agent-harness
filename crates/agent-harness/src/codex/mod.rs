@@ -48,20 +48,32 @@ impl Default for CodexHarness {
     }
 }
 
-impl CodexHarness {
-    pub fn new() -> Self {
+/// What this adapter is, as opposed to what is layered onto it — the same
+/// split as [`AcpHarnessConfig`](crate::AcpHarnessConfig) and
+/// [`OpenHarnessConfig`](crate::OpenHarnessConfig).
+#[derive(Clone, Debug)]
+pub struct CodexHarnessConfig {
+    /// Program to spawn. A bare name is resolved on PATH; a path is used as
+    /// given. A rename upstream, a fork, a wrapper script or a test stub costs
+    /// a field here rather than a release.
+    pub command: String,
+}
+
+impl Default for CodexHarnessConfig {
+    fn default() -> Self {
         Self { command: DEFAULT_CODEX_COMMAND.to_owned() }
     }
+}
 
-    /// Drive a differently named or relocated binary: a rename upstream, a
-    /// fork, a wrapper script, or a stub in a test. Everything else about the
-    /// adapter is unchanged, so a rename costs a call here rather than a
-    /// release.
-    ///
-    /// A bare name is resolved on PATH; a path is used as given.
-    pub fn with_command(mut self, command: impl Into<String>) -> Self {
-        self.command = command.into();
-        self
+impl CodexHarness {
+    /// Drives `codex` from PATH.
+    pub fn new() -> Self {
+        Self::custom(CodexHarnessConfig::default())
+    }
+
+    /// Drives a binary the host names.
+    pub fn custom(config: CodexHarnessConfig) -> Self {
+        Self { command: config.command }
     }
 }
 
@@ -313,7 +325,9 @@ mod tests {
 
     #[test]
     fn a_renamed_binary_is_what_gets_probed() {
-        let renamed = CodexHarness::new().with_command("definitely-not-a-real-binary-xyz");
+        let renamed = CodexHarness::custom(CodexHarnessConfig {
+            command: "definitely-not-a-real-binary-xyz".into(),
+        });
         assert!(!renamed.readiness().installed, "an unresolvable command cannot report installed");
         assert_eq!(CodexHarness::new().command, DEFAULT_CODEX_COMMAND);
         assert_eq!(CodexHarness::default().command, DEFAULT_CODEX_COMMAND);

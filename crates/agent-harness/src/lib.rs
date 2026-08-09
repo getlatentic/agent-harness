@@ -65,9 +65,9 @@ pub mod registry;
 // The built-in adapters, re-exported as short names so consumers write
 // `use harness::{Claude, Codex}` — each gated behind its feature.
 #[cfg(feature = "claude")]
-pub use claude::{ClaudeHarness as Claude, CLAUDE_HARNESS_ID};
+pub use claude::{ClaudeHarness as Claude, ClaudeHarness, ClaudeHarnessConfig, CLAUDE_HARNESS_ID, DEFAULT_CLAUDE_COMMAND};
 #[cfg(feature = "codex")]
-pub use codex::{CodexHarness as Codex, CODEX_HARNESS_ID};
+pub use codex::{CodexHarness as Codex, CodexHarness, CodexHarnessConfig, CODEX_HARNESS_ID, DEFAULT_CODEX_COMMAND};
 #[cfg(feature = "acp")]
 pub use acp::{AcpHarness, AcpHarnessConfig};
 // The OpenAI-compatible / local-model runtime + its public surface (permission
