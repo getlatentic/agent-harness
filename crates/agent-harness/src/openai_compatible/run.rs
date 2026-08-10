@@ -1,12 +1,11 @@
 //! The synchronous agent loop for the direct-model adapter, run on the worker
 //! thread `OpenHarness::run` spawns.
 //!
-//! It POSTs the conversation to the chat endpoint, streams the assistant text
-//! out as [`RunEvent`]s, dispatches any tool calls the model makes to the
-//! built-in [`super::tools`], feeds the results back, and loops until the
-//! model stops calling tools (or the turn cap / cancel fires). Non-streaming
-//! for now: each `/v1/chat/completions` returns the whole message, so text is
-//! emitted as one [`RunEvent::Text`] per turn (token deltas are a follow-up).
+//! It POSTs the conversation to the chat endpoint via [`super::chat`], streams
+//! the assistant text out as [`RunEvent`]s as it arrives, dispatches any tool
+//! calls the model makes to the built-in [`super::tools`], feeds the results
+//! back, and loops until the model stops calling tools (or the turn cap /
+//! cancel fires).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -18,7 +17,7 @@ use crate::{HarnessError, RunCallback, RunControl, RunEvent, RunMode};
 
 use super::instructions;
 use super::profile::{self, ModelFacts, PromptProfile};
-use super::ollama;
+use super::chat;
 use super::session::{self, FileStore};
 use super::skills;
 use super::tools;
@@ -86,11 +85,10 @@ pub(crate) struct LoopConfig {
     /// the capability half of [`PromptProfile`] selection. `None` for hosted
     /// providers, which do not publish it.
     pub model_parameters_b: Option<f64>,
-    /// When set, talk to Ollama's native `/api/chat` with this `num_ctx` instead
-    /// of the OpenAI `/v1` endpoint (which ignores it and loads every model at
-    /// 4096, truncating the prompt). Always equals `context_tokens` for Ollama;
-    /// `None` for OpenAI-compatible providers, which use `/v1`.
-    pub ollama_num_ctx: Option<u64>,
+    /// Which wire protocol this endpoint speaks. Ollama gets its native
+    /// `/api/chat` because `/v1` ignores `num_ctx` and loads every model at
+    /// 4096, truncating the prompt.
+    pub dialect: chat::Dialect,
     /// Named subagents the `task` tool can spawn via `subagent_type`.
     pub agents: Vec<(String, crate::openai_compatible::AgentDef)>,
     /// MCP servers to launch over stdio and expose their tools to the model.
@@ -225,8 +223,7 @@ fn is_context_overflow(message: &str) -> bool {
     PHRASES.iter().any(|phrase| lowered.contains(phrase))
 }
 
-/// Send one turn, choosing Ollama's native endpoint or the OpenAI shape.
-#[allow(clippy::too_many_arguments)]
+/// Send one turn, streaming each fragment out as it arrives.
 fn send_turn(
     cfg: &LoopConfig,
     sent: &[ChatMessage],
@@ -236,34 +233,22 @@ fn send_turn(
     on_event: &RunCallback,
     rid: &str,
 ) -> Result<(ChatMessage, Option<wire::Usage>), String> {
-    let extras = wire::RequestExtras {
-        response_format,
-        image_data_uris: &cfg.image_data_uris,
-        reasoning_tag: cfg.reasoning_tag.as_deref(),
-        cache: cfg.prompt_cache,
+    let request = chat::ChatRequest {
+        base: &cfg.base_url,
+        model: &cfg.model,
+        messages: sent,
+        tools: tool_defs,
+        api_key: cfg.api_key.as_deref(),
+        extras: chat::RequestExtras {
+            response_format,
+            image_data_uris: &cfg.image_data_uris,
+            reasoning_tag: cfg.reasoning_tag.as_deref(),
+            cache: cfg.prompt_cache,
+        },
     };
-    match cfg.ollama_num_ctx {
-        Some(num_ctx) => ollama::post_chat_stream(
-            &cfg.base_url,
-            &cfg.model,
-            sent,
-            tool_defs,
-            num_ctx,
-            extras,
-            cancel,
-            |fragment| emit_fragment(on_event, rid, fragment),
-        ),
-        None => wire::post_chat_stream(
-            &cfg.base_url,
-            cfg.api_key.as_deref(),
-            &cfg.model,
-            sent,
-            tool_defs,
-            extras,
-            cancel,
-            |fragment| emit_fragment(on_event, rid, fragment),
-        ),
-    }
+    chat::post_chat_stream(request, cfg.dialect, cancel, |fragment| {
+        emit_fragment(on_event, rid, fragment)
+    })
 }
 
 /// A resolved session: its id and the transcript to replay before the new
@@ -701,26 +686,25 @@ fn emit_fragment(on_event: &RunCallback, rid: &str, fragment: wire::Fragment) {
     }
 }
 
-/// One non-streaming completion returning just the assistant message, routed to
-/// the right endpoint (native Ollama when `ollama_num_ctx` is set, else OpenAI
-/// `/v1`). Used where streaming isn't needed: compaction summaries and subagent
-/// turns. `model` may differ from `cfg.model` (subagents can override it).
+/// One completion returning just the assistant message, for the places nothing
+/// is watching it arrive: compaction summaries and subagent turns. `model` may
+/// differ from `cfg.model` (subagents can override it).
+///
+/// Still streamed — the fragments are simply dropped. A separate non-streaming
+/// request would be a second request shape to keep in step for no gain, and
+/// keeping it was what let `response_format` and images quietly apply to one
+/// path and not the other.
 fn chat_once(cfg: &LoopConfig, model: &str, messages: &[ChatMessage], tools: &[Value], cancel: &AtomicBool) -> Result<ChatMessage, String> {
-    match cfg.ollama_num_ctx {
-        Some(num_ctx) => {
-            let (msg, _usage) =
-                ollama::post_chat_stream(&cfg.base_url, model, messages, tools, num_ctx, wire::RequestExtras::default(), cancel, |_| {})?;
-            Ok(msg)
-        }
-        None => {
-            let resp = wire::post_chat(&cfg.base_url, cfg.api_key.as_deref(), model, messages, tools, cfg.prompt_cache)?;
-            resp.choices
-                .into_iter()
-                .next()
-                .map(|choice| choice.message)
-                .ok_or_else(|| "the endpoint returned no choices".to_owned())
-        }
-    }
+    let request = chat::ChatRequest {
+        base: &cfg.base_url,
+        model,
+        messages,
+        tools,
+        api_key: cfg.api_key.as_deref(),
+        extras: chat::RequestExtras { cache: cfg.prompt_cache, ..Default::default() },
+    };
+    let (message, _usage) = chat::post_chat_stream(request, cfg.dialect, cancel, |_| {})?;
+    Ok(message)
 }
 
 /// When the windowed request would near the model's context limit, summarize the
@@ -1153,7 +1137,7 @@ mod tests {
             resume,
             store,
             context_tokens: None,
-            ollama_num_ctx: None,
+            dialect: chat::Dialect::OpenAi,
             agents: Vec::new(),
             mcp_servers: Vec::new(),
             output_schema: None,

@@ -19,60 +19,21 @@ use serde_json::{json, Value};
 
 use crate::{HarnessModel, InstalledModel, PullProgress};
 
-use super::wire::{send_with_retry, ChatMessage, Fragment, FunctionCall, RequestExtras, ThinkSplitter, ToolCall, Usage};
+use super::wire::{ChatMessage, Fragment, FunctionCall, ThinkSplitter, ToolCall, Usage};
 
 /// Keep a loaded model resident between turns so it isn't reloaded each request.
-const KEEP_ALIVE: &str = "5m";
+pub(super) const KEEP_ALIVE: &str = "5m";
 /// Temperature for the agent loop: deterministic tool selection beats creativity
 /// for a coding/notes assistant, and temp 0 is the documented recommendation for
 /// reliable tool/structured calls on small local models.
-const TEMPERATURE: f64 = 0.0;
-
-/// POST `{base}/api/chat` (streaming NDJSON) with `options.num_ctx` set so Ollama
-/// loads the intended context window. Calls `on_delta` per text/reasoning
-/// fragment as it arrives and returns the assembled assistant message + usage.
-/// Mirrors [`super::wire::post_chat_stream`] for the native endpoint.
-// Each argument is a distinct wire field, and the two `post_chat_stream`
-// variants must stay signature-symmetric so callers can swap endpoints; the
-// optional bits are already bundled in `RequestExtras`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn post_chat_stream(
-    base: &str,
-    model: &str,
-    messages: &[ChatMessage],
-    tools: &[Value],
-    num_ctx: u64,
-    extras: RequestExtras,
-    cancel: &AtomicBool,
-    on_delta: impl FnMut(Fragment),
-) -> Result<(ChatMessage, Option<Usage>), String> {
-    let url = format!("{base}/api/chat");
-    let mut body = json!({
-        "model": model,
-        "messages": to_native_messages(messages, extras.image_data_uris),
-        "stream": true,
-        "keep_alive": KEEP_ALIVE,
-        "options": { "num_ctx": num_ctx, "temperature": TEMPERATURE },
-    });
-    if !tools.is_empty() {
-        body["tools"] = Value::Array(tools.to_vec());
-    }
-    // OpenAI wraps the schema as `response_format`; native Ollama takes the bare
-    // JSON Schema in `format`.
-    if let Some(schema) = extras.response_format.and_then(native_format) {
-        body["format"] = schema;
-    }
-    let resp = send_with_retry(&url, || ureq::post(&url).send_json(body.clone()).map_err(Box::new))?;
-    let reader = BufReader::new(resp.into_reader());
-    drain_native_stream(reader.lines().map_while(Result::ok), extras.reasoning_tag, cancel, on_delta)
-}
+pub(super) const TEMPERATURE: f64 = 0.0;
 
 /// Translate our OpenAI-shaped [`ChatMessage`]s into native request messages.
 /// The one shape difference that matters: tool-call `arguments` must be a JSON
 /// *object* (native rejects the OpenAI string form), so the stored string is
 /// parsed back. Inline images ride on the first user message's `images` array as
 /// raw base64 (the part after the data-URI comma).
-fn to_native_messages(messages: &[ChatMessage], image_data_uris: &[String]) -> Vec<Value> {
+pub(super) fn to_native_messages(messages: &[ChatMessage], image_data_uris: &[String]) -> Vec<Value> {
     let mut out: Vec<Value> = messages
         .iter()
         .map(|m| {
@@ -113,14 +74,14 @@ fn attach_images(messages: &mut [Value], uris: &[String]) {
 
 /// Pull the bare JSON Schema out of an OpenAI `response_format` wrapper for
 /// native `format`; `None` when the shape isn't a json_schema wrapper.
-fn native_format(response_format: &Value) -> Option<Value> {
+pub(super) fn native_format(response_format: &Value) -> Option<Value> {
     response_format.get("json_schema")?.get("schema").cloned()
 }
 
 /// Parse a native NDJSON chat stream into the assembled assistant message +
 /// usage, invoking `on_delta` per fragment. Each line is a complete JSON object;
 /// content streams incrementally, tool calls and usage arrive whole.
-fn drain_native_stream(
+pub(super) fn drain_native_stream(
     lines: impl Iterator<Item = String>,
     reasoning_tag: Option<&str>,
     cancel: &AtomicBool,

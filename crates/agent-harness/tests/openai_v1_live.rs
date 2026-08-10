@@ -1,7 +1,7 @@
 //! The generic OpenAI-compatible `/v1` route against **real hosted providers**.
 //!
 //! `tests/ollama_route.rs` covers the native `/api/*` path Ollama gets. This
-//! covers the other branch — [`wire::post_chat_stream`] — which every non-Ollama
+//! covers the other branch — the `OpenAi` dialect — which every non-Ollama
 //! provider takes: DeepSeek, OpenRouter, vLLM, LM Studio, llama-server.
 //!
 //! These providers are *configuration*, not code: each is an `OpenHarness` with

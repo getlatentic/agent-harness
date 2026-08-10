@@ -35,6 +35,7 @@ use crate::{
     RunCallback, RunHandle, RunRequest,
 };
 
+mod chat;
 mod instructions;
 pub use instructions::InstructionSources;
 mod ollama;
@@ -477,7 +478,7 @@ impl OpenHarness {
     /// number so the two never disagree. Other providers self-manage the window:
     /// `ollama_num_ctx` is `None` (they use `/v1`) and the compaction limit is
     /// the explicit override or `None`.
-    fn resolve_context(&self, model: &str) -> (Option<u64>, Option<u64>, Option<f64>) {
+    fn resolve_context(&self, model: &str) -> (Option<u64>, chat::Dialect, Option<f64>) {
         match &self.discovery {
             Discovery::OllamaTags => {
                 // One `/api/show` yields both facts; skip it entirely when the
@@ -487,7 +488,7 @@ impl OpenHarness {
                     .context_tokens
                     .or_else(|| probed_window.map(|n| n.min(OLLAMA_CTX_CEILING)))
                     .unwrap_or(OLLAMA_CTX_DEFAULT);
-                (Some(effective), Some(effective), parameters)
+                (Some(effective), chat::Dialect::OllamaNative { num_ctx: effective }, parameters)
             }
             // A local OpenAI-compatible server the host did not size. llama.cpp
             // publishes its loaded window on `/props`, and getting it wrong here
@@ -509,7 +510,7 @@ impl OpenHarness {
                         None
                     }
                 });
-                (window, None, None)
+                (window, chat::Dialect::OpenAi, None)
             }
         }
     }
@@ -720,7 +721,7 @@ impl Harness for OpenHarness {
                 ))
             })?;
 
-        let (context_tokens, ollama_num_ctx, model_parameters_b) = self.resolve_context(&model);
+        let (context_tokens, dialect, model_parameters_b) = self.resolve_context(&model);
         let model_cost = self.model_cost_for(&model);
         // Inline images become base64 data URIs the wire attaches to the prompt.
         let image_data_uris: Vec<String> =
@@ -743,7 +744,7 @@ impl Harness for OpenHarness {
             resume,
             store: self.session_dir.clone().map(session::FileStore::new),
             context_tokens,
-            ollama_num_ctx,
+            dialect,
             agents: self.agents.clone(),
             mcp_servers: self.mcp_servers.clone(),
             output_schema: tuning.output_schema,

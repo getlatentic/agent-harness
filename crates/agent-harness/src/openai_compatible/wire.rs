@@ -1,21 +1,21 @@
-//! The OpenAI-compatible chat wire format + the blocking HTTP calls.
+//! The OpenAI-compatible chat wire format, and the HTTP pieces shared with the
+//! native Ollama path.
 //!
-//! Works against any endpoint that speaks the OpenAI
-//! `/v1/chat/completions` shape — OpenRouter, vLLM, LM Studio, and Ollama's
-//! `/v1` shim. Ollama's native `/api/*` endpoints (used for local models so
-//! `num_ctx` can be set) live in [`super::ollama`], which reuses this module's
-//! [`ThinkSplitter`] and [`send_with_retry`]. HTTP is blocking (`ureq`), driven
-//! from the worker thread `run()` spawns; errors come back as `String` and the
-//! loop turns them into a [`crate::RunEvent::Error`].
+//! The message and usage types here are the crate's internal currency: both
+//! dialects in [`super::chat`] speak them, and [`super::ollama`] translates
+//! to and from its own shape at the edge. This module also owns the parts
+//! neither dialect should reimplement — the retry policy, the SSE drain, the
+//! cache breakpoints, and [`ThinkSplitter`].
+//!
+//! HTTP is blocking (`ureq`), driven from the worker thread `run()` spawns;
+//! errors come back as `String` and the loop turns them into a
+//! [`crate::RunEvent::Error`].
 
-use std::io::{BufRead, BufReader};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-
-use super::PromptCache;
 
 /// One chat message, in either direction (request history or response).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,17 +65,6 @@ pub(crate) struct FunctionCall {
     /// with `serde_json` before use.
     #[serde(default)]
     pub arguments: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ChatResponse {
-    #[serde(default)]
-    pub choices: Vec<Choice>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct Choice {
-    pub message: ChatMessage,
 }
 
 /// Token usage in the OpenAI shape, plus prompt-cache counters when the provider
@@ -137,7 +126,6 @@ pub(super) fn send_with_retry(url: &str, make: impl Fn() -> Result<ureq::Respons
         }
     }
 }
-
 
 /// Mark the cacheable prefix with Anthropic-style `cache_control` breakpoints.
 ///
@@ -239,40 +227,6 @@ fn retry_after(e: &ureq::Error) -> Option<Duration> {
     }
 }
 
-/// POST `{base}/v1/chat/completions` (blocking). `base` carries no trailing
-/// slash. `tools` is the OpenAI `tools` array (built in [`super::tools`]);
-/// when empty it's omitted.
-pub(crate) fn post_chat(
-    base: &str,
-    api_key: Option<&str>,
-    model: &str,
-    messages: &[ChatMessage],
-    tools: &[Value],
-    cache: PromptCache,
-) -> Result<ChatResponse, String> {
-    let url = format!("{base}/v1/chat/completions");
-    let mut body = json!({
-        "model": model,
-        "messages": messages,
-        "stream": false,
-    });
-    if !tools.is_empty() {
-        body["tools"] = Value::Array(tools.to_vec());
-    }
-    if cache == PromptCache::Ephemeral {
-        mark_cache_breakpoints(&mut body);
-    }
-    let resp = send_with_retry(&url, || {
-        let mut req = ureq::post(&url);
-        if let Some(key) = api_key {
-            req = req.set("Authorization", &format!("Bearer {key}"));
-        }
-        req.send_json(body.clone()).map_err(Box::new)
-    })?;
-    resp.into_json::<ChatResponse>()
-        .map_err(|e| format!("decoding chat response from {url}: {e}"))
-}
-
 /// A streamed fragment handed to the caller as it arrives: assistant text, or
 /// model reasoning (which the host renders distinctly from the answer).
 pub(crate) enum Fragment<'a> {
@@ -280,73 +234,9 @@ pub(crate) enum Fragment<'a> {
     Reasoning(&'a str),
 }
 
-/// Stream `{base}/v1/chat/completions` (SSE). Calls `on_delta` for each text /
-/// reasoning fragment as it arrives, accumulates the full assistant message
-/// (content + tool calls) and any usage, and returns them. Blocking — driven on
-/// the worker thread, like [`post_chat`].
-// Each argument is a distinct wire field, and the two `post_chat_stream`
-// variants must stay signature-symmetric so callers can swap endpoints; the
-// optional bits are already bundled in `RequestExtras`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn post_chat_stream(
-    base: &str,
-    api_key: Option<&str>,
-    model: &str,
-    messages: &[ChatMessage],
-    tools: &[Value],
-    extras: RequestExtras,
-    cancel: &AtomicBool,
-    on_delta: impl FnMut(Fragment),
-) -> Result<(ChatMessage, Option<Usage>), String> {
-    let url = format!("{base}/v1/chat/completions");
-    let mut body = json!({
-        "model": model,
-        "messages": messages,
-        "stream": true,
-        "stream_options": { "include_usage": true },
-    });
-    if !tools.is_empty() {
-        body["tools"] = Value::Array(tools.to_vec());
-    }
-    if let Some(rf) = extras.response_format {
-        body["response_format"] = rf.clone();
-    }
-    if !extras.image_data_uris.is_empty() {
-        attach_images(&mut body, extras.image_data_uris);
-    }
-    // Last, so the breakpoint lands on the final tool after the list is settled.
-    if extras.cache == PromptCache::Ephemeral {
-        mark_cache_breakpoints(&mut body);
-    }
-    let resp = send_with_retry(&url, || {
-        let mut req = ureq::post(&url);
-        if let Some(key) = api_key {
-            req = req.set("Authorization", &format!("Bearer {key}"));
-        }
-        req.send_json(body.clone()).map_err(Box::new)
-    })?;
-    let reader = BufReader::new(resp.into_reader());
-    Ok(drain_stream(reader.lines().map_while(Result::ok), extras.reasoning_tag, cancel, on_delta))
-}
-
-/// Optional request shaping beyond messages + tools, bundled so `post_chat_stream`
-/// stays within its argument budget.
-#[derive(Default)]
-pub(crate) struct RequestExtras<'a> {
-    /// OpenAI `response_format` for structured output, if any.
-    pub response_format: Option<&'a Value>,
-    /// Image data URIs to attach to the first user message (multimodal input).
-    pub image_data_uris: &'a [String],
-    /// Inline reasoning tag to lift out of the stream (e.g. `Some("think")` for
-    /// `<think>…</think>`); `None` disables extraction. See [`ThinkSplitter`].
-    pub reasoning_tag: Option<&'a str>,
-    /// Whether to mark the prompt prefix as cacheable.
-    pub cache: PromptCache,
-}
-
 /// Rewrite the first user message's content into a multimodal parts array — the
 /// original text plus one `image_url` part per data URI (the OpenAI vision shape).
-fn attach_images(body: &mut Value, uris: &[String]) {
+pub(super) fn attach_images(body: &mut Value, uris: &[String]) {
     let Some(messages) = body["messages"].as_array_mut() else { return };
     let Some(first_user) = messages.iter_mut().find(|m| m["role"] == "user") else { return };
     let text = first_user["content"].as_str().unwrap_or_default().to_owned();
@@ -382,7 +272,7 @@ fn base64_encode(data: &[u8]) -> String {
 /// Parse an OpenAI SSE chat stream into the assembled assistant message + usage,
 /// invoking `on_delta` per text fragment. Split out from the HTTP so it's unit-
 /// testable without a live endpoint.
-fn drain_stream(
+pub(super) fn drain_stream(
     lines: impl Iterator<Item = String>,
     reasoning_tag: Option<&str>,
     cancel: &AtomicBool,
@@ -838,13 +728,6 @@ mod tests {
         let before = body.clone();
         mark_cache_breakpoints(&mut body);
         assert_eq!(body, before, "nothing to mark must not corrupt the request");
-    }
-
-    #[test]
-    fn implicit_is_the_default_so_an_unmarked_request_stays_unmarked() {
-        // Correct everywhere; marking is wasted on providers that cache
-        // implicitly and restructures a message they never asked to change.
-        assert_eq!(PromptCache::default(), PromptCache::Implicit);
     }
 
     #[test]
