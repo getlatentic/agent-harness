@@ -7,6 +7,29 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+### Fixed
+
+- A compacted session no longer loses its summary and replays a duplicate turn.
+  Saving appended the transcript's tail, which is correct only while it grows at
+  the end; compaction inserts a summary in the middle, so the tail re-appended a
+  turn already on disk and the summary was never written at all. Resuming such a
+  session replayed the duplicate and had lost what replaced the rest of its
+  history. No API change.
+
+- Structured output and image attachments applied to streamed requests but not
+  to the non-streaming path used for compaction summaries and subagent turns.
+  There is now one request builder, so the two cannot disagree ([#41]).
+
+### Changed
+
+- Internal: the OpenAI `/v1` and native Ollama `/api/chat` request builders are
+  one function parameterised by a `Dialect`, rather than two near-identical
+  eight-argument twins kept in step by hand. The non-streaming `post_chat` is
+  gone — the same streamed builder serves callers that ignore the fragments.
+  Nothing public changed ([#41]).
+
+[#41]: https://github.com/getlatentic/agent-harness/issues/41
+
 ## [0.5.0] - 2026-08-09
 
 `agent-harness` 0.5.0.
