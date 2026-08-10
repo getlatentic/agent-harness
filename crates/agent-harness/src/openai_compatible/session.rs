@@ -456,6 +456,82 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_session_reads_as_an_error_and_not_as_an_absent_one() {
+        // "Missing" and "unreadable" must not collapse into one answer. A
+        // sessions directory that cannot be read presenting as "you have no
+        // sessions" is how a conversation disappears with nothing failing.
+        let dir = scratch("unreadable");
+        let store = FileStore::new(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // A file where the sessions directory should be.
+        std::fs::write(dir.join("sessions"), "not a directory").unwrap();
+        assert!(store.list_records().is_err(), "an unlistable directory is not an empty one");
+        std::fs::remove_file(dir.join("sessions")).unwrap();
+
+        // A directory where a transcript should be.
+        std::fs::create_dir_all(dir.join("sessions").join("s1.jsonl")).unwrap();
+        assert!(store.load_messages("s1").is_err(), "an unreadable transcript is not an empty one");
+
+        // A directory where a legacy record should be.
+        std::fs::create_dir_all(dir.join("sessions").join("s2.json")).unwrap();
+        assert!(store.get_record("s2").is_err(), "an unreadable record is not an absent one");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_record_written_by_an_older_build_still_loads_and_lists() {
+        // The legacy layout kept metadata in its own `sessions/<id>.json`.
+        // Reading only the transcript would resume the conversation while
+        // losing its title and model, so the session comes back nameless.
+        let dir = scratch("legacyrec");
+        let store = FileStore::new(&dir);
+        let path = dir.join("sessions").join("s1.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let record = SessionRecord {
+            id: "s1".to_owned(),
+            title: Some("an older chat".to_owned()),
+            model: Some("m".to_owned()),
+            cwd: None,
+            parent_id: None,
+            created_at: 5,
+            updated_at: 5,
+        };
+        std::fs::write(&path, serde_json::to_string(&record).unwrap()).unwrap();
+
+        assert_eq!(store.get_record("s1").unwrap().unwrap().title.as_deref(), Some("an older chat"));
+        let listed = store.list_records().unwrap();
+        assert_eq!(listed.len(), 1, "a legacy record lists alongside current ones");
+        assert_eq!(listed[0].id, "s1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_header_without_an_id_is_not_a_session() {
+        // A first line that parses does not make it a header: an id is what a
+        // session is addressed by, so listing one puts an entry in a sessions
+        // view that cannot be opened.
+        let dir = scratch("noid");
+        let store = FileStore::new(&dir);
+        let path = dir.join("sessions").join("s1.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{\"type\":\"session\",\"id\":\"\",\"created_at\":0,\"updated_at\":0}\n").unwrap();
+
+        assert!(store.get_record("s1").unwrap().is_none());
+        assert!(store.list_records().unwrap().is_empty(), "an id-less header is skipped, not listed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_timestamps_come_from_a_real_clock() {
+        // `updated_at` is what orders a sessions list. A constant clock leaves
+        // every session equal and the order arbitrary, which a round trip
+        // through the store cannot notice.
+        let now = now_millis();
+        assert!(now > 1_700_000_000_000, "epoch milliseconds, not seconds and not a constant: {now}");
+    }
+
+    #[test]
     fn new_session_id_is_unique_and_prefixed() {
         let a = new_session_id();
         let b = new_session_id();
