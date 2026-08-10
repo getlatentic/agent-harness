@@ -344,10 +344,10 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
     // what we persist: never lossy. The request sent to the model is a *windowed
     // view* of it ([`window`]), so compaction can summarize old turns without
     // discarding them from disk.
-    let mut persisted = session.history.len();
+    let mut saved = Saved::UpTo(session.history.len());
     let mut transcript = session.history;
     transcript.push(ChatMessage::user(cfg.prompt.clone()));
-    persist(&cfg, &session.id, &transcript, &mut persisted, &on_event, rid);
+    persist(&cfg, &session.id, &transcript, &mut saved, &on_event, rid);
 
     // A `task` call spawns a subagent through this runner: the parent's
     // connection config, running a child session under this one.
@@ -367,7 +367,7 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
         // the limit (the full transcript on disk is untouched), then build the
         // windowed view to send.
         if compact_if_needed(&cfg, &mut transcript, &system_prompt, &on_event, rid, &cancel) {
-            persisted = REWRITTEN;
+            saved = Saved::Rewritten;
         }
         let mut sent = window(&system_prompt, &transcript);
         if cfg.mode == RunMode::Ask {
@@ -427,7 +427,7 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
         transcript.push(msg);
 
         if calls.is_empty() {
-            persist(&cfg, &session.id, &transcript, &mut persisted, &on_event, rid);
+            persist(&cfg, &session.id, &transcript, &mut saved, &on_event, rid);
             touch(&cfg, &session.id);
             emit_usage(&on_event, rid, usage, cfg.model_cost);
             (*on_event)(RunEvent::Exited { run_id: rid.to_owned(), exit_code: Some(0), cancelled: false });
@@ -475,7 +475,7 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
         }
         // Persist the assistant turn + its tool results, so a resume (or a crash
         // mid-run) keeps the progress made this turn.
-        persist(&cfg, &session.id, &transcript, &mut persisted, &on_event, rid);
+        persist(&cfg, &session.id, &transcript, &mut saved, &on_event, rid);
         // A tool asked to end the run (e.g. `question`, which awaits the user's
         // answer — it arrives as the next prompt on resume).
         if stop_requested {
@@ -540,16 +540,26 @@ fn resolve_session(cfg: &LoopConfig, on_event: &RunCallback) -> Result<ResolvedS
 /// best-effort; a write failure surfaces as Activity but never aborts a useful
 /// run. Never lossy: compaction inserts a summary marker, it doesn't drop
 /// messages, so the stored transcript stays the complete history.
-/// `persisted` set to this means the transcript was rewritten in place and the
-/// log no longer corresponds to it position by position, so the next save has
-/// to replace the file rather than extend it.
-pub(crate) const REWRITTEN: usize = usize::MAX;
+/// How much of the transcript is already on disk, and whether the log still
+/// lines up with it position by position.
+///
+/// Not a length with a reserved value: [`Self::Rewritten`] is a different
+/// *situation*, not a different count, and encoding it as one asks every reader
+/// to remember which lengths are really lengths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Saved {
+    /// The first `n` messages are on disk in order, so the rest can be appended.
+    UpTo(usize),
+    /// The transcript was rewritten in place, so the log no longer corresponds
+    /// to it and the next save has to replace the file rather than extend it.
+    Rewritten,
+}
 
 fn persist(
     cfg: &LoopConfig,
     session_id: &str,
     transcript: &[ChatMessage],
-    persisted: &mut usize,
+    saved: &mut Saved,
     on_event: &RunCallback,
     rid: &str,
 ) {
@@ -559,12 +569,15 @@ fn persist(
         // later message: the tail slice then re-appends a turn already on disk
         // and never writes the summary at all. A compacted session resumed that
         // way replays a duplicate turn and has lost what replaced the rest.
-        let result = if *persisted != REWRITTEN && transcript.len() >= *persisted {
-            store.append_messages(session_id, &transcript[*persisted..])
-        } else {
-            store.replace_messages(session_id, transcript)
+        let tail = match *saved {
+            Saved::UpTo(n) => transcript.get(n..),
+            Saved::Rewritten => None,
         };
-        *persisted = transcript.len();
+        let result = match tail {
+            Some(tail) => store.append_messages(session_id, tail),
+            None => store.replace_messages(session_id, transcript),
+        };
+        *saved = Saved::UpTo(transcript.len());
         if let Err(e) = result {
             (*on_event)(RunEvent::Activity { run_id: rid.to_owned(), message: format!("transcript not saved: {e}") });
         }
@@ -1170,6 +1183,31 @@ mod tests {
         let rec = store.get_record(&s.id).unwrap().expect("record persisted");
         assert_eq!(rec.title.as_deref(), Some("Do the thing"));
         assert_eq!(rec.model.as_deref(), Some("m"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_normal_save_extends_the_log_while_a_rewritten_one_replaces_it() {
+        // When the log and the transcript agree, appending the tail and
+        // rewriting the file produce the same bytes, so the choice can only be
+        // asserted where they differ. Getting it wrong is silent either way: a
+        // resumed conversation that grows a duplicate turn, or loses one.
+        let dir = scratch("persist");
+        let store = FileStore::new(&dir);
+        let config = cfg("p", None, Some(store.clone()));
+        let (cb, _) = capturing();
+        store.append_messages("s1", &[ChatMessage::user("already on disk")]).unwrap();
+
+        let mut saved = Saved::UpTo(0);
+        persist(&config, "s1", &[ChatMessage::user("new")], &mut saved, &cb, "t");
+        assert_eq!(store.load_messages("s1").unwrap().len(), 2, "an append extends the log");
+        assert_eq!(saved, Saved::UpTo(1), "and records how much of the transcript is now on disk");
+
+        let mut saved = Saved::Rewritten;
+        persist(&config, "s1", &[ChatMessage::user("summary")], &mut saved, &cb, "t");
+        let loaded = store.load_messages("s1").unwrap();
+        assert_eq!(loaded.len(), 1, "a rewritten transcript replaces the log whole");
+        assert_eq!(loaded[0].content.as_deref(), Some("summary"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
