@@ -1210,6 +1210,12 @@ mod tests {
             estimate_tokens(&[only_a_call]) >= 100,
             "the arguments are what was sent, whether or not anything was said"
         );
+
+        // And a call taking no arguments still costs its name — `list` and
+        // `glob` are called bare, and a loop of them is not free.
+        let mut bare = calling("list", "");
+        bare.content = None;
+        assert!(estimate_tokens(&[bare]) > 0, "a no-argument call still occupies the prompt");
     }
 
     #[test]
