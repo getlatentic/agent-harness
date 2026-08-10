@@ -1199,17 +1199,16 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_call_counts_toward_the_estimate_that_triggers_compaction() {
-        // Arguments are frequently the bulk of a turn — a written file, a patch,
-        // a query. Counting only the visible text puts the trigger below what is
-        // actually sent, which is the failure compaction exists to prevent.
-        let text = vec![ChatMessage::user("on it")];
-        let with_call = vec![calling("write", &"a".repeat(400))];
+    fn a_turn_that_is_only_a_tool_call_still_counts_toward_the_estimate() {
+        // The common shape: the model answers with tool calls and no prose, and
+        // the arguments are the bulk of it — a written file, a patch, a query.
+        // Scoring that turn by its (absent) content makes a transcript of tool
+        // work look empty to the check that decides when to compact.
+        let mut only_a_call = calling("write", &"a".repeat(400));
+        only_a_call.content = None;
         assert!(
-            estimate_tokens(&with_call) > estimate_tokens(&text),
-            "{} should exceed {}",
-            estimate_tokens(&with_call),
-            estimate_tokens(&text)
+            estimate_tokens(&[only_a_call]) >= 100,
+            "the arguments are what was sent, whether or not anything was said"
         );
     }
 

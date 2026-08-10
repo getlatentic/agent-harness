@@ -486,25 +486,30 @@ fn a_wider_window_keeps_more_of_the_conversation_verbatim() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// Compaction is idempotent when nothing new has been said. The summary marker
-/// is where the last one ended, and only turns *after* it are candidates —
-/// otherwise a long session accumulates summaries of its own summaries.
+/// A second compaction summarizes only what is new. The marker is where the
+/// last one ended, and only turns *after* it are candidates — otherwise a long
+/// session accumulates summaries of its own summaries.
+///
+/// Two runs, identical but for the length of the tail after the marker. The
+/// short one must decline and the long one must compact: without the second
+/// half this test passes just as well when the threshold is never reached at
+/// all, which is exactly how its first version went vacuous.
 #[test]
-fn compacting_again_with_nothing_new_to_summarize_is_a_no_op() {
-    let (root, session_id) =
-        seeded_session_parts("idempotent", &[Part::Turns(40), Part::Summary, Part::Turns(4)]);
-    let tags = json!({ "models": [ { "name": "test-model" } ] });
-    let (base, seen) = fake_ollama_with_context(tags, vec![done_line("Answer.")], 12_000);
+fn a_second_compaction_summarizes_only_what_is_new() {
+    // Small enough that the windowed view — which starts at the marker, not at
+    // the beginning — is over the threshold on its own.
+    const WINDOW: u64 = 1_200;
 
-    // Over the threshold, so compaction is considered — and declines, because
-    // the four turns since the last summary already fit the verbatim tail.
-    let harness = OpenHarness::ollama_at(&base).with_session_dir(&root).with_context_tokens(12_000);
+    let (root, session_id) =
+        seeded_session_parts("nothingnew", &[Part::Turns(10), Part::Summary, Part::Turns(4)]);
+    let tags = json!({ "models": [ { "name": "test-model" } ] });
+    let (base, seen) = fake_ollama_with_context(tags, vec![done_line("Answer.")], WINDOW);
+    let harness = OpenHarness::ollama_at(&base).with_session_dir(&root).with_context_tokens(WINDOW);
     let events = collect_resuming(&harness, "and finally?", Some(session_id.clone()));
 
-    assert!(!compaction_fired(&events), "nothing new to summarize: {events:?}");
+    assert!(!compaction_fired(&events), "the turns since the summary still fit: {events:?}");
     let chats = seen.lock().unwrap().iter().filter(|(u, _)| u.starts_with("/api/chat")).count();
     assert_eq!(chats, 1, "no summarization request, just the turn");
-
     let saved = std::fs::read_to_string(root.join("sessions").join(format!("{session_id}.jsonl")))
         .expect("the session file");
     assert_eq!(
@@ -512,6 +517,22 @@ fn compacting_again_with_nothing_new_to_summarize_is_a_no_op() {
         1,
         "the existing summary is not joined by a summary of itself"
     );
+    let _ = std::fs::remove_dir_all(&root);
+
+    // Same window, same marker, more said since: now there is something to
+    // summarize, so it fires. This is what proves the case above declined on
+    // the boundary rather than never being considered.
+    let (root, session_id) =
+        seeded_session_parts("somethingnew", &[Part::Turns(10), Part::Summary, Part::Turns(14)]);
+    let tags = json!({ "models": [ { "name": "test-model" } ] });
+    let (base, _seen) = fake_ollama_with_context(
+        tags,
+        vec![done_line("A summary of the newer turns."), done_line("Answer.")],
+        WINDOW,
+    );
+    let harness = OpenHarness::ollama_at(&base).with_session_dir(&root).with_context_tokens(WINDOW);
+    let events = collect_resuming(&harness, "and finally?", Some(session_id));
+    assert!(compaction_fired(&events), "a tail past the budget is summarized: {events:?}");
     let _ = std::fs::remove_dir_all(&root);
 }
 
