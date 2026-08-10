@@ -48,11 +48,27 @@ fn fake_ollama_full(
     context_length: u64,
     parameter_count: u64,
 ) -> (String, Seen) {
+    let mut turns = chat_turns.into_iter();
+    fake_ollama_responding(tags, context_length, parameter_count, move || {
+        // Extra turns end the loop rather than hanging it.
+        (200, turns.next().unwrap_or_else(|| done_line("")))
+    })
+}
+
+/// The stand-in itself: `/api/tags` and `/api/show` answer from the given facts,
+/// and every `/api/chat` is answered by `chat`, which chooses the status as well
+/// as the body — a provider refusing an over-long prompt is a 400, not a stream,
+/// so a helper that can only return 200 cannot express it.
+fn fake_ollama_responding(
+    tags: Value,
+    context_length: u64,
+    parameter_count: u64,
+    mut chat: impl FnMut() -> (u16, String) + Send + 'static,
+) -> (String, Seen) {
     let server = tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port");
     let base = format!("http://{}", server.server_addr());
     let seen: Seen = Arc::default();
     let log = Arc::clone(&seen);
-    let turns = Arc::new(Mutex::new(chat_turns.into_iter()));
 
     thread::spawn(move || {
         while let Ok(mut request) = server.recv() {
@@ -62,30 +78,26 @@ fn fake_ollama_full(
             let parsed: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
             log.lock().unwrap().push((url.clone(), parsed));
 
-            let body = if url.starts_with("/api/tags") {
-                tags.to_string()
+            let (status, body) = if url.starts_with("/api/tags") {
+                (200, tags.to_string())
             } else if url.starts_with("/api/show") {
                 // Ollama keys this by architecture (`qwen2.context_length`), and the
                 // parser scans for that suffix — a bare `context_length` silently
                 // falls back to the default and makes this stub decorative.
-                json!({
+                let info = json!({
                     "model_info": {
                         "qwen2.context_length": context_length,
                         "general.parameter_count": parameter_count,
                     }
-                })
-                .to_string()
+                });
+                (200, info.to_string())
             } else if url.starts_with("/api/chat") {
-                match turns.lock().unwrap().next() {
-                    Some(ndjson) => ndjson,
-                    // Extra turns end the loop rather than hanging it.
-                    None => done_line("").to_string(),
-                }
+                chat()
             } else {
-                String::new()
+                (200, String::new())
             };
             let _ = request.respond(tiny_http::Response::new(
-                tiny_http::StatusCode(200),
+                tiny_http::StatusCode(status),
                 Vec::new(),
                 Cursor::new(body.into_bytes()),
                 None,
@@ -393,6 +405,85 @@ fn a_resumed_conversation_past_the_context_limit_is_compacted_and_saved() {
         1,
         "the prompt is saved once, not once per save after a mid-transcript insert"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The provider gets the last word on whether a prompt fits. Our own estimate
+/// is `len / 4`, so a run can be under the threshold by that count and still be
+/// refused — and the answer is to compact against what the provider actually
+/// said and retry, not to end the run on a guess that was already wrong.
+#[test]
+fn a_prompt_the_provider_refuses_as_too_long_is_compacted_and_retried() {
+    let (root, session_id) = seeded_session("retry", 40);
+    let tags = json!({ "models": [ { "name": "test-model" } ] });
+    let mut call = 0;
+    let (base, seen) = fake_ollama_responding(tags, 20_000, 24_000_000_000, move || {
+        call += 1;
+        match call {
+            // llama.cpp's wording, which `is_context_overflow` matches on.
+            1 => (400, json!({ "error": "the request exceeds the available context size" }).to_string()),
+            2 => (200, done_line("A summary of the earlier turns.")),
+            _ => (200, done_line("Answer after retrying.")),
+        }
+    });
+
+    // Wide enough that the seeded history is comfortably under the threshold
+    // compaction fires on by itself: the refusal has to be what triggers it,
+    // or this tests the proactive path a second time.
+    let harness = OpenHarness::ollama_at(&base).with_session_dir(&root).with_context_tokens(20_000);
+    let events = collect_resuming(&harness, "and finally?", Some(session_id));
+
+    assert!(
+        events.iter().any(|e| matches!(e, RunEvent::Exited { .. })),
+        "the refusal is recoverable, so the run finishes: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, RunEvent::Error { .. })),
+        "and does not surface the refusal as the run's outcome: {events:?}"
+    );
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::Text { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(text.contains("Answer after retrying"), "the retried turn is what the caller sees, got {text:?}");
+
+    let chats = seen.lock().unwrap().iter().filter(|(u, _)| u.starts_with("/api/chat")).count();
+    assert_eq!(chats, 3, "refused, summarized, retried");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The other half: only an overflow is worth retrying. Treating every failure
+/// as one spends a summarization request on an error that will repeat, and
+/// buries the provider's actual complaint behind it.
+#[test]
+fn a_failure_that_is_not_about_length_ends_the_run_without_compacting() {
+    let (root, session_id) = seeded_session("nonoverflow", 40);
+    let tags = json!({ "models": [ { "name": "test-model" } ] });
+    // A 400, not a 5xx: a transient status is retried by `send_with_retry`
+    // before the loop ever sees it, which is a different mechanism.
+    let (base, seen) = fake_ollama_responding(tags, 20_000, 24_000_000_000, || {
+        (400, json!({ "error": "model \"test-model\" not found, try pulling it first" }).to_string())
+    });
+
+    let harness = OpenHarness::ollama_at(&base).with_session_dir(&root).with_context_tokens(20_000);
+    let events = collect_resuming(&harness, "and finally?", Some(session_id));
+
+    let errored = events
+        .iter()
+        .any(|e| matches!(e, RunEvent::Error { message, .. } if message.contains("not found")));
+    assert!(errored, "the provider's own complaint reaches the caller: {events:?}");
+    assert!(
+        !events.iter().any(|e| {
+            matches!(e, RunEvent::Activity { message, .. } if message.contains("compacted the conversation"))
+        }),
+        "and nothing is summarized on the way out: {events:?}"
+    );
+
+    let chats = seen.lock().unwrap().iter().filter(|(u, _)| u.starts_with("/api/chat")).count();
+    assert_eq!(chats, 1, "one attempt, no retry");
     let _ = std::fs::remove_dir_all(&root);
 }
 
