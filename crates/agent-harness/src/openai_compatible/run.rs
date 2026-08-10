@@ -1186,6 +1186,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn calling(name: &str, arguments: &str) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_owned(),
+            content: Some("on it".to_owned()),
+            tool_calls: vec![wire::ToolCall {
+                id: "c1".to_owned(),
+                function: wire::FunctionCall { name: name.to_owned(), arguments: arguments.to_owned() },
+            }],
+            tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn a_tool_call_counts_toward_the_estimate_that_triggers_compaction() {
+        // Arguments are frequently the bulk of a turn — a written file, a patch,
+        // a query. Counting only the visible text puts the trigger below what is
+        // actually sent, which is the failure compaction exists to prevent.
+        let text = vec![ChatMessage::user("on it")];
+        let with_call = vec![calling("write", &"a".repeat(400))];
+        assert!(
+            estimate_tokens(&with_call) > estimate_tokens(&text),
+            "{} should exceed {}",
+            estimate_tokens(&with_call),
+            estimate_tokens(&text)
+        );
+    }
+
+    #[test]
+    fn only_an_over_long_tool_result_is_shortened_for_the_summary() {
+        let over = "x".repeat(2_001);
+        let at_cap = "y".repeat(2_000);
+
+        assert!(flatten_for_summary(&[ChatMessage::tool_result("c", &over)]).contains("[truncated]"));
+        assert!(
+            !flatten_for_summary(&[ChatMessage::tool_result("c", &at_cap)]).contains("[truncated]"),
+            "the cap is a maximum, not a length to reach"
+        );
+
+        // The cap is for tool output specifically. A long answer is the model's
+        // own reasoning, and cutting it is how a summary loses the thread.
+        let long_answer = ChatMessage { role: "assistant".to_owned(), content: Some(over), tool_calls: Vec::new(), tool_call_id: None };
+        assert!(
+            !flatten_for_summary(&[long_answer]).contains("[truncated]"),
+            "only tool output is capped"
+        );
+    }
+
     #[test]
     fn a_normal_save_extends_the_log_while_a_rewritten_one_replaces_it() {
         // When the log and the transcript agree, appending the tail and

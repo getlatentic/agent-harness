@@ -330,6 +330,17 @@ fn a_tiny_model_gets_the_small_surface_despite_a_huge_window() {
 /// A session store holding one long conversation, so a resumed run has enough
 /// history to be worth compacting. Returns the store root and the session id.
 fn seeded_session(tag: &str, turns: usize) -> (std::path::PathBuf, String) {
+    seeded_session_parts(tag, &[Part::Turns(turns)])
+}
+
+/// A piece of a seeded conversation, so a test can place a summary marker part
+/// way through and give it a tail.
+enum Part {
+    Turns(usize),
+    Summary,
+}
+
+fn seeded_session_parts(tag: &str, parts: &[Part]) -> (std::path::PathBuf, String) {
     let root = std::env::temp_dir().join(format!("hl-compact-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("sessions")).unwrap();
@@ -338,17 +349,34 @@ fn seeded_session(tag: &str, turns: usize) -> (std::path::PathBuf, String) {
     let mut lines = vec![format!(
         r#"{{"type":"session","id":"{id}","title":"long","created_at":1,"updated_at":1}}"#
     )];
-    for i in 0..turns {
-        let filler = "some earlier discussion that is long enough to matter ".repeat(6);
-        lines.push(format!(
-            r#"{{"type":"message","role":"user","content":"question {i}: {filler}"}}"#
-        ));
-        lines.push(format!(
-            r#"{{"type":"message","role":"assistant","content":"answer {i}: {filler}"}}"#
-        ));
+    let mut i = 0;
+    for part in parts {
+        match part {
+            Part::Summary => lines.push(
+                r#"{"type":"message","role":"compaction","content":"An earlier summary."}"#.to_owned(),
+            ),
+            Part::Turns(turns) => {
+                for _ in 0..*turns {
+                    let filler = "some earlier discussion that is long enough to matter ".repeat(6);
+                    lines.push(format!(
+                        r#"{{"type":"message","role":"user","content":"question {i}: {filler}"}}"#
+                    ));
+                    lines.push(format!(
+                        r#"{{"type":"message","role":"assistant","content":"answer {i}: {filler}"}}"#
+                    ));
+                    i += 1;
+                }
+            }
+        }
     }
     std::fs::write(root.join("sessions").join(format!("{id}.jsonl")), lines.join("\n") + "\n").unwrap();
     (root, id.to_owned())
+}
+
+fn compaction_fired(events: &[RunEvent]) -> bool {
+    events.iter().any(|e| {
+        matches!(e, RunEvent::Activity { message, .. } if message.contains("compacted the conversation"))
+    })
 }
 
 /// Compaction, end to end. Every piece of it had unit tests — `tail_boundary`,
@@ -404,6 +432,85 @@ fn a_resumed_conversation_past_the_context_limit_is_compacted_and_saved() {
         saved.matches(r#""content":"and finally?""#).count(),
         1,
         "the prompt is saved once, not once per save after a mid-transcript insert"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Compaction reserves *half* the window, not a sliver, and fires while there
+/// is still room. On a small local window a quarter is only ~1K of headroom, so
+/// the request brushes the limit before compaction fires and the model
+/// truncates mid-prompt — the reserve is what buys the slack.
+#[test]
+fn compaction_fires_while_half_the_window_is_still_free() {
+    let (root, session_id) = seeded_session("halffree", 40);
+    let tags = json!({ "models": [ { "name": "test-model" } ] });
+    let (base, _seen) = fake_ollama_with_context(
+        tags,
+        vec![done_line("A summary of the earlier turns."), done_line("Answer.")],
+        12_000,
+    );
+
+    // The seeded history is well under this window, and over half of it. A
+    // reserve that shrank to nothing would wait until the window was full.
+    let harness = OpenHarness::ollama_at(&base).with_session_dir(&root).with_context_tokens(12_000);
+    let events = collect_resuming(&harness, "and finally?", Some(session_id));
+
+    assert!(compaction_fired(&events), "a conversation past half the window is compacted: {events:?}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// How much of the conversation survives verbatim scales with the window. The
+/// tail budget is a quarter of it, so a wide window keeps the recent turns
+/// intact where a narrow one summarizes nearly everything.
+#[test]
+fn a_wider_window_keeps_more_of_the_conversation_verbatim() {
+    let (root, session_id) = seeded_session("verbatim", 140);
+    let tags = json!({ "models": [ { "name": "test-model" } ] });
+    let (base, _seen) = fake_ollama_with_context(
+        tags,
+        vec![done_line("A summary of the earlier turns."), done_line("Answer.")],
+        32_000,
+    );
+
+    let harness = OpenHarness::ollama_at(&base).with_session_dir(&root).with_context_tokens(32_000);
+    let events = collect_resuming(&harness, "and finally?", Some(session_id.clone()));
+    assert!(compaction_fired(&events), "the seeded history is over the threshold: {events:?}");
+
+    let saved = std::fs::read_to_string(root.join("sessions").join(format!("{session_id}.jsonl")))
+        .expect("the session file");
+    // Everything after the marker was kept rather than summarized. A quarter of
+    // this window is ~8k tokens of tail, which is tens of messages; a budget
+    // that ignored the window would leave roughly a dozen.
+    let kept = saved.lines().skip_while(|l| !l.contains(r#""role":"compaction""#)).count() - 1;
+    assert!(kept >= 30, "a 32k window should keep tens of turns verbatim, kept {kept}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Compaction is idempotent when nothing new has been said. The summary marker
+/// is where the last one ended, and only turns *after* it are candidates —
+/// otherwise a long session accumulates summaries of its own summaries.
+#[test]
+fn compacting_again_with_nothing_new_to_summarize_is_a_no_op() {
+    let (root, session_id) =
+        seeded_session_parts("idempotent", &[Part::Turns(40), Part::Summary, Part::Turns(4)]);
+    let tags = json!({ "models": [ { "name": "test-model" } ] });
+    let (base, seen) = fake_ollama_with_context(tags, vec![done_line("Answer.")], 12_000);
+
+    // Over the threshold, so compaction is considered — and declines, because
+    // the four turns since the last summary already fit the verbatim tail.
+    let harness = OpenHarness::ollama_at(&base).with_session_dir(&root).with_context_tokens(12_000);
+    let events = collect_resuming(&harness, "and finally?", Some(session_id.clone()));
+
+    assert!(!compaction_fired(&events), "nothing new to summarize: {events:?}");
+    let chats = seen.lock().unwrap().iter().filter(|(u, _)| u.starts_with("/api/chat")).count();
+    assert_eq!(chats, 1, "no summarization request, just the turn");
+
+    let saved = std::fs::read_to_string(root.join("sessions").join(format!("{session_id}.jsonl")))
+        .expect("the session file");
+    assert_eq!(
+        saved.matches(r#""role":"compaction""#).count(),
+        1,
+        "the existing summary is not joined by a summary of itself"
     );
     let _ = std::fs::remove_dir_all(&root);
 }
