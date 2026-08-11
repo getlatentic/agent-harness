@@ -32,7 +32,7 @@ pub use events::{
 };
 pub use raw::parse_raw_line;
 pub use harness::{
-    run_login_command, BoxError, CredentialSpec, Harness, HarnessCapabilities, HarnessError,
+    run_login_command, Attachment, BoxError, CredentialSpec, Harness, HarnessCapabilities, HarnessError,
     HarnessInfo, HarnessModel, HarnessReadiness, InstallCallback, InstalledModel, InstallHint,
     ModelManagement,
     PullProgress, PullProgressAggregator, PullProgressCallback, ReasoningEffort, RunCallback,
