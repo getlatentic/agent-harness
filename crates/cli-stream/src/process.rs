@@ -93,16 +93,36 @@ pub struct Spawn {
 }
 
 impl Spawn {
-    /// A run of `program` in `cwd`, with stdin closed.
-    pub fn new(program: impl Into<PathBuf>, cwd: impl Into<PathBuf>, run_id: impl Into<String>) -> Self {
+    /// A run of `program`, in the current directory, with stdin closed.
+    ///
+    /// The program is the only thing a spawn cannot default, so it is the only
+    /// argument. Everything else is a named method — three bare strings in a
+    /// row read as "which one was the cwd again?".
+    pub fn new(program: impl Into<PathBuf>) -> Self {
         Self {
             program: program.into(),
             args: Vec::new(),
             env: Vec::new(),
-            cwd: cwd.into(),
-            run_id: run_id.into(),
+            cwd: std::env::current_dir().unwrap_or_default(),
+            run_id: String::new(),
             stdin: Stdin::Closed,
         }
+    }
+
+    /// Where the child runs. Defaults to the current directory.
+    #[must_use]
+    pub fn cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.cwd = cwd.into();
+        self
+    }
+
+    /// A correlation id echoed on every [`ProcessEvent`], for a caller
+    /// multiplexing several runs through one callback. Defaults to empty —
+    /// with one run the handle already identifies it.
+    #[must_use]
+    pub fn run_id(mut self, run_id: impl Into<String>) -> Self {
+        self.run_id = run_id.into();
+        self
     }
 
     /// `.args(["--stdio"])` — anything string-like, borrowed or owned.
@@ -244,7 +264,7 @@ impl ProcessHandle {
 ///
 /// # fn main() -> Result<(), cli_stream::StreamError> {
 /// let handle = spawn_streaming(
-///     Spawn::new("echo", std::env::current_dir().unwrap(), "run-1")
+///     Spawn::new("echo").cwd(std::env::current_dir().unwrap()).run_id("run-1")
 ///         .args(vec!["hello".to_owned()]),
 ///     |event| match event {
 ///         ProcessEvent::Stdout { line, .. } => println!("{line}"),
@@ -257,6 +277,39 @@ impl ProcessHandle {
 /// # Ok(())
 /// # }
 /// ```
+///
+/// Spawn and read the events off a channel, rather than supplying a callback.
+///
+/// The same run either way; this is the shape to reach for when the reading is
+/// a loop rather than a reaction:
+///
+/// ```no_run
+/// use cli_stream::{spawn, ProcessEvent, Spawn};
+///
+/// # fn main() -> Result<(), cli_stream::StreamError> {
+/// let (handle, events) = spawn(Spawn::new("echo").args(["hi"]))?;
+/// for event in events {
+///     if let ProcessEvent::Stdout { line, .. } = event {
+///         println!("{line}");
+///     }
+/// }
+/// # let _ = handle;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// The channel closes on its own when the run ends: the forwarding callback is
+/// the only owner of the `Sender`).run_id(and it drops with the reader threads.
+pub fn spawn(spawn: Spawn) -> Result<(ProcessHandle, std::sync::mpsc::Receiver<ProcessEvent>), StreamError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = spawn_streaming(spawn, move |event| {
+        // A hung-up receiver is not an error: the run continues, and the event
+        // nobody is waiting for is dropped.
+        let _ = tx.send(event);
+    })?;
+    Ok((handle, rx))
+}
+
 pub fn spawn_streaming<F>(spawn: Spawn, callback: F) -> Result<ProcessHandle, StreamError>
 where
     F: FnMut(ProcessEvent) + Send + Sync + Clone + 'static,
@@ -500,7 +553,7 @@ mod tests {
     fn run(program: &str, args: &[&str]) -> Vec<ProcessEvent> {
         let (cb, events, done) = collector();
         let _handle = spawn_streaming(
-            Spawn::new(program, ".", "t").args(args.iter().copied()),
+            Spawn::new(program).run_id("t").args(args.iter().copied()),
             cb,
         )
         .expect("spawn");
@@ -552,7 +605,7 @@ mod tests {
         // directly (the other lifecycle tests pass an empty env).
         let (cb, events, done) = collector();
         let _handle = spawn_streaming(
-            Spawn::new(PathBuf::from("sh"), PathBuf::from("."), "t".to_owned()).args(vec![
+            Spawn::new("sh").run_id("t").args(vec![
                 "-c".to_owned(),
                 "printf '%s\\n' \"$CLI_STREAM_STUB\"".to_owned(),
             ]).env(vec![("CLI_STREAM_STUB".to_owned(), "from-env".to_owned())]),
@@ -593,7 +646,7 @@ mod tests {
         // far sooner than 10s. `exec` so the process *is* sleep (no orphan).
         let (cb, events, done) = collector();
         let handle = spawn_streaming(
-            Spawn::new(PathBuf::from("sh"), PathBuf::from("."), "t".to_owned()).args(vec!["-c".to_owned(), "exec sleep 10".to_owned()]),
+            Spawn::new("sh").run_id("t").args(["-c", "exec sleep 10"]),
             cb,
         )
         .expect("spawn");
@@ -631,7 +684,7 @@ mod tests {
         // forwarding, which is exactly the kind of code that silently returns
         // the wrong constant.
         let handle = spawn_streaming(
-            Spawn::new(PathBuf::from("/bin/sleep"), std::env::temp_dir(), "pid".to_owned()).args(vec!["30".to_owned()]),
+            Spawn::new("/bin/sleep").cwd(std::env::temp_dir()).run_id("pid").args(["30"]),
             |_| {},
         )
         .expect("sleep should spawn");
@@ -647,7 +700,7 @@ mod tests {
     #[test]
     fn spawning_a_missing_binary_is_err() {
         let result = spawn_streaming(
-            Spawn::new(PathBuf::from("cli-stream-no-such-binary-zzz"), PathBuf::from("."), "t".to_owned()),
+            Spawn::new("cli-stream-no-such-binary-zzz").run_id("t"),
             |_ev: ProcessEvent| {},
         );
         // Typed: a `Spawn` error carrying the OS `NotFound` io::Error as its

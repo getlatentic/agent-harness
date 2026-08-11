@@ -169,7 +169,7 @@ impl Harness for CodexHarness {
         let parser = Arc::new(Mutex::new(CodexStreamParser::new()));
         let program = tuning.binary_path.clone().unwrap_or_else(|| PathBuf::from(&self.command));
         let handle = spawn_cli(
-            Spawn::new(program, cwd, run_id).args(args),
+            Spawn::new(program).cwd(cwd).run_id(run_id).args(args),
             move |event| {
                 // Recover a poisoned lock rather than panic on a reader
                 // thread — parsing is total, so the parser is never

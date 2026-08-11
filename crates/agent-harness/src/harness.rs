@@ -703,7 +703,7 @@ pub fn run_login_command(
     let events_cb = Arc::clone(&on_event);
     // Bound, not `_`, so the handle outlives the wait (dropping it could
     // signal the child); by the time we return, the process has exited.
-    let spawn = Spawn::new(program, std::env::current_dir().unwrap_or_default(), format!("login-{program}"))
+    let spawn = Spawn::new(program).cwd(std::env::current_dir().unwrap_or_default()).run_id(format!("login-{program}"))
         .args(args.iter().copied());
     let _handle = spawn_cli(
         spawn,
@@ -1007,7 +1007,7 @@ mod tests {
         // that finished on its own. Forwarding either wrongly is invisible
         // until a stale agent is left running.
         let child = spawn_cli(
-            Spawn::new("sleep", std::env::temp_dir(), "pid-test").args(["30"]),
+            Spawn::new("sleep").cwd(std::env::temp_dir()).run_id("pid-test").args(["30"]),
             |_| {},
         )
         .expect("sleep should spawn");

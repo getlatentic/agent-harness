@@ -180,7 +180,7 @@ impl Harness for ClaudeHarness {
         // found for a Finder-launched .app.
         let program = tuning.binary_path.clone().unwrap_or_else(|| PathBuf::from(&self.command));
         let handle = spawn_cli(
-            Spawn::new(program, cwd, run_id).args(args),
+            Spawn::new(program).cwd(cwd).run_id(run_id).args(args),
             move |event| {
                 for normalized in normalize_process_event(event, parse_claude_line) {
                     (*on_event)(normalized);

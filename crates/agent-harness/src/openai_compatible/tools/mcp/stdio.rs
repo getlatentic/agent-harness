@@ -47,7 +47,7 @@ impl StdioConnection {
         cwd: &Path,
     ) -> Result<StdioConnection, String> {
         let (tx, rx) = mpsc::channel();
-        let spawn = Spawn::new(command, cwd, format!("mcp-{server}"))
+        let spawn = Spawn::new(command).cwd(cwd).run_id(format!("mcp-{server}"))
             .args(args.iter().map(String::as_str))
             .env(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdin(Stdin::Piped);

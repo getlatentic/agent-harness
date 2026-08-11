@@ -531,7 +531,7 @@ mod spawned {
         let sink = Arc::clone(&lines);
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = Arc::clone(&done);
-        let spawn = cli_stream::Spawn::new(program, std::env::temp_dir(), "t").env(env);
+        let spawn = cli_stream::Spawn::new(program).cwd(std::env::temp_dir()).run_id("t").env(env);
         let _handle = spawn_cli(spawn, move |event| {
             match event {
                 cli_stream::ProcessEvent::Stdout { line, .. } => sink.lock().unwrap().push(line),

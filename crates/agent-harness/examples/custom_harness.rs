@@ -83,7 +83,7 @@ impl Harness for EchoHarness {
         // `Arc<Mutex>` — the same shape the built-in codex adapter uses.
         let parser = Arc::new(Mutex::new(EchoParser::default()));
         let handle = spawn_streaming(
-            Spawn::new("printf", cwd, request.run_id).args(args),
+            Spawn::new("printf").cwd(cwd).run_id(request.run_id).args(args),
             move |event| {
                 let mut parser = parser.lock().expect("echo parser mutex");
                 for ev in parser.on_process_event(event) {

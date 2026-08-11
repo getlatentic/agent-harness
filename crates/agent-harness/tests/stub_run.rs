@@ -47,7 +47,7 @@ impl Harness for StubHarness {
 
     fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
         let handle = spawn_streaming(
-            Spawn::new("sh", std::env::current_dir().unwrap_or_default(), request.run_id)
+            Spawn::new("sh").cwd(std::env::current_dir().unwrap_or_default()).run_id(request.run_id)
                 .args(["-c", &self.script]),
             move |event| {
                 for ev in normalize_process_event(event, |line| ParsedLine {
