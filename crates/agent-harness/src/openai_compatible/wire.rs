@@ -268,7 +268,9 @@ fn base64_encode(data: &[u8]) -> String {
     for chunk in data.chunks(3) {
         let b1 = *chunk.get(1).unwrap_or(&0);
         let b2 = *chunk.get(2).unwrap_or(&0);
-        let n = ((chunk[0] as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
+        // Three bytes packed big-endian into the low 24 bits, which is what
+        // base64 then reads back six bits at a time.
+        let n = u32::from_be_bytes([0, chunk[0], b1, b2]);
         out.push(ALPHABET[((n >> 18) & 63) as usize] as char);
         out.push(ALPHABET[((n >> 12) & 63) as usize] as char);
         out.push(if chunk.len() > 1 { ALPHABET[((n >> 6) & 63) as usize] as char } else { '=' });
@@ -636,6 +638,27 @@ mod tests {
         assert_eq!(backoff(1), Duration::from_secs(2));
         assert_eq!(backoff(2), Duration::from_secs(4));
         assert!(backoff(1) > backoff(0) && backoff(2) > backoff(1));
+    }
+
+    #[test]
+    fn text_held_back_as_a_possible_tag_is_neither_shown_early_nor_lost() {
+        // A delta ending in `<thi` might be the start of `<think>` or might be
+        // the answer itself. It is held until the next delta decides — and if
+        // the stream ends first, it was ordinary text all along.
+        let mut splitter = ThinkSplitter::new(Some("think"));
+        let fragments = std::cell::RefCell::new(Vec::<String>::new());
+        let mut record = |f: Fragment| match f {
+            Fragment::Text(t) | Fragment::Reasoning(t) => fragments.borrow_mut().push(t.to_owned()),
+        };
+
+        let shown = splitter.feed("<thi", &mut record);
+        assert!(shown.is_empty(), "nothing is committed to the message yet");
+        assert!(fragments.borrow().is_empty(), "and nothing is streamed — not even an empty delta");
+
+        // The stream ends without completing the tag, so it was never a tag.
+        let flushed = splitter.finish(&mut record);
+        assert_eq!(flushed, "<thi", "the held text belongs in the message, not dropped on the floor");
+        assert_eq!(*fragments.borrow(), ["<thi"], "and reaches the reader exactly once");
     }
 
     #[test]
