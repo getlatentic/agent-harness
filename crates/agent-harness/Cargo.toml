@@ -87,6 +87,12 @@ proptest.workspace = true
 # dir to exercise the executable-bit filter.
 tempfile = "3"
 
+# The readiness table covers every archetype, so it needs the ACP adapter as
+# well as the default CLI ones.
+[[example]]
+name = "discover"
+required-features = ["acp"]
+
 # The web playground drives a run from the browser over SSE; it needs the local
 # runtime (`openai-compatible`) + the ACP adapter (`acp`) to offer both
 # archetypes, so it only builds when those features are enabled.

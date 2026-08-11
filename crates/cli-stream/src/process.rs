@@ -18,7 +18,6 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(unix)]
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;

@@ -26,12 +26,8 @@
 //! — nvm-windows keeps its versions under `%APPDATA%\nvm`, which nothing here
 //! looks for yet.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::{mpsc, OnceLock};
-use std::thread;
-use std::time::Duration;
+use std::sync::OnceLock;
 
 use cli_stream::hidden_command;
 
@@ -238,71 +234,91 @@ fn keep_absolute_entries(path: &str) -> String {
 /// shell-init chatter / terminal escape sequences (e.g. iTerm2 shell
 /// integration's `]1337;…` OSC codes) the interactive shell emits before our
 /// command runs — which would otherwise prepend to the `PATH=` line.
+/// Unix only, and a module rather than scattered `#[cfg]` attributes: the
+/// imports this needs are unused on Windows, and gating them one by one is how
+/// `Arc`/`Mutex` ended up gated in `cli-stream` while the code using them was
+/// not — a break nobody sees without cross-compiling. Kept together, a mismatch
+/// cannot compile on either platform.
 #[cfg(unix)]
-const PATH_SENTINEL: &str = "__CLI_STREAM_PATH__";
+mod login_shell {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
-#[cfg(unix)]
+    const PATH_SENTINEL: &str = "__CLI_STREAM_PATH__";
+
+    pub(super) fn query() -> Option<String> {
+        let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty())?;
+        // Print a sentinel line, then dump the environment. Reading PATH from `env`
+        // (not by expanding `$PATH`) keeps it OS colon format and shell-agnostic
+        // (fish stores PATH as a list); the sentinel lets the parser ignore
+        // anything the interactive shell prints at startup before `env` runs.
+        let script = format!("printf '\\n{PATH_SENTINEL}\\n'; env");
+        let mut child = Command::new(&shell)
+            .arg("-lic") // -l: login profiles, -i: interactive rc (nvm), -c: command
+            .arg(&script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        // Read on a worker thread so the whole query can be bounded by a timeout —
+        // a misbehaving rc must not hang the app. Read bytes + lossy-decode (rather
+        // than `read_to_string`) so non-UTF-8 in the env dump degrades to
+        // replacement chars instead of discarding the whole output.
+        let mut stdout = child.stdout.take()?;
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = stdout.read_to_end(&mut buf);
+            let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+        });
+        // 4s: generous enough for a heavy rc (oh-my-zsh + plugins + nvm lazy-load)
+        // to finish, since this is paid at most once (cached); on timeout we kill
+        // the shell and fall back to the hardcoded list.
+        let output = match rx.recv_timeout(Duration::from_secs(4)) {
+            Ok(buf) => buf,
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        };
+        let _ = child.wait();
+        parse_path_from_shell_output(&output)
+    }
+
+    /// Extract the `PATH=…` value from the shell's `printf <sentinel>; env` output.
+    /// Everything up to (and including) the last sentinel is discarded — that's
+    /// where shell-init chatter and terminal escape sequences live — then the
+    /// `PATH=` line is read from the clean `env` dump that follows. `None` if the
+    /// sentinel is missing (query misbehaved) or PATH is absent/empty.
+    pub(super) fn parse_path_from_shell_output(output: &str) -> Option<String> {
+        output
+            .rsplit_once(PATH_SENTINEL)?
+            .1
+            .lines()
+            .find_map(|line| line.strip_prefix("PATH="))
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_owned)
+    }
+
+} // mod login_shell
+
+/// The user's real PATH, or `None` where we cannot ask: the query is a POSIX
+/// shell invocation, so Windows falls straight through to the hardcoded list.
 fn login_shell_path() -> Option<String> {
-    let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty())?;
-    // Print a sentinel line, then dump the environment. Reading PATH from `env`
-    // (not by expanding `$PATH`) keeps it OS colon format and shell-agnostic
-    // (fish stores PATH as a list); the sentinel lets the parser ignore
-    // anything the interactive shell prints at startup before `env` runs.
-    let script = format!("printf '\\n{PATH_SENTINEL}\\n'; env");
-    let mut child = Command::new(&shell)
-        .arg("-lic") // -l: login profiles, -i: interactive rc (nvm), -c: command
-        .arg(&script)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    // Read on a worker thread so the whole query can be bounded by a timeout —
-    // a misbehaving rc must not hang the app. Read bytes + lossy-decode (rather
-    // than `read_to_string`) so non-UTF-8 in the env dump degrades to
-    // replacement chars instead of discarding the whole output.
-    let mut stdout = child.stdout.take()?;
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stdout.read_to_end(&mut buf);
-        let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
-    });
-    // 4s: generous enough for a heavy rc (oh-my-zsh + plugins + nvm lazy-load)
-    // to finish, since this is paid at most once (cached); on timeout we kill
-    // the shell and fall back to the hardcoded list.
-    let output = match rx.recv_timeout(Duration::from_secs(4)) {
-        Ok(buf) => buf,
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-    };
-    let _ = child.wait();
-    parse_path_from_shell_output(&output)
-}
-
-#[cfg(not(unix))]
-fn login_shell_path() -> Option<String> {
-    None
-}
-
-/// Extract the `PATH=…` value from the shell's `printf <sentinel>; env` output.
-/// Everything up to (and including) the last sentinel is discarded — that's
-/// where shell-init chatter and terminal escape sequences live — then the
-/// `PATH=` line is read from the clean `env` dump that follows. `None` if the
-/// sentinel is missing (query misbehaved) or PATH is absent/empty.
-#[cfg(unix)]
-fn parse_path_from_shell_output(output: &str) -> Option<String> {
-    output
-        .rsplit_once(PATH_SENTINEL)?
-        .1
-        .lines()
-        .find_map(|line| line.strip_prefix("PATH="))
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(str::to_owned)
+    #[cfg(unix)]
+    {
+        login_shell::query()
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
 }
 
 /// Hardcoded best-effort node locations — the fallback when the login-shell
@@ -521,6 +537,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn parse_path_from_shell_output_skips_chatter_before_the_sentinel() {
+        use super::login_shell::parse_path_from_shell_output;
+
         // Real-world shape: iTerm2 OSC escapes + a banner emitted at shell
         // startup, BEFORE our sentinel + `env` dump. Only the post-sentinel
         // PATH= line counts — note the pre-sentinel "PATH=/decoy" is ignored.
@@ -693,6 +711,41 @@ mod tests {
             resolve_on_path(Path::new("definitely-missing"), &path_env),
             None
         );
+    }
+
+    /// Write a file the resolver should accept as runnable, named the way the
+    /// platform names programs, and answer with the bare name to look it up by.
+    /// On Windows those differ — that gap *is* what `PATHEXT` probing closes.
+    fn install_runnable(dir: &Path, stem: &str) -> PathBuf {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let path = dir.join(stem);
+            std::fs::write(&path, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        }
+        #[cfg(not(unix))]
+        {
+            let path = dir.join(format!("{stem}.EXE"));
+            std::fs::write(&path, "").unwrap();
+            path
+        }
+    }
+
+    #[test]
+    fn a_bare_name_resolves_however_the_platform_spells_the_file() {
+        // The unix cases above are gated, which left everything about
+        // resolution untested on Windows — including the suffix probing that
+        // exists only for Windows, where `claude` is `claude.exe`. This is the
+        // same assertion with the platform's own naming factored out, so CI
+        // exercises the probe on the platform it was written for.
+        let root = tempfile::tempdir().expect("tempdir");
+        let installed = install_runnable(root.path(), "tool");
+        let path_env = root.path().display().to_string();
+
+        assert_eq!(resolve_on_path(Path::new("tool"), &path_env), Some(installed));
+        assert_eq!(resolve_on_path(Path::new("tool-missing"), &path_env), None);
     }
 }
 
