@@ -3,7 +3,7 @@
 //! The library you depend on to drive — or build — an agent harness,
 //! independent of any specific backend. It provides:
 //!   * the [`Harness`] trait + the neutral request/metadata types
-//!     ([`RunRequest`] / [`RunTuning`] / [`Manifest`] / …),
+//!     ([`RunRequest`] / [`RunTuning`] / [`Info`] / …),
 //!   * the normalized [`RunEvent`] vocabulary every adapter parses into
 //!     ([`normalize_process_event`] + [`ParsedLine`]),
 //!   * the generic streaming subprocess engine ([`spawn_streaming`] +
@@ -32,8 +32,8 @@ pub use events::{
 };
 pub use raw::parse_raw_line;
 pub use harness::{
-    run_login_command, Attachment, BoxError, CredentialSpec, Harness, Capabilities, Error,
-    Manifest, ModelChoice, Readiness, InstallCallback, InstalledModel, InstallHint,
+    run_login_command, Attachment, BoxError, CredentialSpec, Harness, Features, Error,
+    Info, ModelChoice, Readiness, InstallCallback, InstalledModel, InstallHint,
     ModelManagement,
     PullProgress, PullProgressAggregator, PullProgressCallback, ReasoningEffort, RunCallback,
     RunControl, RunHandle, RunMode, RunRequest, RunTuning,
@@ -80,6 +80,6 @@ pub use openai_compatible::{
 };
 // The open registry + convenience constructors over the built-ins.
 pub use registry::{
-    CatalogEntry,
+    Listing,
     default_registry, harness_by_id, harness_catalog, Registry, DEFAULT_HARNESS_ID,
 };

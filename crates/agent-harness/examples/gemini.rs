@@ -28,7 +28,7 @@ fn main() -> Result<(), Error> {
     let readiness = gemini.readiness();
     if !readiness.ready {
         eprintln!("{}", readiness.error.unwrap_or_default());
-        if let Some(hint) = gemini.manifest().install_hint {
+        if let Some(hint) = gemini.info().install_hint {
             eprintln!("Get it from {}", hint.url);
         }
         return Ok(());

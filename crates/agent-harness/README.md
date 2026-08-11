@@ -131,7 +131,7 @@ says where to get it.
 
 ```rust
 if !harness.readiness().installed {
-    if let Some(hint) = harness.manifest().install_hint {
+    if let Some(hint) = harness.info().install_hint {
         println!("Get it from {}", hint.url);
         if let Some(command) = hint.command {
             println!("  {command}");

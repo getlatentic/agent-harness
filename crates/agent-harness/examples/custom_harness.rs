@@ -23,7 +23,7 @@ use std::sync::{mpsc::sync_channel, Arc, Mutex};
 
 use harness::{
     run_events_from_parsed, spawn_streaming, CredentialSpec, Harness,
-    Error, Manifest, Readiness, ParsedLine, ProcessEvent,
+    Error, Info, Readiness, ParsedLine, ProcessEvent,
     RunCallback, RunEvent, RunHandle, RunRequest, Registry, SessionInfo,
 };
 use serde_json::Value;
@@ -35,8 +35,8 @@ const ECHO_ID: &str = "echo";
 struct EchoHarness;
 
 impl Harness for EchoHarness {
-    fn manifest(&self) -> Manifest {
-        Manifest {
+    fn info(&self) -> Info {
+        Info {
             id: ECHO_ID.to_owned(),
             display_name: "Echo".to_owned(),
             description: "A toy harness that echoes the prompt — a template for your own."
@@ -162,7 +162,7 @@ fn main() -> Result<(), String> {
     // Register your harness alongside (or instead of) the built-ins — no fork.
     let reg = Registry::new().register(EchoHarness);
     let h = reg.by_id(ECHO_ID).expect("registered");
-    println!("harness: {} — {}", h.manifest().display_name, h.manifest().description);
+    println!("harness: {} — {}", h.info().display_name, h.info().description);
 
     let (tx, rx) = sync_channel::<RunEvent>(64);
     let on_event: RunCallback = Arc::new(move |ev| {

@@ -18,7 +18,7 @@ fn main() -> Result<(), Error> {
     let r = claude.readiness();
     if !r.installed {
         // Not our job to install it — tell the user where it comes from.
-        if let Some(hint) = claude.manifest().install_hint {
+        if let Some(hint) = claude.info().install_hint {
             eprintln!("Claude Code isn't installed. Get it from {}", hint.url);
             if let Some(command) = hint.command {
                 eprintln!("  {command}");

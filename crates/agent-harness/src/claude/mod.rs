@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use crate::{
     normalize_process_event, probe_version, spawn_streaming, CredentialSpec, Harness,
-    Capabilities, Error, Manifest, ModelChoice, Readiness,
+    Features, Error, Info, ModelChoice, Readiness,
     InstallCallback, InstallHint, RunCallback, RunHandle, RunMode, RunRequest, RunTuning,
 };
 
@@ -87,8 +87,8 @@ impl ClaudeHarness {
 }
 
 impl Harness for ClaudeHarness {
-    fn manifest(&self) -> Manifest {
-        Manifest {
+    fn info(&self) -> Info {
+        Info {
             id: CLAUDE_HARNESS_ID.to_owned(),
             display_name: "Claude Code".to_owned(),
             description: "Anthropic's Claude Code agent CLI. Uses your existing Claude Code login."
@@ -100,14 +100,14 @@ impl Harness for ClaudeHarness {
         }
     }
 
-    fn capabilities(&self) -> Capabilities {
-        Capabilities {
+    fn features(&self) -> Features {
+        Features {
             // Claude Code owns its own login; it edits files directly, so
             // no previews and no stored credential. Everything it does not
             // support is left to `Default`.
             //
             // The aliases `claude --help` documents. This list is the whole
-            // picker when models.dev is unreachable, and `allows_custom_model`
+            // picker when models.dev is unreachable, and `custom_model`
             // stays off, so anything missing here is unreachable — not merely
             // unlisted.
             models: vec![
@@ -116,8 +116,8 @@ impl Harness for ClaudeHarness {
                 ModelChoice { value: "fable".to_owned(), label: "Fable (latest)".to_owned() },
                 ModelChoice { value: "haiku".to_owned(), label: "Haiku (latest)".to_owned() },
             ],
-            supports_max_turns: true,
-            supports_login: true,
+            max_turns: true,
+            login: true,
             ..Default::default()
         }
     }
@@ -126,7 +126,7 @@ impl Harness for ClaudeHarness {
         // Keep the curated aliases first (`sonnet`/`opus` track "latest" and don't
         // churn), then append models.dev's current `anthropic` lineup (exact ids)
         // when the `models-dev` feature is on. Offline / feature-off → just aliases.
-        let mut models = self.capabilities().models;
+        let mut models = self.features().models;
         models.extend(crate::models_dev::provider_models("anthropic"));
         Ok(models)
     }
@@ -322,8 +322,8 @@ mod tests {
     #[test]
     fn claude_info_and_credential() {
         let h = ClaudeHarness::new();
-        assert_eq!(h.manifest().id, CLAUDE_HARNESS_ID);
-        let hint = h.manifest().install_hint.expect("Claude Code is a CLI the user installs");
+        assert_eq!(h.info().id, CLAUDE_HARNESS_ID);
+        let hint = h.info().install_hint.expect("Claude Code is a CLI the user installs");
         assert!(hint.command.is_some_and(|c| c.contains("claude.ai/install.sh")));
         // Claude manages its own auth — Compose doesn't require a key.
         assert!(!h.credential().required);
@@ -397,16 +397,16 @@ mod tests {
         // These are the aliases `claude --help` names. The list matters more
         // than it looks: models.dev supplies the exact ids, but when it is
         // unreachable — offline, or a first launch with a cold cache — this
-        // vec IS the picker. Combined with `allows_custom_model: false`, an
+        // vec IS the picker. Combined with `custom_model: false`, an
         // alias missing here cannot be selected or typed. `fable` was absent
         // and therefore unreachable in exactly that state.
-        let caps = ClaudeHarness::new().capabilities();
+        let caps = ClaudeHarness::new().features();
         let offered: Vec<&str> = caps.models.iter().map(|m| m.value.as_str()).collect();
         for alias in ["sonnet", "opus", "fable", "haiku"] {
             assert!(offered.contains(&alias), "`--model {alias}` is documented, got {offered:?}");
         }
         assert!(
-            !caps.allows_custom_model,
+            !caps.custom_model,
             "if free-text entry is ever allowed, an omission above stops being unreachable \
              and this test can relax"
         );

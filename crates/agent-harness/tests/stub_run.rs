@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use harness::{
     normalize_process_event, spawn_streaming, CredentialSpec, Harness,
-    Error, Manifest, Readiness, ParsedLine, RunCallback,
+    Error, Info, Readiness, ParsedLine, RunCallback,
     RunEvent, RunHandle, RunMode, RunRequest, RunTuning,
 };
 
@@ -25,8 +25,8 @@ struct StubHarness {
 }
 
 impl Harness for StubHarness {
-    fn manifest(&self) -> Manifest {
-        Manifest {
+    fn info(&self) -> Info {
+        Info {
             id: "stub".to_owned(),
             display_name: "Stub".to_owned(),
             description: "integration-test stub harness".to_owned(),

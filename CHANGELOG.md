@@ -9,23 +9,48 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ### Migration
 
-**The `Harness` prefix is gone from five types.** The library is `harness`, so
-`harness::HarnessInfo` said it twice — the same redundancy `std::io::IoError`
-was renamed away from. Mechanical:
+**The `Harness` prefix is gone, and the picker's three questions are three
+types.** The library is `harness`, so `harness::HarnessInfo` said it twice —
+the redundancy `std::io::IoError` was renamed away from.
 
 | before | after |
 |---|---|
 | `HarnessError` | `Error` |
-| `HarnessInfo` | `Manifest` (and `Harness::info` → `Harness::manifest`) |
-| `HarnessCapabilities` | `Capabilities` (moved off `Manifest` onto `Harness::capabilities`) |
+| `HarnessInfo` | `Info` — identity only; see below |
+| `HarnessCapabilities` | `Features`, via `Harness::features()` |
 | `HarnessReadiness` | `Readiness` |
 | `HarnessModel` | `ModelChoice` |
 
-Two are more than a prefix strip. `Info` said nothing about what it holds, and
-what it holds is a static self-declaration — hence `Manifest`. And `Model` is
-ambiguous in a crate that also has `ModelCost`, `ModelFacts`, `InstalledModel`
-and a catalog `Model`; the type is a picker entry (`value` + `label`), so
-`ModelChoice` names what it is.
+**Capabilities moved off `Info` onto their own method.**
+`.info().capabilities` was 14 of 27 uses, each building an id, a display name
+and a description to read one bool. Identity is asked once; ability is asked
+constantly. `Harness::features()` defaults to supporting nothing, so a minimal
+adapter implements four methods and never mentions the type:
+
+```rust
+fn features(&self) -> Features {
+    Features { login: true, effort: true, ..Default::default() }
+}
+```
+
+Field names lost the prefix the type now carries: `supports_effort` → `effort`,
+`supports_max_turns` → `max_turns`, `supports_login` → `login`,
+`supports_custom_instructions` → `custom_instructions`, `allows_custom_model`
+→ `custom_model`.
+
+**`Registry::catalog()` yields `Listing`, not `Info`.** A picker needs both
+halves at the same moment, and that payload — which hosts serialize straight to
+a frontend — is a third thing that never had a name:
+
+```rust
+for listing in registry.catalog() {
+    println!("{} — effort: {}", listing.info.display_name, listing.features.effort);
+}
+```
+
+`ModelChoice` is more than a prefix strip: `Model` is ambiguous beside
+`ModelCost`, `ModelFacts` and `InstalledModel`, and the type is a picker entry
+of `value` + `label`.
 
 The `Harness` trait keeps its name.
 

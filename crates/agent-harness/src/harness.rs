@@ -438,13 +438,13 @@ pub struct ModelManagement {
 /// restating eight fields and risking one being wrong by omission.
 ///
 /// ```
-/// # use harness::Capabilities;
-/// let claude_like = Capabilities { supports_max_turns: true, ..Default::default() };
-/// assert!(!claude_like.supports_effort);
+/// # use harness::Features;
+/// let claude_like = Features { max_turns: true, ..Default::default() };
+/// assert!(!claude_like.effort);
 /// ```
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Capabilities {
+pub struct Features {
     /// Compose stores this harness's credential (bob). When `false`,
     /// the CLI owns its own login (claude/codex) and Compose runs no
     /// credential/install preflight — a missing login surfaces as the
@@ -455,26 +455,26 @@ pub struct Capabilities {
     /// file watcher reflects them (claude/codex).
     pub previews_edits: bool,
     /// Curated model choices for the picker's selector. Empty → no
-    /// curated list (rely on `allows_custom_model`).
+    /// curated list (rely on `custom_model`).
     pub models: Vec<ModelChoice>,
     /// Whether a free-text model id is accepted beyond `models` (codex,
     /// whose model names change frequently). Drives a text field vs a
     /// fixed dropdown in the picker.
-    pub allows_custom_model: bool,
+    pub custom_model: bool,
     /// Honors [`RunTuning::effort`] (codex reasoning effort).
-    pub supports_effort: bool,
+    pub effort: bool,
     /// Honors [`RunTuning::max_turns`] (claude turn cap).
-    pub supports_max_turns: bool,
+    pub max_turns: bool,
     /// Supports an interactive [`Harness::login`] flow (the CLI's own
     /// OAuth, e.g. `claude auth login` / `codex login`). Drives the
     /// picker's "Sign in" affordance when installed-but-not-signed-in.
     /// `false` for harnesses Compose authenticates itself (bob).
-    pub supports_login: bool,
+    pub login: bool,
     /// Honors [`RunTuning::extra_instructions`] — the user's per-harness custom
     /// instructions, appended to the system prompt. `true` only for the
     /// `openai-compatible` adapter so far; the picker hides the field for the
     /// rest rather than offering a control that does nothing.
-    pub supports_custom_instructions: bool,
+    pub custom_instructions: bool,
 }
 
 /// Where a user gets a harness that isn't on the machine yet.
@@ -505,12 +505,12 @@ impl InstallHint {
 
 /// Who a harness is: the identity and presentation a picker renders.
 ///
-/// What it can *do* is [`Capabilities`], asked for separately — that question
+/// What it can *do* is [`Features`], asked for separately — that question
 /// is put far more often than this one, and answering it should not mean
 /// building three strings.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Manifest {
+pub struct Info {
     pub id: String,
     pub display_name: String,
     pub description: String,
@@ -526,16 +526,16 @@ pub struct Manifest {
 /// fresh boxes on demand.
 pub trait Harness: Send + Sync {
     /// Who this harness is — identity and presentation, for the picker.
-    fn manifest(&self) -> Manifest;
+    fn info(&self) -> Info;
 
     /// What this harness supports, so a consumer adapts to it declaratively
-    /// instead of branching on [`Manifest::id`].
+    /// instead of branching on [`Info::id`].
     ///
     /// Defaults to supporting nothing, which is the safe direction: an adapter
     /// names what it does, and one that has not heard of a capability added
     /// later does not claim it.
-    fn capabilities(&self) -> Capabilities {
-        Capabilities::default()
+    fn features(&self) -> Features {
+        Features::default()
     }
 
     /// Probe availability / version / auth. May shell out; callers
@@ -550,7 +550,7 @@ pub trait Harness: Send + Sync {
     fn credential(&self) -> CredentialSpec;
 
     /// Enumerate the models this harness can run, *live*. The default returns
-    /// the static list declared in [`Manifest`]
+    /// the static list declared in [`Info`]
     /// (`capabilities().models`), so existing adapters need no change.
     ///
     /// Override it when the model set is discovered at runtime rather than
@@ -561,7 +561,7 @@ pub trait Harness: Send + Sync {
     /// the *absence* of models, not a separate flag. May shell out / hit the
     /// network; treat it as blocking and run it off the UI thread.
     fn list_models(&self) -> Result<Vec<ModelChoice>, Error> {
-        Ok(self.capabilities().models)
+        Ok(self.features().models)
     }
 
     /// Whether this harness can install/list/delete its own models locally, and
@@ -774,7 +774,7 @@ mod tests {
     #[test]
     fn pull_aggregator_sums_across_digests_keeping_latest_per_digest() {
         let mut agg = PullProgressAggregator::default();
-        // Manifest phase: no byte totals yet → no percent.
+        // Info phase: no byte totals yet → no percent.
         assert_eq!(
             agg.update(&PullProgress { status: "pulling manifest".into(), digest: None, total: None, completed: None }),
             None
@@ -813,8 +813,8 @@ mod tests {
     struct MinimalHarness;
 
     impl Harness for MinimalHarness {
-        fn manifest(&self) -> Manifest {
-            Manifest {
+        fn info(&self) -> Info {
+            Info {
                 id: "minimal".to_owned(),
                 display_name: "Minimal".to_owned(),
                 description: "implements the required surface and nothing else".to_owned(),
@@ -822,8 +822,8 @@ mod tests {
             }
         }
 
-        fn capabilities(&self) -> Capabilities {
-            Capabilities {
+        fn features(&self) -> Features {
+            Features {
                 models: vec![ModelChoice { value: "m1".to_owned(), label: "Model one".to_owned() }],
                 ..Default::default()
             }
@@ -858,7 +858,7 @@ mod tests {
         // The picker asks every harness for models; the default answers from
         // the capabilities it already declared rather than making each adapter
         // write the same one-liner.
-        assert_eq!(harness.list_models().unwrap(), harness.capabilities().models);
+        assert_eq!(harness.list_models().unwrap(), harness.features().models);
         assert!(harness.model_management().is_none(), "no model management is the default");
         assert!(NoopControl.pid().is_none(), "a harness with no process reports no pid");
     }
@@ -888,10 +888,10 @@ mod tests {
     fn capabilities_default_to_supporting_nothing() {
         // The safe direction: a new field defaults to off, so an adapter that
         // has not heard of it does not silently claim it.
-        let none = Capabilities::default();
-        assert!(!none.credential_required && !none.previews_edits && !none.allows_custom_model);
-        assert!(!none.supports_effort && !none.supports_max_turns && !none.supports_login);
-        assert!(!none.supports_custom_instructions);
+        let none = Features::default();
+        assert!(!none.credential_required && !none.previews_edits && !none.custom_model);
+        assert!(!none.effort && !none.max_turns && !none.login);
+        assert!(!none.custom_instructions);
         assert!(none.models.is_empty());
     }
 
@@ -1006,7 +1006,7 @@ mod tests {
         events: Vec<RunEvent>,
     }
     impl Harness for MockHarness {
-        fn manifest(&self) -> Manifest {
+        fn info(&self) -> Info {
             unreachable!("not exercised by run")
         }
         fn readiness(&self) -> Readiness {

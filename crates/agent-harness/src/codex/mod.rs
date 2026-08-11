@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use crate::{
-    probe_version, spawn_streaming, CredentialSpec, Harness, Capabilities, Error,
-    Manifest, ModelChoice, Readiness, InstallCallback, InstallHint, RunCallback,
+    probe_version, spawn_streaming, CredentialSpec, Harness, Features, Error,
+    Info, ModelChoice, Readiness, InstallCallback, InstallHint, RunCallback,
     RunHandle, RunMode, RunRequest, RunTuning,
 };
 
@@ -78,8 +78,8 @@ impl CodexHarness {
 }
 
 impl Harness for CodexHarness {
-    fn manifest(&self) -> Manifest {
-        Manifest {
+    fn info(&self) -> Info {
+        Info {
             id: CODEX_HARNESS_ID.to_owned(),
             display_name: "Codex".to_owned(),
             description: "OpenAI's Codex agent CLI. Uses your existing Codex login.".to_owned(),
@@ -90,16 +90,16 @@ impl Harness for CodexHarness {
         }
     }
 
-    fn capabilities(&self) -> Capabilities {
-        Capabilities {
+    fn features(&self) -> Features {
+        Features {
             // Codex owns its own login and edits files directly. Model
             // names change often, so it takes free-text entry rather than a
             // curated list, and it exposes reasoning effort. What it does
             // not support — a turn cap, previews, a stored credential — is
             // left to `Default`.
-            allows_custom_model: true,
-            supports_effort: true,
-            supports_login: true,
+            custom_model: true,
+            effort: true,
+            login: true,
             ..Default::default()
         }
     }
@@ -344,8 +344,8 @@ mod tests {
     #[test]
     fn codex_info_and_credential() {
         let h = CodexHarness::new();
-        assert_eq!(h.manifest().id, CODEX_HARNESS_ID);
-        let hint = h.manifest().install_hint.expect("Codex is a CLI the user installs");
+        assert_eq!(h.info().id, CODEX_HARNESS_ID);
+        let hint = h.info().install_hint.expect("Codex is a CLI the user installs");
         assert_eq!(hint.command.as_deref(), Some("npm install -g @openai/codex"));
         assert!(!h.credential().required);
     }

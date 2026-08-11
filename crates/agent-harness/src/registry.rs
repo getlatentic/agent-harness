@@ -9,7 +9,7 @@
 
 use serde::Serialize;
 
-use crate::{Capabilities, Harness, Manifest, Readiness};
+use crate::{Features, Harness, Info, Readiness};
 #[cfg(feature = "claude")]
 use crate::Claude;
 #[cfg(feature = "codex")]
@@ -23,9 +23,9 @@ use crate::Codex;
 /// host hands it to a frontend unchanged.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CatalogEntry {
-    pub manifest: Manifest,
-    pub capabilities: Capabilities,
+pub struct Listing {
+    pub manifest: Info,
+    pub capabilities: Features,
 }
 
 /// The identifier used when the caller doesn't pick one. (A literal so it's
@@ -69,19 +69,19 @@ impl Registry {
         self
     }
 
-    /// Resolve a harness by its [`Manifest::id`].
+    /// Resolve a harness by its [`Info::id`].
     pub fn by_id(&self, id: &str) -> Option<&dyn Harness> {
         self.harnesses
             .iter()
             .map(Box::as_ref)
-            .find(|h| h.manifest().id == id)
+            .find(|h| h.info().id == id)
     }
 
     /// Resolve a harness by id, taking ownership of its box out of the registry —
     /// for a host that needs an owned `Box<dyn Harness>` to hold across a run,
     /// rather than the borrow [`by_id`](Registry::by_id) returns.
     pub fn into_by_id(self, id: &str) -> Option<Box<dyn Harness>> {
-        self.harnesses.into_iter().find(|h| h.manifest().id == id)
+        self.harnesses.into_iter().find(|h| h.info().id == id)
     }
 
     /// Probe readiness of every registered harness, in registration order — the
@@ -93,16 +93,16 @@ impl Registry {
 
     /// Every registered harness, in registration order, as a picker renders it:
     /// who it is and what it supports.
-    pub fn catalog(&self) -> Vec<CatalogEntry> {
+    pub fn catalog(&self) -> Vec<Listing> {
         self.harnesses
             .iter()
-            .map(|h| CatalogEntry { manifest: h.manifest(), capabilities: h.capabilities() })
+            .map(|h| Listing { manifest: h.info(), capabilities: h.features() })
             .collect()
     }
 
     /// The ids of every registered harness, in registration order.
     pub fn ids(&self) -> Vec<String> {
-        self.harnesses.iter().map(|h| h.manifest().id).collect()
+        self.harnesses.iter().map(|h| h.info().id).collect()
     }
 }
 
@@ -142,7 +142,7 @@ pub fn harness_by_id(id: &str) -> Option<Box<dyn Harness>> {
 }
 
 /// Metadata for every built-in harness — the payload the UI picker renders.
-pub fn harness_catalog() -> Vec<CatalogEntry> {
+pub fn harness_catalog() -> Vec<Listing> {
     default_registry().catalog()
 }
 
@@ -150,7 +150,7 @@ pub fn harness_catalog() -> Vec<CatalogEntry> {
 mod tests {
     use super::*;
     use crate::{
-        CredentialSpec, Capabilities, Readiness, RunCallback,
+        CredentialSpec, Features, Readiness, RunCallback,
         RunHandle, RunRequest,
     };
 
@@ -169,26 +169,26 @@ mod tests {
 
     #[test]
     fn capabilities_match_each_adapter_and_back_credential_required() {
-        let caps = |id: &str| harness_by_id(id).unwrap().capabilities();
+        let caps = |id: &str| harness_by_id(id).unwrap().features();
 
         let claude = caps("claude");
         assert!(!claude.credential_required && !claude.previews_edits);
-        assert!(!claude.models.is_empty() && !claude.allows_custom_model);
-        assert!(claude.supports_max_turns && !claude.supports_effort);
+        assert!(!claude.models.is_empty() && !claude.custom_model);
+        assert!(claude.max_turns && !claude.effort);
 
         let codex = caps("codex");
         assert!(!codex.credential_required && !codex.previews_edits);
-        assert!(codex.allows_custom_model && codex.supports_effort && !codex.supports_max_turns);
+        assert!(codex.custom_model && codex.effort && !codex.max_turns);
 
-        assert!(claude.supports_login && codex.supports_login);
+        assert!(claude.login && codex.login);
     }
 
     // A third-party / custom provider — proves the registry is open: this
     // type lives "outside" the built-ins yet registers + resolves the same.
     struct Acme;
     impl Harness for Acme {
-        fn manifest(&self) -> Manifest {
-            Manifest {
+        fn info(&self) -> Info {
+            Info {
                 id: "acme".to_owned(),
                 display_name: "Acme".to_owned(),
                 description: "A custom third-party harness.".to_owned(),
@@ -196,8 +196,8 @@ mod tests {
             }
         }
 
-        fn capabilities(&self) -> Capabilities {
-            Capabilities { allows_custom_model: true, ..Default::default() }
+        fn features(&self) -> Features {
+            Features { custom_model: true, ..Default::default() }
         }
         fn readiness(&self) -> Readiness {
             Readiness {

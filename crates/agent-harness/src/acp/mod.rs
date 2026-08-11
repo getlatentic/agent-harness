@@ -28,7 +28,7 @@ use serde_json::Value;
 use smol::Timer;
 
 use crate::{
-    CredentialSpec, Harness, Capabilities, Error, Manifest, ModelChoice,
+    CredentialSpec, Harness, Features, Error, Info, ModelChoice,
     Readiness, InstallHint, RunCallback, RunControl, RunEvent, RunHandle, RunMode,
     RunRequest,
 };
@@ -127,8 +127,8 @@ impl AcpHarness {
 }
 
 impl Harness for AcpHarness {
-    fn manifest(&self) -> Manifest {
-        Manifest {
+    fn info(&self) -> Info {
+        Info {
             id: self.id.clone(),
             display_name: self.display_name.clone(),
             description: self.description.clone(),
@@ -136,12 +136,12 @@ impl Harness for AcpHarness {
         }
     }
 
-    fn capabilities(&self) -> Capabilities {
-        Capabilities {
+    fn features(&self) -> Features {
+        Features {
             // Models are discovered live via `list_models()` (opencode lists
             // its own; a generic ACP agent has none), so the static list is
             // left empty by `Default`; a free-text model id is accepted.
-            allows_custom_model: true,
+            custom_model: true,
             ..Default::default()
         }
     }
@@ -446,9 +446,9 @@ mod tests {
             install_hint: None,
         });
         assert!(harness.list_models().expect("ok").is_empty());
-        let caps = harness.capabilities();
+        let caps = harness.features();
         assert!(caps.models.is_empty());
-        assert!(caps.allows_custom_model, "ACP agents accept a free-text model");
+        assert!(caps.custom_model, "ACP agents accept a free-text model");
     }
 
     #[test]
