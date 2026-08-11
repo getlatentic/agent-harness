@@ -102,19 +102,35 @@ fn resolve_on_path(name: &Path, path_env: &str) -> Option<PathBuf> {
         .find(|candidate| is_executable_file(candidate))
 }
 
-/// Suffixes to try after the bare name. Empty on unix, where a program's name
-/// is its file name.
-#[cfg(unix)]
+/// Suffixes to try after the bare name, from the platform's own convention.
 fn executable_extensions() -> Vec<String> {
-    Vec::new()
+    split_extensions(&pathext())
 }
 
+/// Unix has no extension convention for programs — a program's name is its
+/// file name.
+#[cfg(unix)]
+fn pathext() -> String {
+    String::new()
+}
+
+/// Windows names its programs `claude.exe` / `claude.cmd`, and `PATHEXT` lists
+/// the suffixes to try; the literal is what the OS falls back to when it is
+/// unset.
 #[cfg(not(unix))]
-fn executable_extensions() -> Vec<String> {
-    std::env::var("PATHEXT")
-        .unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".to_owned())
+fn pathext() -> String {
+    std::env::var("PATHEXT").unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".to_owned())
+}
+
+/// Split a `PATHEXT` value into suffixes.
+///
+/// Separated from [`pathext`] so the parsing compiles and is tested on every
+/// platform, not only the one it ships on: behind a `cfg` it was unreachable
+/// from any test here, which reads as untested rather than as passing.
+fn split_extensions(pathext: &str) -> Vec<String> {
+    pathext
         .split(';')
-        .filter(|e| !e.is_empty())
+        .filter(|extension| !extension.is_empty())
         .map(str::to_owned)
         .collect()
 }
@@ -539,6 +555,18 @@ mod tests {
         assert_eq!(keep_absolute_entries("/usr/bin"), "/usr/bin");
         // All-relative → empty (caller still has the process PATH ahead of it).
         assert_eq!(keep_absolute_entries(".:rel:"), "");
+    }
+
+    #[test]
+    fn pathext_becomes_suffixes_with_the_empty_ones_dropped() {
+        // A trailing or doubled `;` is ordinary in a real PATHEXT, and an empty
+        // suffix would probe the bare name a second time rather than a variant.
+        assert_eq!(
+            split_extensions(".EXE;.CMD;;.BAT;"),
+            [".EXE", ".CMD", ".BAT"],
+        );
+        // What unix supplies: no suffixes, so only the bare name is tried.
+        assert!(split_extensions("").is_empty());
     }
 
     #[test]
