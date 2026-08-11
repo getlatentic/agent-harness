@@ -690,29 +690,41 @@ mod tests {
         assert_eq!(body["messages"][1]["content"], "hello", "the only user turn is the new one");
     }
 
+
     #[test]
     fn history_gets_its_own_breakpoint_but_the_new_prompt_does_not() {
         // The prefix breakpoints cover a fixed ~1.2k tokens. The transcript is
         // the part that grows, so without a breakpoint in it a long
         // conversation re-sends everything at full price every turn.
+        //
+        // Long enough that the index is arithmetic rather than a coincidence:
+        // at four messages "second from the end" and "half way" are the same
+        // position, and a test there cannot tell the two apart.
         let mut body = json!({ "messages": [
             { "role": "system", "content": "rules" },
             { "role": "user", "content": "first question" },
             { "role": "assistant", "content": "first answer" },
+            { "role": "user", "content": "second question" },
+            { "role": "assistant", "content": "second answer" },
             { "role": "user", "content": "the new prompt" }
         ]});
         mark_cache_breakpoints(&mut body);
 
         assert_eq!(body["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral", "system");
         assert_eq!(
-            body["messages"][2]["content"][0]["cache_control"]["type"], "ephemeral",
+            body["messages"][4]["content"][0]["cache_control"]["type"], "ephemeral",
             "the last settled turn ends the history this and the next turn share"
         );
         assert_eq!(
-            body["messages"][3]["content"], "the new prompt",
+            body["messages"][5]["content"], "the new prompt",
             "the newest message has never been sent, so caching it would burn a slot for nothing"
         );
-        assert!(body["messages"][1]["cache_control"].is_null(), "one history breakpoint, not many");
+        for earlier in [1, 2, 3] {
+            assert!(
+                body["messages"][earlier]["content"].is_string(),
+                "one history breakpoint, not many: message {earlier} was marked"
+            );
+        }
     }
 
     #[test]

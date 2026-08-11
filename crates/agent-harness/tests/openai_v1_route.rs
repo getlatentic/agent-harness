@@ -16,6 +16,7 @@ use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use harness::{
     ApiKey, Attachment, Harness, HarnessModel, OpenHarness, OpenHarnessConfig, PromptCache, RunEvent, RunMode,
@@ -36,6 +37,13 @@ struct Request {
 /// Anything past the end gets an empty completion, so an extra turn ends the
 /// loop rather than hanging it.
 fn fake_openai(responses: Vec<(u16, String)>) -> (String, Seen) {
+    // Zero by default: it is the header the backoff already defers to, so the
+    // tests exhaust their retries without sleeping through the exponential.
+    fake_openai_retrying_after(responses, 0)
+}
+
+/// As [`fake_openai`], naming the `Retry-After` its refusals carry.
+fn fake_openai_retrying_after(responses: Vec<(u16, String)>, retry_after: u32) -> (String, Seen) {
     let server = tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port");
     let base = format!("http://{}", server.server_addr());
     let seen: Seen = Arc::default();
@@ -56,11 +64,12 @@ fn fake_openai(responses: Vec<(u16, String)>) -> (String, Seen) {
             log.lock().unwrap().push(Request { url, authorization, body });
 
             let (status, payload) = queued.next().unwrap_or_else(|| (200, sse(&[])));
-            // A real 429 carries `Retry-After`, and honouring it is what the
-            // backoff defers to — so saying "now" keeps these tests instant
-            // instead of sleeping out the exponential default.
             let headers = match status {
-                429 => vec![tiny_http::Header::from_bytes(&b"Retry-After"[..], &b"0"[..]).unwrap()],
+                429 => vec![tiny_http::Header::from_bytes(
+                    &b"Retry-After"[..],
+                    retry_after.to_string().as_bytes(),
+                )
+                .unwrap()],
                 _ => Vec::new(),
             };
             let _ = request.respond(tiny_http::Response::new(
@@ -339,8 +348,28 @@ fn retrying_gives_up_rather_than_hammering_a_provider_that_keeps_refusing() {
     // rate-limited client becomes the reason it stays rate-limited.
     let refusals = std::iter::repeat_with(|| (429, "slow down".to_owned())).take(10).collect();
     let (base, seen) = fake_openai(refusals);
+    let started = Instant::now();
     let events = collect(&harness_at(&base, ApiKey::NotNeeded, PromptCache::default()), ask("ping"));
+    let waited = started.elapsed();
 
     assert_eq!(seen.lock().unwrap().len(), 4, "the first attempt plus three retries, then it stops");
     assert!(events.iter().any(|e| matches!(e, RunEvent::Error { .. })), "and says so: {events:?}");
+    // Every refusal here said "Retry-After: 0". Falling back to the exponential
+    // default anyway would have spent 1 + 2 + 4 seconds waiting for a provider
+    // that was ready immediately.
+    assert!(waited < Duration::from_secs(3), "the provider's own timing is used, not ours: {waited:?}");
+}
+
+#[test]
+fn the_delay_a_provider_asks_for_is_the_delay_it_gets() {
+    // The other direction of the same header. Treating it as "now" is what
+    // turns a rate limit into a tight loop against the thing that imposed it.
+    let (base, seen) = fake_openai_retrying_after(vec![(429, "slow down".to_owned()), answer("pong")], 1);
+    let started = Instant::now();
+    let events = collect(&harness_at(&base, ApiKey::NotNeeded, PromptCache::default()), ask("ping"));
+    let waited = started.elapsed();
+
+    assert_eq!(streamed_text(&events), "pong");
+    assert_eq!(seen.lock().unwrap().len(), 2);
+    assert!(waited >= Duration::from_millis(900), "the asked-for second is actually waited: {waited:?}");
 }
