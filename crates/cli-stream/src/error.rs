@@ -15,10 +15,20 @@ pub enum StreamError {
     /// isn't executable, or the OS refused. `source` is the spawn `io::Error`
     /// (commonly `NotFound`).
     #[error("failed to spawn {program}: {source}")]
-    Command {
+    Spawn {
         /// The program that failed to launch (as passed to the engine).
         program: String,
         /// The OS error from `Command::spawn`.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// Writing to the child's stdin failed — most often because it has already
+    /// exited, so the pipe is gone. A caller waiting on an answer needs to hear
+    /// this rather than block forever.
+    #[error("writing to the child's stdin failed: {source}")]
+    Write {
+        /// The OS error from the write or flush.
         #[source]
         source: std::io::Error,
     },
@@ -29,7 +39,7 @@ pub enum StreamError {
     /// `unwrap`ped.
     #[error("child {stream} pipe was not captured")]
     PipeNotCaptured {
-        /// Which stream was missing — `"stdout"` or `"stderr"`.
+        /// Which stream was missing — `"stdin"`, `"stdout"` or `"stderr"`.
         stream: &'static str,
     },
 

@@ -251,7 +251,7 @@ impl ProcessHandle {
             .write_all(line.as_bytes())
             .and_then(|()| stdin.write_all(b"\n"))
             .and_then(|()| stdin.flush())
-            .map_err(|source| StreamError::Command { program: "stdin".to_owned(), source })
+            .map_err(|source| StreamError::Write { source })
     }
 
     /// Whether `cancel()` was called. Tagged on the final `Exited` event.
@@ -319,7 +319,7 @@ where
     for (key, value) in &env {
         command.env(key, value);
     }
-    let mut child = command.spawn().map_err(|source| StreamError::Command {
+    let mut child = command.spawn().map_err(|source| StreamError::Spawn {
         program: program.display().to_string(),
         source,
     })?;
@@ -668,6 +668,29 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn writing_needs_a_pipe_that_was_asked_for_and_a_child_still_listening() {
+        // Both failures are ones a caller waiting on an answer has to hear
+        // about: without them it blocks forever on a reply that is not coming.
+        let quiet = Command::new("sleep").run_id("nostdin").args(["5"]).stream(|_| {}).expect("spawn");
+        let err = quiet.write_line("anyone there?").unwrap_err();
+        assert!(
+            matches!(err, StreamError::PipeNotCaptured { stream: "stdin" }),
+            "stdin was never piped, got {err}"
+        );
+        let _ = quiet.cancel();
+
+        // `cat` echoes stdin, so it is listening until it is not.
+        let (handle, events) =
+            Command::new("cat").run_id("echoing").stdin(Stdin::Piped).start().expect("spawn");
+        handle.write_line("hello").expect("a live child takes input");
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Stdout { line, .. } if line == "hello")),
+            "and reads it back"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_live_child_reports_a_pid_and_flips_when_cancelled() {
         // An embedder records the pid so a child a hard crash orphaned can be
         // reaped on the next launch, and reads `was_cancelled` to tell a run
@@ -699,7 +722,7 @@ mod tests {
         // can branch on `ErrorKind` to tell "not installed" (NotFound) from
         // "permission denied", which a flattened string can't support.
         match result {
-            Err(StreamError::Command { program, source }) => {
+            Err(StreamError::Spawn { program, source }) => {
                 assert!(program.contains("cli-stream-no-such-binary-zzz"));
                 assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
             }
