@@ -7,6 +7,36 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+### Migration
+
+**The `Harness` prefix is gone from five types.** The library is `harness`, so
+`harness::HarnessInfo` said it twice — the same redundancy `std::io::IoError`
+was renamed away from. Mechanical:
+
+| before | after |
+|---|---|
+| `HarnessError` | `Error` |
+| `HarnessInfo` | `Manifest` |
+| `HarnessCapabilities` | `Capabilities` |
+| `HarnessReadiness` | `Readiness` |
+| `HarnessModel` | `ModelChoice` |
+
+Two are more than a prefix strip. `Info` said nothing about what it holds, and
+what it holds is a static self-declaration — hence `Manifest`. And `Model` is
+ambiguous in a crate that also has `ModelCost`, `ModelFacts`, `InstalledModel`
+and a catalog `Model`; the type is a picker entry (`value` + `label`), so
+`ModelChoice` names what it is.
+
+The `Harness` trait keeps its name.
+
+One collision to know about: `harness::Error` and `std::error::Error` cannot
+both be imported bare. Reach for the trait's methods without binding the name:
+
+```rust
+use harness::Error;
+use std::error::Error as _; // for `.source()`
+```
+
 ### Fixed
 
 - A compacted session no longer loses its summary and replays a duplicate turn.

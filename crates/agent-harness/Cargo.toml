@@ -60,7 +60,7 @@ openai-compatible = ["models-dev", "dep:ureq", "dep:ignore", "dep:globset", "dep
 cli-stream.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# Typed errors for the public API (HarnessError) — derive Display + the
+# Typed errors for the public API (Error) — derive Display + the
 # std::error::Error source chain without hand-writing impls.
 thiserror.workspace = true
 # ACP-client adapter deps (optional + gated behind the `acp` feature).

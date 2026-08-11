@@ -17,7 +17,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::{HarnessModel, InstalledModel, PullProgress};
+use crate::{ModelChoice, InstalledModel, PullProgress};
 
 use super::wire::{ChatMessage, Fragment, FunctionCall, ThinkSplitter, ToolCall, Usage};
 
@@ -195,9 +195,9 @@ struct NativeFunctionCall {
 }
 
 /// GET `{base}/api/tags` — Ollama's installed-model list — mapping each model
-/// name to a [`HarnessModel`] for the picker. (Ollama lists models under
+/// name to a [`ModelChoice`] for the picker. (Ollama lists models under
 /// `/api/tags`, not under `/v1`.)
-pub(crate) fn list_tags(base: &str) -> Result<Vec<HarnessModel>, String> {
+pub(crate) fn list_tags(base: &str) -> Result<Vec<ModelChoice>, String> {
     let url = format!("{base}/api/tags");
     let resp = ureq::get(&url)
         .timeout(Duration::from_secs(5))
@@ -210,7 +210,7 @@ pub(crate) fn list_tags(base: &str) -> Result<Vec<HarnessModel>, String> {
         .map(|arr| {
             arr.iter()
                 .filter_map(|m| m.get("name").and_then(Value::as_str))
-                .map(|name| HarnessModel { value: name.to_owned(), label: name.to_owned() })
+                .map(|name| ModelChoice { value: name.to_owned(), label: name.to_owned() })
                 .collect()
         })
         .unwrap_or_default();

@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use crate::{
     normalize_process_event, probe_version, spawn_streaming, CredentialSpec, Harness,
-    HarnessCapabilities, HarnessError, HarnessInfo, HarnessModel, HarnessReadiness,
+    Capabilities, Error, Manifest, ModelChoice, Readiness,
     InstallCallback, InstallHint, RunCallback, RunHandle, RunMode, RunRequest, RunTuning,
 };
 
@@ -87,8 +87,8 @@ impl ClaudeHarness {
 }
 
 impl Harness for ClaudeHarness {
-    fn info(&self) -> HarnessInfo {
-        HarnessInfo {
+    fn info(&self) -> Manifest {
+        Manifest {
             id: CLAUDE_HARNESS_ID.to_owned(),
             display_name: "Claude Code".to_owned(),
             description: "Anthropic's Claude Code agent CLI. Uses your existing Claude Code login."
@@ -97,7 +97,7 @@ impl Harness for ClaudeHarness {
                 InstallHint::url("https://code.claude.com/docs")
                     .with_command("curl -fsSL https://claude.ai/install.sh | bash"),
             ),
-            capabilities: HarnessCapabilities {
+            capabilities: Capabilities {
                 // Claude Code owns its own login; it edits files directly, so
                 // no previews and no stored credential. Everything it does not
                 // support is left to `Default`.
@@ -107,10 +107,10 @@ impl Harness for ClaudeHarness {
                 // stays off, so anything missing here is unreachable — not merely
                 // unlisted.
                 models: vec![
-                    HarnessModel { value: "sonnet".to_owned(), label: "Sonnet (latest)".to_owned() },
-                    HarnessModel { value: "opus".to_owned(), label: "Opus (latest)".to_owned() },
-                    HarnessModel { value: "fable".to_owned(), label: "Fable (latest)".to_owned() },
-                    HarnessModel { value: "haiku".to_owned(), label: "Haiku (latest)".to_owned() },
+                    ModelChoice { value: "sonnet".to_owned(), label: "Sonnet (latest)".to_owned() },
+                    ModelChoice { value: "opus".to_owned(), label: "Opus (latest)".to_owned() },
+                    ModelChoice { value: "fable".to_owned(), label: "Fable (latest)".to_owned() },
+                    ModelChoice { value: "haiku".to_owned(), label: "Haiku (latest)".to_owned() },
                 ],
                 supports_max_turns: true,
                 supports_login: true,
@@ -119,7 +119,7 @@ impl Harness for ClaudeHarness {
         }
     }
 
-    fn list_models(&self) -> Result<Vec<HarnessModel>, HarnessError> {
+    fn list_models(&self) -> Result<Vec<ModelChoice>, Error> {
         // Keep the curated aliases first (`sonnet`/`opus` track "latest" and don't
         // churn), then append models.dev's current `anthropic` lineup (exact ids)
         // when the `models-dev` feature is on. Offline / feature-off → just aliases.
@@ -128,9 +128,9 @@ impl Harness for ClaudeHarness {
         Ok(models)
     }
 
-    fn readiness(&self) -> HarnessReadiness {
+    fn readiness(&self) -> Readiness {
         let Some(version) = probe_version(&self.command) else {
-            return HarnessReadiness {
+            return Readiness {
                 harness_id: CLAUDE_HARNESS_ID.to_owned(),
                 ready: false,
                 installed: false,
@@ -148,7 +148,7 @@ impl Harness for ClaudeHarness {
         // only sees the OAuth state, so we OR in the env key ourselves.
         let signed_in = probe_claude_signed_in(&self.command)
             || crate::harness::api_key_value_usable(std::env::var("ANTHROPIC_API_KEY").ok());
-        HarnessReadiness {
+        Readiness {
             harness_id: CLAUDE_HARNESS_ID.to_owned(),
             ready: signed_in,
             installed: true,
@@ -166,7 +166,7 @@ impl Harness for ClaudeHarness {
         }
     }
 
-    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
+    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
         // `attachments` ignored: Claude Code is a text CLI (no image input here).
         let RunRequest { run_id, prompt, cwd, mode, tuning, resume, attachments: _ } = request;
         let args = build_claude_args(prompt, mode, &tuning, resume.as_deref());
@@ -188,7 +188,7 @@ impl Harness for ClaudeHarness {
                 }
             },
         )
-        .map_err(HarnessError::spawn)?;
+        .map_err(Error::spawn)?;
         Ok(Box::new(handle))
     }
 
@@ -203,7 +203,7 @@ impl Harness for ClaudeHarness {
         }
     }
 
-    fn login(&self, on_event: InstallCallback) -> Result<(), HarnessError> {
+    fn login(&self, on_event: InstallCallback) -> Result<(), Error> {
         // `claude auth login` runs the CLI's OAuth flow (opens the
         // browser); streamed + blocked-until-exit by the shared helper.
         crate::run_login_command(&self.command, &["auth", "login"], on_event)
@@ -236,7 +236,7 @@ fn probe_claude_signed_in(command: &str) -> bool {
 /// Build readiness `details` carrying where `claude` resolves on the augmented
 /// PATH and how it was installed (native / npm-global / homebrew / bundled /
 /// unknown). Attached as a `serde_json::Value` object so it rides the existing
-/// `HarnessReadiness.details` without a struct change. `details.resolved_path`
+/// `Readiness.details` without a struct change. `details.resolved_path`
 /// is absent when the binary can't be located despite a successful
 /// `--version` (e.g. a PATH entry the resolver can't read) — the host renders
 /// version + status regardless.

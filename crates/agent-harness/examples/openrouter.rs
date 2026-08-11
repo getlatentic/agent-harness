@@ -15,10 +15,10 @@
 //! because every child the agent spawns inherits that environment.
 
 use harness::{ApiKey, 
-    Harness, HarnessError, OpenHarness, OpenHarnessConfig, RunEvent, RunRequest, RunTuning,
+    Harness, Error, OpenHarness, OpenHarnessConfig, RunEvent, RunRequest, RunTuning,
 };
 
-fn main() -> Result<(), HarnessError> {
+fn main() -> Result<(), Error> {
     let Ok(key) = std::env::var("OPENROUTER_API_KEY") else {
         eprintln!("Set OPENROUTER_API_KEY first. Get one at https://openrouter.ai/keys");
         return Ok(());

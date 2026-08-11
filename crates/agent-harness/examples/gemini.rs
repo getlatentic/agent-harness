@@ -10,11 +10,11 @@
 //! `opencode()` shorthand for exactly the same thing.
 
 use harness::{
-    AcpHarness, AcpHarnessConfig, Harness, HarnessError, InstallHint, RunEvent,
+    AcpHarness, AcpHarnessConfig, Harness, Error, InstallHint, RunEvent,
     RunRequest,
 };
 
-fn main() -> Result<(), HarnessError> {
+fn main() -> Result<(), Error> {
     let gemini = AcpHarness::custom(AcpHarnessConfig {
         id: "gemini".into(),
         display_name: "Gemini".into(),

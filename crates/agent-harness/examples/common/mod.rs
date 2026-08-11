@@ -1,7 +1,7 @@
 //! Shared helpers for the examples. Not an example itself — Cargo only builds
 //! `examples/*.rs` and `examples/*/main.rs`, so this directory is ignored.
 
-use harness::{Harness, HarnessError, OpenHarness};
+use harness::{Harness, Error, OpenHarness};
 
 /// The installed model with the most parameters.
 ///
@@ -13,7 +13,7 @@ use harness::{Harness, HarnessError, OpenHarness};
 ///
 /// Falls back to on-disk size when a backend reports no parameter count, so a
 /// model with missing metadata still ranks somewhere sensible.
-pub fn largest_installed(harness: &OpenHarness) -> Result<Option<String>, HarnessError> {
+pub fn largest_installed(harness: &OpenHarness) -> Result<Option<String>, Error> {
     let mut installed = harness.list_installed_models()?;
     installed.sort_by(|a, b| {
         billions(&a.parameter_size)

@@ -28,8 +28,8 @@ use serde_json::Value;
 use smol::Timer;
 
 use crate::{
-    CredentialSpec, Harness, HarnessCapabilities, HarnessError, HarnessInfo, HarnessModel,
-    HarnessReadiness, InstallHint, RunCallback, RunControl, RunEvent, RunHandle, RunMode,
+    CredentialSpec, Harness, Capabilities, Error, Manifest, ModelChoice,
+    Readiness, InstallHint, RunCallback, RunControl, RunEvent, RunHandle, RunMode,
     RunRequest,
 };
 
@@ -127,13 +127,13 @@ impl AcpHarness {
 }
 
 impl Harness for AcpHarness {
-    fn info(&self) -> HarnessInfo {
-        HarnessInfo {
+    fn info(&self) -> Manifest {
+        Manifest {
             id: self.id.clone(),
             display_name: self.display_name.clone(),
             description: self.description.clone(),
             install_hint: self.install_hint.clone(),
-            capabilities: HarnessCapabilities {
+            capabilities: Capabilities {
                 // Models are discovered live via `list_models()` (opencode lists
                 // its own; a generic ACP agent has none), so the static list is
                 // left empty by `Default`; a free-text model id is accepted.
@@ -143,9 +143,9 @@ impl Harness for AcpHarness {
         }
     }
 
-    fn readiness(&self) -> HarnessReadiness {
+    fn readiness(&self) -> Readiness {
         let installed = probe_command(&self.command);
-        HarnessReadiness {
+        Readiness {
             harness_id: self.id.clone(),
             ready: installed,
             installed,
@@ -163,7 +163,7 @@ impl Harness for AcpHarness {
         }
     }
 
-    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
+    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
         // resume (session/load) is a follow-up; this first cut runs a fresh
         // session. `attachments` ignored: a text prompt only.
         let RunRequest { run_id, prompt, cwd, mode, tuning, resume: _, attachments: _ } = request;
@@ -174,7 +174,7 @@ impl Harness for AcpHarness {
         let (env, model_config_file) = match (&self.model_control, tuning.model) {
             (Some(mc), Some(model)) => {
                 let path = write_model_config(&run_id, &mc.config_field, &model)
-                    .map_err(HarnessError::spawn)?;
+                    .map_err(Error::spawn)?;
                 (vec![(mc.config_env.clone(), path.to_string_lossy().into_owned())], Some(path))
             }
             _ => (Vec::new(), None),
@@ -207,7 +207,7 @@ impl Harness for AcpHarness {
         }
     }
 
-    fn list_models(&self) -> Result<Vec<HarnessModel>, HarnessError> {
+    fn list_models(&self) -> Result<Vec<ModelChoice>, Error> {
         // ACP exposes no model list; a config-file vendor (opencode) lists via
         // its own CLI subcommand. A generic ACP agent has none → empty (the host
         // hides the picker). PATH is augmented so a packaged `.app` finds the CLI.
@@ -219,7 +219,7 @@ impl Harness for AcpHarness {
             .env("PATH", crate::augmented_node_path())
             .output()
             .map_err(|e| {
-                HarnessError::spawn(format!(
+                Error::spawn(format!(
                     "`{} {}` failed: {e}",
                     self.command,
                     mc.list_subcommand.join(" ")
@@ -234,7 +234,7 @@ impl Harness for AcpHarness {
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())
-            .map(|line| HarnessModel { value: line.to_owned(), label: line.to_owned() })
+            .map(|line| ModelChoice { value: line.to_owned(), label: line.to_owned() })
             .collect();
         Ok(models)
     }
@@ -287,7 +287,7 @@ struct AcpRun {
 }
 
 impl RunControl for AcpRun {
-    fn cancel(&self) -> Result<(), HarnessError> {
+    fn cancel(&self) -> Result<(), Error> {
         self.cancel.store(true, Ordering::SeqCst);
         Ok(())
     }

@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use crate::{
-    probe_version, spawn_streaming, CredentialSpec, Harness, HarnessCapabilities, HarnessError,
-    HarnessInfo, HarnessModel, HarnessReadiness, InstallCallback, InstallHint, RunCallback,
+    probe_version, spawn_streaming, CredentialSpec, Harness, Capabilities, Error,
+    Manifest, ModelChoice, Readiness, InstallCallback, InstallHint, RunCallback,
     RunHandle, RunMode, RunRequest, RunTuning,
 };
 
@@ -78,8 +78,8 @@ impl CodexHarness {
 }
 
 impl Harness for CodexHarness {
-    fn info(&self) -> HarnessInfo {
-        HarnessInfo {
+    fn info(&self) -> Manifest {
+        Manifest {
             id: CODEX_HARNESS_ID.to_owned(),
             display_name: "Codex".to_owned(),
             description: "OpenAI's Codex agent CLI. Uses your existing Codex login.".to_owned(),
@@ -87,7 +87,7 @@ impl Harness for CodexHarness {
                 InstallHint::url("https://developers.openai.com/codex")
                     .with_command("npm install -g @openai/codex"),
             ),
-            capabilities: HarnessCapabilities {
+            capabilities: Capabilities {
                 // Codex owns its own login and edits files directly. Model
                 // names change often, so it takes free-text entry rather than a
                 // curated list, and it exposes reasoning effort. What it does
@@ -101,16 +101,16 @@ impl Harness for CodexHarness {
         }
     }
 
-    fn list_models(&self) -> Result<Vec<HarnessModel>, HarnessError> {
+    fn list_models(&self) -> Result<Vec<ModelChoice>, Error> {
         // Codex declares no static models (ids churn → free-text entry); fill the
         // picker from models.dev's `openai` lineup when the `models-dev` feature is
         // on (empty otherwise → the user types an id).
         Ok(crate::models_dev::provider_models("openai"))
     }
 
-    fn readiness(&self) -> HarnessReadiness {
+    fn readiness(&self) -> Readiness {
         let Some(version) = probe_version(&self.command) else {
-            return HarnessReadiness {
+            return Readiness {
                 harness_id: CODEX_HARNESS_ID.to_owned(),
                 ready: false,
                 installed: false,
@@ -128,7 +128,7 @@ impl Harness for CodexHarness {
         // state, so we OR in the env key ourselves.
         let signed_in = probe_codex_signed_in(&self.command)
             || crate::harness::api_key_value_usable(std::env::var("OPENAI_API_KEY").ok());
-        HarnessReadiness {
+        Readiness {
             harness_id: CODEX_HARNESS_ID.to_owned(),
             ready: signed_in,
             installed: true,
@@ -146,7 +146,7 @@ impl Harness for CodexHarness {
         }
     }
 
-    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
+    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
         // `attachments` ignored: codex exec is a text CLI (no image input here).
         let RunRequest { run_id, prompt, cwd, mode, tuning, resume, attachments: _ } = request;
         let args = build_codex_args(prompt, mode, &tuning, resume.as_deref());
@@ -181,7 +181,7 @@ impl Harness for CodexHarness {
                 }
             },
         )
-        .map_err(HarnessError::spawn)?;
+        .map_err(Error::spawn)?;
         Ok(Box::new(handle))
     }
 
@@ -194,7 +194,7 @@ impl Harness for CodexHarness {
         }
     }
 
-    fn login(&self, on_event: InstallCallback) -> Result<(), HarnessError> {
+    fn login(&self, on_event: InstallCallback) -> Result<(), Error> {
         // `codex login` runs the CLI's OAuth flow (opens the browser).
         crate::run_login_command(&self.command, &["login"], on_event)
     }

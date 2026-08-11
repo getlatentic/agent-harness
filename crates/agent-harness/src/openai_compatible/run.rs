@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::{HarnessError, RunCallback, RunControl, RunEvent, RunMode};
+use crate::{Error, RunCallback, RunControl, RunEvent, RunMode};
 
 use super::instructions;
 use super::profile::{self, ModelFacts, PromptProfile};
@@ -40,7 +40,7 @@ impl OpenAiRun {
 }
 
 impl RunControl for OpenAiRun {
-    fn cancel(&self) -> Result<(), HarnessError> {
+    fn cancel(&self) -> Result<(), Error> {
         self.cancel.store(true, Ordering::SeqCst);
         Ok(())
     }

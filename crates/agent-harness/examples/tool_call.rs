@@ -14,12 +14,12 @@
 //! Pick a model that supports tool calling. A very small model will echo the
 //! tool schemas back at you instead of calling them.
 
-use harness::{Harness, HarnessError, OpenHarness, RunEvent, RunMode, RunRequest, RunTuning};
+use harness::{Harness, Error, OpenHarness, RunEvent, RunMode, RunRequest, RunTuning};
 
 #[path = "common/mod.rs"]
 mod common;
 
-fn main() -> Result<(), HarnessError> {
+fn main() -> Result<(), Error> {
     let agent = OpenHarness::ollama();
 
     let readiness = agent.readiness();

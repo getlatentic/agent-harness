@@ -12,12 +12,12 @@
 //! # pick one explicitly with OLLAMA_MODEL=llama3.2:1b
 //! ```
 
-use harness::{Harness, HarnessError, OpenHarness, RunEvent, RunMode, RunRequest, RunTuning};
+use harness::{Harness, Error, OpenHarness, RunEvent, RunMode, RunRequest, RunTuning};
 
 #[path = "common/mod.rs"]
 mod common;
 
-fn main() -> Result<(), HarnessError> {
+fn main() -> Result<(), Error> {
     // Local Ollama on its default port (no API key). For a hosted endpoint:
     //   OpenHarness::custom(OpenHarnessConfig {
     //       id: "openrouter".into(), display_name: "OpenRouter".into(),

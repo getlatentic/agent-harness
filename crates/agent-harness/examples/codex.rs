@@ -7,9 +7,9 @@
 //! This file exists to make the point concrete: swapping the agent is a
 //! constructor change. Diff it against `claude.rs` — nothing else moves.
 
-use harness::{Codex, Harness, HarnessError, RunEvent, RunRequest};
+use harness::{Codex, Harness, Error, RunEvent, RunRequest};
 
-fn main() -> Result<(), HarnessError> {
+fn main() -> Result<(), Error> {
     let codex = Codex::new();
 
     let (_handle, events) = codex.run(RunRequest {

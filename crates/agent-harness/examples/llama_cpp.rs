@@ -14,10 +14,10 @@
 //! below is only a label.
 
 use harness::{ApiKey, 
-    Harness, HarnessError, OpenHarness, OpenHarnessConfig, RunEvent, RunRequest, RunTuning,
+    Harness, Error, OpenHarness, OpenHarnessConfig, RunEvent, RunRequest, RunTuning,
 };
 
-fn main() -> Result<(), HarnessError> {
+fn main() -> Result<(), Error> {
     let base_url = std::env::var("LLAMA_SERVER_URL")
         .unwrap_or_else(|_| "http://localhost:8080".into());
 

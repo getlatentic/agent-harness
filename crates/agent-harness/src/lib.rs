@@ -3,7 +3,7 @@
 //! The library you depend on to drive — or build — an agent harness,
 //! independent of any specific backend. It provides:
 //!   * the [`Harness`] trait + the neutral request/metadata types
-//!     ([`RunRequest`] / [`RunTuning`] / [`HarnessInfo`] / …),
+//!     ([`RunRequest`] / [`RunTuning`] / [`Manifest`] / …),
 //!   * the normalized [`RunEvent`] vocabulary every adapter parses into
 //!     ([`normalize_process_event`] + [`ParsedLine`]),
 //!   * the generic streaming subprocess engine ([`spawn_streaming`] +
@@ -32,8 +32,8 @@ pub use events::{
 };
 pub use raw::parse_raw_line;
 pub use harness::{
-    run_login_command, Attachment, BoxError, CredentialSpec, Harness, HarnessCapabilities, HarnessError,
-    HarnessInfo, HarnessModel, HarnessReadiness, InstallCallback, InstalledModel, InstallHint,
+    run_login_command, Attachment, BoxError, CredentialSpec, Harness, Capabilities, Error,
+    Manifest, ModelChoice, Readiness, InstallCallback, InstalledModel, InstallHint,
     ModelManagement,
     PullProgress, PullProgressAggregator, PullProgressCallback, ReasoningEffort, RunCallback,
     RunControl, RunHandle, RunMode, RunRequest, RunTuning,
@@ -41,7 +41,7 @@ pub use harness::{
 // The generic subprocess engine + the install/process event shapes live in
 // the `cli-stream` leaf; re-export them so adapters + consumers reach them
 // through the framework (e.g. `use harness::spawn_streaming`). `StreamError`
-// is re-exported too so a consumer can `downcast_ref` a `HarnessError`'s
+// is re-exported too so a consumer can `downcast_ref` a `Error`'s
 // source back to the typed spawn/cancel error.
 pub use cli_stream::{
     augmented_node_path, hidden_command, probe_version, spawn_streaming, InstallEvent, ProcessEvent,

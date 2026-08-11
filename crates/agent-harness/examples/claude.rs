@@ -6,9 +6,9 @@
 //!
 //! Every other example uses this same loop. Only the constructor changes.
 
-use harness::{Claude, Harness, HarnessError, RunEvent, RunRequest};
+use harness::{Claude, Harness, Error, RunEvent, RunRequest};
 
-fn main() -> Result<(), HarnessError> {
+fn main() -> Result<(), Error> {
     // Drives the `claude` CLI. See `codex.rs` for the same loop, one line apart.
     let claude = Claude::new();
 

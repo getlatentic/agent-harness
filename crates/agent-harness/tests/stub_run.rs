@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use harness::{
-    normalize_process_event, spawn_streaming, CredentialSpec, Harness, HarnessCapabilities,
-    HarnessError, HarnessInfo, HarnessReadiness, ParsedLine, RunCallback,
+    normalize_process_event, spawn_streaming, CredentialSpec, Harness, Capabilities,
+    Error, Manifest, Readiness, ParsedLine, RunCallback,
     RunEvent, RunHandle, RunMode, RunRequest, RunTuning,
 };
 
@@ -25,18 +25,18 @@ struct StubHarness {
 }
 
 impl Harness for StubHarness {
-    fn info(&self) -> HarnessInfo {
-        HarnessInfo {
+    fn info(&self) -> Manifest {
+        Manifest {
             id: "stub".to_owned(),
             display_name: "Stub".to_owned(),
             description: "integration-test stub harness".to_owned(),
             install_hint: None,
-            capabilities: HarnessCapabilities::default(),
+            capabilities: Capabilities::default(),
         }
     }
 
-    fn readiness(&self) -> HarnessReadiness {
-        HarnessReadiness {
+    fn readiness(&self) -> Readiness {
+        Readiness {
             harness_id: "stub".to_owned(),
             ready: true,
             installed: true,
@@ -47,7 +47,7 @@ impl Harness for StubHarness {
         }
     }
 
-    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
+    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
         let handle = spawn_streaming(
             PathBuf::from("sh"),
             vec!["-c".to_owned(), self.script.clone()],
@@ -63,7 +63,7 @@ impl Harness for StubHarness {
                 }
             },
         )
-        .map_err(HarnessError::spawn)?;
+        .map_err(Error::spawn)?;
         Ok(Box::new(handle))
     }
 

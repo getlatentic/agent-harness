@@ -6,9 +6,9 @@
 //! cargo run --example acp --features acp   # needs `opencode` on PATH
 //! ```
 
-use harness::{AcpHarness, Harness, HarnessError, RunEvent, RunRequest};
+use harness::{AcpHarness, Harness, Error, RunEvent, RunRequest};
 
-fn main() -> Result<(), HarnessError> {
+fn main() -> Result<(), Error> {
     // OpenCode over ACP — spawns `opencode acp` and relays its session stream.
     // Any other ACP agent works the same way — see `gemini.rs`.
     let agent = AcpHarness::opencode();

@@ -19,7 +19,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use harness::{
-    ApiKey, Attachment, Harness, HarnessModel, OpenHarness, OpenHarnessConfig, PromptCache, RunEvent, RunMode,
+    ApiKey, Attachment, Harness, ModelChoice, OpenHarness, OpenHarnessConfig, PromptCache, RunEvent, RunMode,
     RunRequest, RunTuning,
 };
 use serde_json::{json, Value};
@@ -117,7 +117,7 @@ fn harness_at(base: &str, api_key: ApiKey, prompt_cache: PromptCache) -> OpenHar
         base_url: base.to_owned(),
         api_key,
         prompt_cache,
-        models: vec![HarnessModel { value: "test-model".to_owned(), label: "Test model".to_owned() }],
+        models: vec![ModelChoice { value: "test-model".to_owned(), label: "Test model".to_owned() }],
         ..Default::default()
     })
     // Also skips the llama.cpp `/props` probe: 127.0.0.1 reads as a local

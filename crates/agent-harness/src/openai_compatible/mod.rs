@@ -30,8 +30,8 @@ use serde_json::Value;
 // agent-harness (the `openai-compatible` feature), so they come from the crate
 // root: the `Harness` trait it implements + the request/metadata types it uses.
 use crate::{
-    CredentialSpec, Harness, HarnessCapabilities, HarnessError, HarnessInfo, HarnessModel, InstallHint,
-    HarnessReadiness, InstalledModel, ModelManagement, PullProgressCallback,
+    CredentialSpec, Harness, Capabilities, Error, Manifest, ModelChoice, InstallHint,
+    Readiness, InstalledModel, ModelManagement, PullProgressCallback,
     RunCallback, RunHandle, RunRequest,
 };
 
@@ -81,7 +81,7 @@ enum Discovery {
     /// Query Ollama's `/api/tags` live.
     OllamaTags,
     /// A fixed list declared up front (any other OpenAI-compatible endpoint).
-    Static(Vec<HarnessModel>),
+    Static(Vec<ModelChoice>),
     /// The models.dev catalog filtered to a provider id — a cloud endpoint that
     /// proxies a known provider (`"anthropic"`, `"openai"`, …).
     ModelsDev(String),
@@ -356,7 +356,7 @@ pub struct OpenHarnessConfig {
     pub profile: PromptProfile,
     /// Curated models for the picker; may be empty (free-text ids are allowed,
     /// or call [`OpenHarness::with_models_dev`] for catalog discovery).
-    pub models: Vec<HarnessModel>,
+    pub models: Vec<ModelChoice>,
 }
 
 impl OpenHarness {
@@ -457,10 +457,10 @@ impl OpenHarness {
     /// manages models locally. Returns the same "unsupported" error the trait
     /// defaults give, so a non-Ollama instance reports cleanly instead of
     /// hitting a `/api/...` endpoint that isn't there.
-    fn require_ollama_management(&self) -> Result<(), HarnessError> {
+    fn require_ollama_management(&self) -> Result<(), Error> {
         match &self.discovery {
             Discovery::OllamaTags => Ok(()),
-            Discovery::Static(_) | Discovery::ModelsDev(_) => Err(HarnessError::Other(format!(
+            Discovery::Static(_) | Discovery::ModelsDev(_) => Err(Error::Other(format!(
                 "{} does not support managing models.",
                 self.display_name
             ))),
@@ -600,11 +600,11 @@ impl OpenHarness {
     /// All persisted sessions for this harness (newest-updated first), or an
     /// empty list when no session dir is configured. Lets a host render a
     /// conversations view without driving a run.
-    pub fn sessions(&self) -> Result<Vec<SessionRecord>, HarnessError> {
+    pub fn sessions(&self) -> Result<Vec<SessionRecord>, Error> {
         match &self.session_dir {
             Some(dir) => session::FileStore::new(dir.clone())
                 .list_records()
-                .map_err(HarnessError::Other),
+                .map_err(Error::Other),
             None => Ok(Vec::new()),
         }
     }
@@ -625,15 +625,15 @@ impl OpenHarness {
         server: &str,
         name: &str,
         arguments: &[(String, String)],
-    ) -> Result<Vec<PromptMessage>, HarnessError> {
+    ) -> Result<Vec<PromptMessage>, Error> {
         let cwd = std::env::current_dir().unwrap_or_default();
-        tools::mcp::get_prompt(&self.mcp_servers, server, name, arguments, &cwd).map_err(HarnessError::Other)
+        tools::mcp::get_prompt(&self.mcp_servers, server, name, arguments, &cwd).map_err(Error::Other)
     }
 }
 
 impl Harness for OpenHarness {
-    fn info(&self) -> HarnessInfo {
-        HarnessInfo {
+    fn info(&self) -> Manifest {
+        Manifest {
             id: self.id.clone(),
             display_name: self.display_name.clone(),
             description: self.description.clone(),
@@ -643,7 +643,7 @@ impl Harness for OpenHarness {
                 Discovery::OllamaTags => Some(InstallHint::url("https://ollama.com/download")),
                 Discovery::Static(_) | Discovery::ModelsDev(_) => None,
             },
-            capabilities: HarnessCapabilities {
+            capabilities: Capabilities {
                 credential_required: self.api_key.is_needed(),
                 // Dynamic discovery surfaces models via list_models(); a
                 // static instance lists them here.
@@ -660,8 +660,8 @@ impl Harness for OpenHarness {
         }
     }
 
-    fn readiness(&self) -> HarnessReadiness {
-        let base = |ready: bool, error: Option<String>| HarnessReadiness {
+    fn readiness(&self) -> Readiness {
+        let base = |ready: bool, error: Option<String>| Readiness {
             harness_id: self.id.clone(),
             ready,
             // A hosted endpoint isn't "installed"; reachability is the signal.
@@ -703,7 +703,7 @@ impl Harness for OpenHarness {
         }
     }
 
-    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
+    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
         let RunRequest { run_id, prompt, cwd, mode, tuning, resume, attachments } = request;
         let model = tuning
             .model
@@ -713,7 +713,7 @@ impl Harness for OpenHarness {
             .map(str::to_owned)
             .or_else(|| self.default_model.clone())
             .ok_or_else(|| {
-                HarnessError::Other(format!(
+                Error::Other(format!(
                     "{}: no model selected and no default — set RunTuning.model",
                     self.id
                 ))
@@ -780,9 +780,9 @@ impl Harness for OpenHarness {
         }
     }
 
-    fn list_models(&self) -> Result<Vec<HarnessModel>, HarnessError> {
+    fn list_models(&self) -> Result<Vec<ModelChoice>, Error> {
         match &self.discovery {
-            Discovery::OllamaTags => ollama::list_tags(&self.base_url).map_err(HarnessError::Other),
+            Discovery::OllamaTags => ollama::list_tags(&self.base_url).map_err(Error::Other),
             Discovery::Static(_) => Ok(self.info().capabilities.models),
             Discovery::ModelsDev(provider) => Ok(crate::models_dev::provider_models(provider)),
         }
@@ -799,9 +799,9 @@ impl Harness for OpenHarness {
         }
     }
 
-    fn list_installed_models(&self) -> Result<Vec<InstalledModel>, HarnessError> {
+    fn list_installed_models(&self) -> Result<Vec<InstalledModel>, Error> {
         self.require_ollama_management()?;
-        ollama::list_installed(&self.base_url).map_err(HarnessError::Other)
+        ollama::list_installed(&self.base_url).map_err(Error::Other)
     }
 
     fn pull_model(
@@ -809,14 +809,14 @@ impl Harness for OpenHarness {
         model: &str,
         cancel: &std::sync::atomic::AtomicBool,
         on_progress: PullProgressCallback<'_>,
-    ) -> Result<(), HarnessError> {
+    ) -> Result<(), Error> {
         self.require_ollama_management()?;
-        ollama::pull(&self.base_url, model, cancel, on_progress).map_err(HarnessError::Other)
+        ollama::pull(&self.base_url, model, cancel, on_progress).map_err(Error::Other)
     }
 
-    fn delete_model(&self, model: &str) -> Result<(), HarnessError> {
+    fn delete_model(&self, model: &str) -> Result<(), Error> {
         self.require_ollama_management()?;
-        ollama::delete(&self.base_url, model).map_err(HarnessError::Other)
+        ollama::delete(&self.base_url, model).map_err(Error::Other)
     }
 }
 
@@ -996,7 +996,7 @@ mod tests {
             display_name: "OpenRouter".to_owned(),
             base_url: "https://openrouter.ai/api".to_owned(),
             api_key: ApiKey::Env("OPENROUTER_API_KEY".to_owned()),
-            models: vec![HarnessModel { value: "x-ai/grok".to_owned(), label: "Grok".to_owned() }],
+            models: vec![ModelChoice { value: "x-ai/grok".to_owned(), label: "Grok".to_owned() }],
             ..Default::default()
         });
         assert!(h.info().capabilities.credential_required);

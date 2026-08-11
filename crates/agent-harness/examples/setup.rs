@@ -10,9 +10,9 @@
 
 use std::sync::Arc;
 
-use harness::{Claude, Harness, HarnessError, InstallEvent};
+use harness::{Claude, Harness, Error, InstallEvent};
 
-fn main() -> Result<(), HarnessError> {
+fn main() -> Result<(), Error> {
     let claude = Claude::new();
 
     let r = claude.readiness();
@@ -34,7 +34,7 @@ fn main() -> Result<(), HarnessError> {
             InstallEvent::Stdout { text } | InstallEvent::Stderr { text } => eprintln!("  {text}"),
             InstallEvent::Done { ok, .. } => eprintln!("done (ok={ok})"),
         });
-        // Fallible calls return the typed `HarnessError`; `?` propagates it.
+        // Fallible calls return the typed `Error`; `?` propagates it.
         claude.login(log)?; // `claude auth login` — opens the browser
     }
 

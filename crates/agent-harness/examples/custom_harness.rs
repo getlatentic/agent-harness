@@ -22,8 +22,8 @@ use std::path::PathBuf;
 use std::sync::{mpsc::sync_channel, Arc, Mutex};
 
 use harness::{
-    run_events_from_parsed, spawn_streaming, CredentialSpec, Harness, HarnessCapabilities,
-    HarnessError, HarnessInfo, HarnessReadiness, ParsedLine, ProcessEvent,
+    run_events_from_parsed, spawn_streaming, CredentialSpec, Harness, Capabilities,
+    Error, Manifest, Readiness, ParsedLine, ProcessEvent,
     RunCallback, RunEvent, RunHandle, RunRequest, Registry, SessionInfo,
 };
 use serde_json::Value;
@@ -35,19 +35,19 @@ const ECHO_ID: &str = "echo";
 struct EchoHarness;
 
 impl Harness for EchoHarness {
-    fn info(&self) -> HarnessInfo {
-        HarnessInfo {
+    fn info(&self) -> Manifest {
+        Manifest {
             id: ECHO_ID.to_owned(),
             display_name: "Echo".to_owned(),
             description: "A toy harness that echoes the prompt — a template for your own."
                 .to_owned(),
             install_hint: None,
-            capabilities: HarnessCapabilities::default(),
+            capabilities: Capabilities::default(),
         }
     }
 
-    fn readiness(&self) -> HarnessReadiness {
-        HarnessReadiness {
+    fn readiness(&self) -> Readiness {
+        Readiness {
             harness_id: ECHO_ID.to_owned(),
             ready: true,
             installed: true,
@@ -67,7 +67,7 @@ impl Harness for EchoHarness {
         }
     }
 
-    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
+    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
         // A real harness spawns its CLI here. We spawn `printf` to emit two
         // JSON lines: an init (→ Session) and the answer (→ Text).
         let answer = format!(r#"{{"text":"echo: {}"}}"#, request.prompt.replace('"', "'"));
@@ -97,7 +97,7 @@ impl Harness for EchoHarness {
                 }
             },
         )
-        .map_err(HarnessError::spawn)?;
+        .map_err(Error::spawn)?;
         Ok(Box::new(handle))
     }
 }

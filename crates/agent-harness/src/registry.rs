@@ -7,7 +7,7 @@
 //! implementing [`Harness`] in their own crate and calling
 //! [`Registry::register`] — no fork of this crate required.
 
-use crate::{Harness, HarnessInfo, HarnessReadiness};
+use crate::{Harness, Manifest, Readiness};
 #[cfg(feature = "claude")]
 use crate::Claude;
 #[cfg(feature = "codex")]
@@ -54,7 +54,7 @@ impl Registry {
         self
     }
 
-    /// Resolve a harness by its [`HarnessInfo::id`].
+    /// Resolve a harness by its [`Manifest::id`].
     pub fn by_id(&self, id: &str) -> Option<&dyn Harness> {
         self.harnesses
             .iter()
@@ -72,12 +72,12 @@ impl Registry {
     /// Probe readiness of every registered harness, in registration order — the
     /// "what's actually on this machine" discovery a picker renders. Each probe
     /// may shell out; treat as blocking and run it off the UI thread.
-    pub fn discover(&self) -> Vec<HarnessReadiness> {
+    pub fn discover(&self) -> Vec<Readiness> {
         self.harnesses.iter().map(|h| h.readiness()).collect()
     }
 
     /// Metadata for every registered harness, in registration order.
-    pub fn catalog(&self) -> Vec<HarnessInfo> {
+    pub fn catalog(&self) -> Vec<Manifest> {
         self.harnesses.iter().map(|h| h.info()).collect()
     }
 
@@ -123,7 +123,7 @@ pub fn harness_by_id(id: &str) -> Option<Box<dyn Harness>> {
 }
 
 /// Metadata for every built-in harness — the payload the UI picker renders.
-pub fn harness_catalog() -> Vec<HarnessInfo> {
+pub fn harness_catalog() -> Vec<Manifest> {
     default_registry().catalog()
 }
 
@@ -131,7 +131,7 @@ pub fn harness_catalog() -> Vec<HarnessInfo> {
 mod tests {
     use super::*;
     use crate::{
-        CredentialSpec, HarnessCapabilities, HarnessReadiness, RunCallback,
+        CredentialSpec, Capabilities, Readiness, RunCallback,
         RunHandle, RunRequest,
     };
 
@@ -168,17 +168,17 @@ mod tests {
     // type lives "outside" the built-ins yet registers + resolves the same.
     struct Acme;
     impl Harness for Acme {
-        fn info(&self) -> HarnessInfo {
-            HarnessInfo {
+        fn info(&self) -> Manifest {
+            Manifest {
                 id: "acme".to_owned(),
                 display_name: "Acme".to_owned(),
                 description: "A custom third-party harness.".to_owned(),
                 install_hint: None,
-                capabilities: HarnessCapabilities { allows_custom_model: true, ..Default::default() },
+                capabilities: Capabilities { allows_custom_model: true, ..Default::default() },
             }
         }
-        fn readiness(&self) -> HarnessReadiness {
-            HarnessReadiness {
+        fn readiness(&self) -> Readiness {
+            Readiness {
                 harness_id: "acme".to_owned(),
                 ready: true,
                 installed: true,
@@ -192,10 +192,10 @@ mod tests {
             &self,
             _req: RunRequest,
             _on_event: RunCallback,
-        ) -> Result<RunHandle, crate::HarnessError> {
+        ) -> Result<RunHandle, crate::Error> {
             // A real API-backed harness would call its HTTP endpoint here and
             // emit RunEvents through `on_event`; the dummy never runs.
-            Err(crate::HarnessError::Other(
+            Err(crate::Error::Other(
                 "acme: run not implemented in test".to_owned(),
             ))
         }

@@ -13,14 +13,14 @@
 //! launches load the cache instantly — so the picker works offline — and refresh
 //! it in the background. A provider's models are filtered to the agent-usable
 //! ones (`tool_call: true`, which drops embeddings / tts / image models), mapped
-//! to [`HarnessModel`], and ordered newest first.
+//! to [`ModelChoice`], and ordered newest first.
 //!
 //! [`Harness::list_models`]: crate::Harness::list_models
 
-use crate::HarnessModel;
+use crate::ModelChoice;
 
 /// The agent-usable models a provider serves per models.dev, mapped to
-/// [`HarnessModel`] and sorted by id for a stable picker order. Empty when the
+/// [`ModelChoice`] and sorted by id for a stable picker order. Empty when the
 /// `models-dev` feature is off, the catalog can't be fetched, or the provider is
 /// unknown — so a caller can fall back to its own static list.
 /// A model's context window from the catalog, when it lists one.
@@ -40,7 +40,7 @@ pub fn context_limit(provider: &str, model: &str) -> Option<u64> {
     }
 }
 
-pub fn provider_models(provider: &str) -> Vec<HarnessModel> {
+pub fn provider_models(provider: &str) -> Vec<ModelChoice> {
     #[cfg(feature = "models-dev")]
     {
         imp::provider_models(provider)
@@ -61,7 +61,7 @@ mod imp {
 
     use serde::Deserialize;
 
-    use crate::HarnessModel;
+    use crate::ModelChoice;
 
     const API_URL: &str = "https://models.dev/api.json";
 
@@ -189,12 +189,12 @@ mod imp {
             .context
     }
 
-    pub fn provider_models(provider: &str) -> Vec<HarnessModel> {
+    pub fn provider_models(provider: &str) -> Vec<ModelChoice> {
         catalog().map(|c| select(c, provider)).unwrap_or_default()
     }
 
     /// Pure filter+map (no network), so the selection logic is unit-testable.
-    fn select(catalog: &Catalog, provider: &str) -> Vec<HarnessModel> {
+    fn select(catalog: &Catalog, provider: &str) -> Vec<ModelChoice> {
         let Some(p) = catalog.0.get(provider) else {
             return Vec::new();
         };
@@ -209,7 +209,7 @@ mod imp {
         });
         models
             .into_iter()
-            .map(|m| HarnessModel {
+            .map(|m| ModelChoice {
                 value: m.id.clone(),
                 label: m.name.clone().unwrap_or_else(|| m.id.clone()),
             })
@@ -235,11 +235,11 @@ mod imp {
 
             // anthropic: only the tool_call model survives; `name` → label.
             let a = select(&catalog, "anthropic");
-            assert_eq!(a, vec![HarnessModel { value: "claude-x".into(), label: "Claude X".into() }]);
+            assert_eq!(a, vec![ModelChoice { value: "claude-x".into(), label: "Claude X".into() }]);
 
             // openai: no `name` → label falls back to the id.
             let o = select(&catalog, "openai");
-            assert_eq!(o, vec![HarnessModel { value: "o9".into(), label: "o9".into() }]);
+            assert_eq!(o, vec![ModelChoice { value: "o9".into(), label: "o9".into() }]);
 
             // unknown provider → empty (caller falls back to its static list).
             assert!(select(&catalog, "nope").is_empty());
