@@ -997,8 +997,47 @@ fn compute_cost(u: &wire::Usage, cost: crate::openai_compatible::ModelCost) -> f
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::wire::{FunctionCall, ToolCall};
+    use proptest::prelude::*;
     use std::path::PathBuf;
     use std::sync::Mutex;
+
+    /// Turns of every shape the estimator has to price: plain text, a tool call
+    /// with arguments, and the assistant turn that calls a tool and says
+    /// nothing — whose `content` is `None`, the case that separates a sum from
+    /// a product.
+    fn turn() -> impl Strategy<Value = ChatMessage> {
+        prop_oneof![
+            "\\PC{0,40}".prop_map(ChatMessage::user),
+            ("[a-z_]{1,12}", "\\PC{0,40}").prop_map(|(name, arguments)| ChatMessage {
+                role: "assistant".into(),
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_1".into(),
+                    function: FunctionCall { name, arguments },
+                }],
+                tool_call_id: None,
+            }),
+        ]
+    }
+
+    proptest! {
+        /// Compaction fires on this number, so the property that matters is not
+        /// accuracy — it is a heuristic and will drift — but that it never
+        /// shrinks as the transcript grows. If adding a turn could lower the
+        /// estimate, a conversation could cross the threshold and then fall
+        /// back under it, and compaction would never run on a growing context.
+        #[test]
+        fn a_longer_transcript_never_estimates_smaller(
+            transcript in prop::collection::vec(turn(), 0..12),
+            extra in turn(),
+        ) {
+            let before = estimate_tokens(&transcript);
+            let mut grown = transcript;
+            grown.push(extra);
+            prop_assert!(estimate_tokens(&grown) >= before);
+        }
+    }
 
     #[test]
     fn a_catalog_over_budget_leaves_the_prompt_for_the_skill_tool() {
