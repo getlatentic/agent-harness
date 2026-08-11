@@ -451,6 +451,14 @@ pub fn normalize_process_event(
             let message = truncate(&line, 240);
             if message.is_empty() {
                 vec![]
+            } else if cli_stream::needs_terminal(&line) {
+                // Otherwise this arrives as one more line of noise, and the run
+                // looks like it failed for no reason. Agents are spawned with
+                // pipes, so a CLI wanting a terminal needs its headless mode.
+                vec![RunEvent::Activity {
+                    run_id,
+                    message: format!("this agent wants an interactive terminal, which a run cannot give it — use its non-interactive mode. It said: {message}"),
+                }]
             } else {
                 vec![RunEvent::Activity { run_id, message }]
             }

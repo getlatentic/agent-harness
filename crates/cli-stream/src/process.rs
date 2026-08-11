@@ -494,6 +494,31 @@ where
 /// probe. `CREATE_NO_WINDOW` suppresses it. Use this in place of
 /// `Command::new` for anything a desktop app spawns; it is a plain
 /// `Command::new` on every other platform, so call sites stay `cfg`-free.
+/// Whether a line from a child suggests it wanted a terminal and did not get
+/// one.
+///
+/// Every child spawned here gets **pipes**, never a TTY, so `isatty` is false
+/// and a CLI may change what it prints or refuse to run. Most of the time that
+/// is welcome — no colour codes, no progress bars — but a CLI built around
+/// interactive prompts fails, and the message it gives is easy to miss among
+/// ordinary stderr.
+///
+/// Recognising it turns a confusing exit into a next step: run the CLI in
+/// whatever non-interactive mode it has (`--yes`, `-p`, `exec`, …).
+pub fn needs_terminal(line: &str) -> bool {
+    const SIGNS: &[&str] = &[
+        "not a tty",
+        "not a terminal",
+        "is not interactive",
+        "input device is not a tty",
+        "raw mode is not supported",
+        "non-tty environment",
+        "requires a tty",
+    ];
+    let lowered = line.to_lowercase();
+    SIGNS.iter().any(|sign| lowered.contains(sign))
+}
+
 pub fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     #[allow(unused_mut)]
     let mut command = std::process::Command::new(program);
@@ -696,6 +721,29 @@ mod tests {
             "expected Exited(cancelled=true), got {:?}",
             events.last()
         );
+    }
+
+    #[test]
+    fn a_cli_asking_for_a_terminal_is_recognised_however_it_phrases_it() {
+        // Children get pipes, never a TTY. When that is the problem, the CLI
+        // says so on stderr and the run otherwise looks like an unexplained
+        // failure — so the phrasings worth catching are the common ones.
+        for complaint in [
+            "Error: stdin is not a TTY",
+            "the input device is not a TTY",
+            "Raw mode is not supported on the current process.stdin",
+            "Prompts cannot be rendered in a non-TTY environment",
+            "this command requires a TTY",
+            "warning: stdout is not a terminal",
+        ] {
+            assert!(needs_terminal(complaint), "missed: {complaint}");
+        }
+
+        // And ordinary noise is left alone — mislabelling it would bury the
+        // real message under an explanation of the wrong problem.
+        for ordinary in ["npm WARN deprecated foo@1.0.0", "compiling 12 files", "", "tty"] {
+            assert!(!needs_terminal(ordinary), "false positive: {ordinary}");
+        }
     }
 
     #[cfg(unix)]

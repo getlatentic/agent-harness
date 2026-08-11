@@ -5,6 +5,12 @@
 //!
 //! It knows no CLI's output format and no agent's protocol — it moves lines.
 //!
+//! A child gets **pipes, never a terminal**, so `isatty` is false for it. That
+//! is usually what you want — no colour codes, no progress bars — but a CLI
+//! built around interactive prompts will refuse or hang, so run those in
+//! whatever non-interactive mode they offer. [`needs_terminal`] recognises the
+//! complaint when one slips through.
+//!
 //! ```no_run
 //! use cli_stream::{Command, Event};
 //!
@@ -59,4 +65,4 @@ pub mod process;
 
 pub use error::StreamError;
 pub use install::InstallEvent;
-pub use process::{hidden_command, Command, Event, ProcessHandle, Stderr, Stdin};
+pub use process::{hidden_command, needs_terminal, Command, Event, ProcessHandle, Stderr, Stdin};
