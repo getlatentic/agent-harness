@@ -168,6 +168,61 @@ fn project_dirs(cwd: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// The budget exists to keep instruction files from crowding out the
+        /// conversation, and it is spent in bytes over text a user wrote — so
+        /// multi-byte characters are the normal case, not the edge one.
+        ///
+        /// Being a *prefix* is the property that matters and the examples never
+        /// asserted: within budget and on a boundary are both satisfied by
+        /// returning nothing, or by returning the wrong slice of the file.
+        #[test]
+        fn what_is_taken_is_a_prefix_of_what_was_offered(
+            text in "\\PC{0,64}",
+            budget in 0usize..192,
+        ) {
+            let mut remaining = budget;
+            let taken = take_within(&text, &mut remaining);
+
+            prop_assert!(text.starts_with(&taken), "{taken:?} is not a prefix of {text:?}");
+            prop_assert!(taken.len() <= budget, "over budget");
+            prop_assert!(
+                budget - remaining >= taken.len(),
+                "charged less than it took",
+            );
+        }
+
+        /// A file that fits is never trimmed. Silently dropping the tail of an
+        /// instruction file that had room is the failure a byte budget invites.
+        #[test]
+        fn text_that_fits_is_taken_whole(text in "\\PC{0,64}", slack in 0usize..32) {
+            let budget = text.len() + slack;
+            let mut remaining = budget;
+            prop_assert_eq!(take_within(&text, &mut remaining), text.clone());
+            prop_assert_eq!(remaining, slack, "charged for more than the text");
+        }
+
+        /// When it must trim, it takes as much as the budget allows: the walk
+        /// back to a character boundary gives up at most the last character,
+        /// never more. Retreating further would quietly shrink every budget.
+        #[test]
+        fn trimming_gives_up_no_more_than_one_character(
+            text in "\\PC{1,64}",
+            budget in 0usize..192,
+        ) {
+            prop_assume!(text.len() > budget);
+            let mut remaining = budget;
+            let taken = take_within(&text, &mut remaining);
+            let widest = text.chars().map(char::len_utf8).max().unwrap_or(1);
+            prop_assert!(
+                taken.len() + widest > budget,
+                "took {} of a {budget} byte budget",
+                taken.len(),
+            );
+        }
+    }
 
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("hl-instr-{tag}-{}", std::process::id()));
