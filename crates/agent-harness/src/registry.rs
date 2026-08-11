@@ -7,11 +7,26 @@
 //! implementing [`Harness`] in their own crate and calling
 //! [`Registry::register`] — no fork of this crate required.
 
-use crate::{Harness, Manifest, Readiness};
+use serde::Serialize;
+
+use crate::{Capabilities, Harness, Manifest, Readiness};
 #[cfg(feature = "claude")]
 use crate::Claude;
 #[cfg(feature = "codex")]
 use crate::Codex;
+
+/// One row of a picker: who a harness is, and what it can do.
+///
+/// These are separate questions to the [`Harness`] trait — identity is asked
+/// once, capability constantly — but a UI needs both at the same moment, and
+/// this is the shape that crosses to it. Serializable and `camelCase`, so a
+/// host hands it to a frontend unchanged.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogEntry {
+    pub manifest: Manifest,
+    pub capabilities: Capabilities,
+}
 
 /// The identifier used when the caller doesn't pick one. (A literal so it's
 /// available even in builds compiled without the `claude` feature; hosts
@@ -76,9 +91,13 @@ impl Registry {
         self.harnesses.iter().map(|h| h.readiness()).collect()
     }
 
-    /// Metadata for every registered harness, in registration order.
-    pub fn catalog(&self) -> Vec<Manifest> {
-        self.harnesses.iter().map(|h| h.manifest()).collect()
+    /// Every registered harness, in registration order, as a picker renders it:
+    /// who it is and what it supports.
+    pub fn catalog(&self) -> Vec<CatalogEntry> {
+        self.harnesses
+            .iter()
+            .map(|h| CatalogEntry { manifest: h.manifest(), capabilities: h.capabilities() })
+            .collect()
     }
 
     /// The ids of every registered harness, in registration order.
@@ -123,7 +142,7 @@ pub fn harness_by_id(id: &str) -> Option<Box<dyn Harness>> {
 }
 
 /// Metadata for every built-in harness — the payload the UI picker renders.
-pub fn harness_catalog() -> Vec<Manifest> {
+pub fn harness_catalog() -> Vec<CatalogEntry> {
     default_registry().catalog()
 }
 
@@ -138,7 +157,7 @@ mod tests {
     #[test]
     fn default_registry_lists_claude_codex_in_order() {
         assert_eq!(default_registry().ids(), vec!["claude", "codex"]);
-        assert_eq!(default_registry().catalog()[0].id, DEFAULT_HARNESS_ID);
+        assert_eq!(default_registry().catalog()[0].manifest.id, DEFAULT_HARNESS_ID);
     }
 
     #[test]

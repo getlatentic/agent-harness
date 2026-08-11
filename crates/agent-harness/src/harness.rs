@@ -957,6 +957,33 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_process_backed_run_reports_its_pid_and_whether_it_was_stopped() {
+        // Both answers are load-bearing for an embedder. The pid is recorded so
+        // a child orphaned by a hard crash can be reaped on the next launch;
+        // `was_cancelled` is how a run the user stopped is told apart from one
+        // that finished on its own. Forwarding either wrongly is invisible
+        // until a stale agent is left running.
+        let child = spawn_streaming(
+            PathBuf::from("sleep"),
+            vec!["30".to_owned()],
+            Vec::new(),
+            std::env::temp_dir(),
+            "pid-test".to_owned(),
+            |_| {},
+        )
+        .expect("sleep should spawn");
+        let run: RunHandle = Box::new(child);
+
+        let pid = run.pid().expect("a live child has a pid");
+        assert!(pid > 1, "a real OS pid, not a placeholder: {pid}");
+        assert!(!run.was_cancelled(), "nothing has stopped it yet");
+
+        run.cancel().expect("cancel");
+        assert!(run.was_cancelled(), "a stopped run says so");
+    }
+
     /// A no-op [`RunControl`] so the mock harness below can hand back a
     /// [`RunHandle`] without a real process behind it.
     struct NoopControl;

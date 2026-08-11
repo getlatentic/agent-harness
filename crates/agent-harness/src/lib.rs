@@ -80,5 +80,6 @@ pub use openai_compatible::{
 };
 // The open registry + convenience constructors over the built-ins.
 pub use registry::{
+    CatalogEntry,
     default_registry, harness_by_id, harness_catalog, Registry, DEFAULT_HARNESS_ID,
 };
