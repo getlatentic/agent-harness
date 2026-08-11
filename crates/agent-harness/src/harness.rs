@@ -707,22 +707,12 @@ pub fn run_login_command(
         Vec::new(),
         std::env::current_dir().unwrap_or_default(),
         format!("login-{program}"),
-        move |event| match event {
-            ProcessEvent::Started { .. } => {}
-            ProcessEvent::Stdout { line, .. } => {
-                (*events_cb)(InstallEvent::Stdout { text: line });
+        move |event| {
+            let finished = matches!(event, ProcessEvent::Exited { .. });
+            if let Some(install) = login_event(&event) {
+                (*events_cb)(install);
             }
-            ProcessEvent::Stderr { line, .. } => {
-                (*events_cb)(InstallEvent::Stderr { text: line });
-            }
-            ProcessEvent::Error { message, .. } => {
-                (*events_cb)(InstallEvent::Stderr { text: message });
-            }
-            ProcessEvent::Exited { exit_code, .. } => {
-                (*events_cb)(InstallEvent::Done {
-                    exit_code,
-                    ok: exit_code == Some(0),
-                });
+            if finished {
                 let (lock, cvar) = &*done_cb;
                 // Recover from a poisoned lock instead of panicking on a
                 // reader thread: the guarded value is a plain bool, never in a
@@ -730,8 +720,6 @@ pub fn run_login_command(
                 *lock.lock().unwrap_or_else(|p| p.into_inner()) = true;
                 cvar.notify_all();
             }
-            // `ProcessEvent` is #[non_exhaustive]; ignore any future variant.
-            _ => {}
         },
     )
     .map_err(Error::login)?;
@@ -741,6 +729,30 @@ pub fn run_login_command(
         finished = cvar.wait(finished).unwrap_or_else(|p| p.into_inner());
     }
     Ok(())
+}
+
+/// One process event as an install-stream event, or `None` for the ones a user
+/// has no use for.
+///
+/// A separate function because the interesting cases are decisions, not
+/// plumbing: stderr carries text worth showing (an OAuth device code often
+/// arrives there, and so does the reason a login failed), and a read or wait
+/// failure is surfaced as stderr rather than dropped — a run that dies mid-way
+/// would otherwise end with no explanation at all. Those paths are provoked by
+/// OS-level failures no test can arrange, so the mapping is checked here with
+/// values instead.
+fn login_event(event: &ProcessEvent) -> Option<InstallEvent> {
+    match event {
+        ProcessEvent::Stdout { line, .. } => Some(InstallEvent::Stdout { text: line.clone() }),
+        ProcessEvent::Stderr { line, .. } => Some(InstallEvent::Stderr { text: line.clone() }),
+        ProcessEvent::Error { message, .. } => Some(InstallEvent::Stderr { text: message.clone() }),
+        ProcessEvent::Exited { exit_code, .. } => {
+            Some(InstallEvent::Done { exit_code: *exit_code, ok: *exit_code == Some(0) })
+        }
+        // `Started` is the spawn itself, which the caller already knows about;
+        // `ProcessEvent` is #[non_exhaustive], so anything new is ignored too.
+        _ => None,
+    }
 }
 
 /// Whether an API-key value an adapter pulled from the environment counts as
@@ -943,6 +955,35 @@ mod tests {
             matches!(events.last(), Some(InstallEvent::Done { ok: true, exit_code: Some(0) })),
             "and it ends exactly once, saying how: {events:?}"
         );
+    }
+
+    #[test]
+    fn every_kind_of_process_output_reaches_the_user_during_sign_in() {
+        // The paths that matter here cannot be provoked from a test — a wait or
+        // read failure is an OS-level fault — so the mapping is checked with
+        // values. Losing any of these leaves a stalled sign-in with nothing on
+        // screen to explain it.
+        let ev = |e: ProcessEvent| login_event(&e);
+        let run_id = || "r".to_owned();
+
+        assert!(ev(ProcessEvent::Started { run_id: run_id() }).is_none(), "the spawn is not news");
+
+        let out = ev(ProcessEvent::Stdout { run_id: run_id(), line: "visit https://x.test".into() });
+        assert!(matches!(out, Some(InstallEvent::Stdout { text }) if text.contains("x.test")));
+
+        // A device code arrives on stderr as often as stdout, and so does the
+        // reason a login failed.
+        let err = ev(ProcessEvent::Stderr { run_id: run_id(), line: "code ABCD".into() });
+        assert!(matches!(err, Some(InstallEvent::Stderr { text }) if text == "code ABCD"));
+
+        // A stream that dies is reported, not swallowed.
+        let broken = ev(ProcessEvent::Error { run_id: run_id(), message: "stream read failed".into() });
+        assert!(matches!(broken, Some(InstallEvent::Stderr { text }) if text.contains("read failed")));
+
+        let ok = ev(ProcessEvent::Exited { run_id: run_id(), exit_code: Some(0), cancelled: false });
+        assert!(matches!(ok, Some(InstallEvent::Done { ok: true, exit_code: Some(0) })));
+        let failed = ev(ProcessEvent::Exited { run_id: run_id(), exit_code: Some(1), cancelled: false });
+        assert!(matches!(failed, Some(InstallEvent::Done { ok: false, .. })), "only zero is success");
     }
 
     #[test]
