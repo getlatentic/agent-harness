@@ -134,17 +134,11 @@ impl Harness for AcpHarness {
             description: self.description.clone(),
             install_hint: self.install_hint.clone(),
             capabilities: HarnessCapabilities {
-                credential_required: false,
-                previews_edits: false,
                 // Models are discovered live via `list_models()` (opencode lists
                 // its own; a generic ACP agent has none), so the static list is
-                // empty; a free-text model id is also accepted.
-                models: Vec::new(),
+                // left empty by `Default`; a free-text model id is accepted.
                 allows_custom_model: true,
-                supports_effort: false,
-                supports_max_turns: false,
-                supports_login: false,
-                supports_custom_instructions: false,
+                ..Default::default()
             },
         }
     }

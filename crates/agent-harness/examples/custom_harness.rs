@@ -42,16 +42,7 @@ impl Harness for EchoHarness {
             description: "A toy harness that echoes the prompt — a template for your own."
                 .to_owned(),
             install_hint: None,
-            capabilities: HarnessCapabilities {
-                credential_required: false,
-                previews_edits: false,
-                models: Vec::new(),
-                allows_custom_model: false,
-                supports_effort: false,
-                supports_max_turns: false,
-                supports_login: false,
-                supports_custom_instructions: false,
-            },
+            capabilities: HarnessCapabilities::default(),
         }
     }
 

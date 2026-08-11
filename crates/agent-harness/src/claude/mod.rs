@@ -98,14 +98,13 @@ impl Harness for ClaudeHarness {
                     .with_command("curl -fsSL https://claude.ai/install.sh | bash"),
             ),
             capabilities: HarnessCapabilities {
-                // Claude Code owns its own login; it edits files
-                // directly (no previews). Curated model aliases (no
-                // free-text) + a turn cap; no reasoning-effort flag.
-                credential_required: false,
-                previews_edits: false,
+                // Claude Code owns its own login; it edits files directly, so
+                // no previews and no stored credential. Everything it does not
+                // support is left to `Default`.
+                //
                 // The aliases `claude --help` documents. This list is the whole
                 // picker when models.dev is unreachable, and `allows_custom_model`
-                // is false, so anything missing here is unreachable — not merely
+                // stays off, so anything missing here is unreachable — not merely
                 // unlisted.
                 models: vec![
                     HarnessModel { value: "sonnet".to_owned(), label: "Sonnet (latest)".to_owned() },
@@ -113,11 +112,9 @@ impl Harness for ClaudeHarness {
                     HarnessModel { value: "fable".to_owned(), label: "Fable (latest)".to_owned() },
                     HarnessModel { value: "haiku".to_owned(), label: "Haiku (latest)".to_owned() },
                 ],
-                allows_custom_model: false,
-                supports_effort: false,
                 supports_max_turns: true,
                 supports_login: true,
-                supports_custom_instructions: false,
+                ..Default::default()
             },
         }
     }

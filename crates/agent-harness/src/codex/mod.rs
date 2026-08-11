@@ -88,18 +88,15 @@ impl Harness for CodexHarness {
                     .with_command("npm install -g @openai/codex"),
             ),
             capabilities: HarnessCapabilities {
-                // Codex owns its own login and edits files directly.
-                // Model names change often, so allow free-text entry
-                // rather than a curated list; it exposes reasoning
-                // effort but no turn cap.
-                credential_required: false,
-                previews_edits: false,
-                models: Vec::new(),
+                // Codex owns its own login and edits files directly. Model
+                // names change often, so it takes free-text entry rather than a
+                // curated list, and it exposes reasoning effort. What it does
+                // not support — a turn cap, previews, a stored credential — is
+                // left to `Default`.
                 allows_custom_model: true,
                 supports_effort: true,
-                supports_max_turns: false,
                 supports_login: true,
-                supports_custom_instructions: false,
+                ..Default::default()
             },
         }
     }

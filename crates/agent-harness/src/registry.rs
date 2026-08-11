@@ -174,16 +174,7 @@ mod tests {
                 display_name: "Acme".to_owned(),
                 description: "A custom third-party harness.".to_owned(),
                 install_hint: None,
-                capabilities: HarnessCapabilities {
-                    credential_required: false,
-                    previews_edits: false,
-                    models: Vec::new(),
-                    allows_custom_model: true,
-                    supports_effort: false,
-                    supports_max_turns: false,
-                    supports_login: false,
-                    supports_custom_instructions: false,
-                },
+                capabilities: HarnessCapabilities { allows_custom_model: true, ..Default::default() },
             }
         }
         fn readiness(&self) -> HarnessReadiness {

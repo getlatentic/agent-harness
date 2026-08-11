@@ -645,7 +645,6 @@ impl Harness for OpenHarness {
             },
             capabilities: HarnessCapabilities {
                 credential_required: self.api_key.is_needed(),
-                previews_edits: false,
                 // Dynamic discovery surfaces models via list_models(); a
                 // static instance lists them here.
                 models: match &self.discovery {
@@ -654,10 +653,9 @@ impl Harness for OpenHarness {
                     Discovery::OllamaTags | Discovery::ModelsDev(_) => Vec::new(),
                 },
                 allows_custom_model: true,
-                supports_effort: false,
                 supports_max_turns: true,
-                supports_login: false,
                 supports_custom_instructions: true,
+                ..Default::default()
             },
         }
     }
