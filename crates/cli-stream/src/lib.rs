@@ -11,8 +11,8 @@
 //! # fn main() -> Result<(), cli_stream::StreamError> {
 //! // stdout and stderr are always streamed; stdin is opt-in.
 //! let spawn = Spawn::new("some-server", ".", "run-1")
-//!     .args(vec!["--stdio".to_owned()])
-//!     .env(vec![("RUST_LOG".to_owned(), "info".to_owned())])
+//!     .args(["--stdio"])
+//!     .env([("RUST_LOG", "info")])
 //!     .stdin(Stdin::Piped);
 //!
 //! let handle = spawn_streaming(spawn, |event| match event {

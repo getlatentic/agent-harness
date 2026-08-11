@@ -48,8 +48,8 @@ impl StdioConnection {
     ) -> Result<StdioConnection, String> {
         let (tx, rx) = mpsc::channel();
         let spawn = Spawn::new(command, cwd, format!("mcp-{server}"))
-            .args(args.to_vec())
-            .env(env.to_vec())
+            .args(args.iter().map(String::as_str))
+            .env(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdin(Stdin::Piped);
         let handle = crate::node_cli::spawn_cli(spawn, move |event| {
             // Only stdout carries protocol; a server's stderr is its logging,

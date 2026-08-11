@@ -704,7 +704,7 @@ pub fn run_login_command(
     // Bound, not `_`, so the handle outlives the wait (dropping it could
     // signal the child); by the time we return, the process has exited.
     let spawn = Spawn::new(program, std::env::current_dir().unwrap_or_default(), format!("login-{program}"))
-        .args(args.iter().map(|s| (*s).to_owned()).collect());
+        .args(args.iter().copied());
     let _handle = spawn_cli(
         spawn,
         move |event| {
@@ -1007,7 +1007,7 @@ mod tests {
         // that finished on its own. Forwarding either wrongly is invisible
         // until a stale agent is left running.
         let child = spawn_cli(
-            Spawn::new("sleep", std::env::temp_dir(), "pid-test").args(vec!["30".to_owned()]),
+            Spawn::new("sleep", std::env::temp_dir(), "pid-test").args(["30"]),
             |_| {},
         )
         .expect("sleep should spawn");

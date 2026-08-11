@@ -105,15 +105,26 @@ impl Spawn {
         }
     }
 
+    /// `.args(["--stdio"])` — anything string-like, borrowed or owned.
     #[must_use]
-    pub fn args(mut self, args: Vec<String>) -> Self {
-        self.args = args;
+    pub fn args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.args = args.into_iter().map(Into::into).collect();
         self
     }
 
+    /// `.env([("RUST_LOG", "info")])` — applied over the inherited environment.
     #[must_use]
-    pub fn env(mut self, env: Vec<(String, String)>) -> Self {
-        self.env = env;
+    pub fn env<I, K, V>(mut self, env: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.env = env.into_iter().map(|(k, v)| (k.into(), v.into())).collect();
         self
     }
 
@@ -489,7 +500,7 @@ mod tests {
     fn run(program: &str, args: &[&str]) -> Vec<ProcessEvent> {
         let (cb, events, done) = collector();
         let _handle = spawn_streaming(
-            Spawn::new(program, ".", "t").args(args.iter().map(|s| (*s).to_owned()).collect()),
+            Spawn::new(program, ".", "t").args(args.iter().copied()),
             cb,
         )
         .expect("spawn");
