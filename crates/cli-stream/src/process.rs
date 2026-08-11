@@ -489,10 +489,20 @@ where
     R: Read,
     F: FnMut(Event),
 {
-    let buffered = BufReader::new(reader);
-    for line in buffered.lines() {
-        match line {
-            Ok(text) => {
+    let mut buffered = BufReader::new(reader);
+    let mut bytes = Vec::new();
+    loop {
+        bytes.clear();
+        match buffered.read_until(b'\n', &mut bytes) {
+            Ok(0) => return,
+            Ok(_) => {
+                strip_eol(&mut bytes);
+                // Lossy on purpose. A child's stdout is a byte stream, and
+                // agent CLIs share it with progress bars, ANSI art and paths
+                // in whatever encoding the filesystem gave them. Decoding
+                // strictly makes one undecodable byte end the transcript,
+                // taking the result line with it.
+                let text = String::from_utf8_lossy(&bytes).into_owned();
                 let event = if is_stdout {
                     Event::Stdout {
                         run_id: run_id.clone(),
@@ -513,6 +523,16 @@ where
                 });
                 return;
             }
+        }
+    }
+}
+
+/// Drop one trailing line terminator, `\n` or `\r\n`.
+fn strip_eol(bytes: &mut Vec<u8>) {
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
         }
     }
 }
@@ -568,6 +588,7 @@ pub fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Com
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
     use super::*;
 
     /// Issue #35: a GUI host spawning a console-subsystem CLI flashed a console
@@ -903,6 +924,100 @@ mod tests {
                 assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
             }
             other => panic!("expected StreamError::Spawn, got {other:?}"),
+        }
+    }
+
+    fn pumped(bytes: &[u8]) -> Vec<Event> {
+        let mut events = Vec::new();
+        pump_lines(bytes, "t".to_owned(), true, |event| events.push(event));
+        events
+    }
+
+    fn lines_of(events: &[Event]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Stdout { line, .. } => Some(line.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn one_undecodable_byte_does_not_cost_us_the_rest_of_the_run() {
+        // Agent CLIs write progress bars, ANSI art and the occasional raw byte
+        // to the same pipe they write results to. A stream is a byte stream,
+        // so the only safe reading is that a line we cannot decode is one
+        // damaged line — not the end of the transcript.
+        let mut bytes = b"first\n".to_vec();
+        bytes.extend_from_slice(&[0xff, 0xfe]);
+        bytes.extend_from_slice(b"\nlast\n");
+
+        let lines = lines_of(&pumped(&bytes));
+
+        assert_eq!(lines.first().map(String::as_str), Some("first"));
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("last"),
+            "a line after the bad byte still arrives"
+        );
+        assert_eq!(lines.len(), 3, "the damaged line is kept, lossily");
+    }
+
+    /// Bytes shaped like a real child's stdout: mostly text, plenty of line
+    /// terminators, and the high bytes that are never valid UTF-8 alone.
+    /// Uniform `Vec<u8>` would hit `\n` once every 256 bytes and barely
+    /// exercise the framing this is here to check.
+    fn stream_bytes() -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(
+            prop_oneof![
+                6 => 0x20u8..0x7f,
+                3 => Just(b'\n'),
+                1 => Just(b'\r'),
+                2 => 0x80u8..=0xff,
+            ],
+            0..64,
+        )
+    }
+
+    fn line_count(bytes: &[u8]) -> usize {
+        if bytes.is_empty() {
+            return 0;
+        }
+        let newlines = bytes.iter().filter(|byte| **byte == b'\n').count();
+        newlines + usize::from(bytes.last() != Some(&b'\n'))
+    }
+
+    proptest! {
+        /// Framing is a question about newlines, so it cannot depend on whether
+        /// the bytes between them decode. This is the property the lossy fix is
+        /// really about: strict decoding satisfied it only for valid UTF-8.
+        #[test]
+        fn every_line_the_child_wrote_is_one_the_caller_sees(bytes in stream_bytes()) {
+            let events = pumped(&bytes);
+            prop_assert_eq!(lines_of(&events).len(), line_count(&bytes));
+            prop_assert!(
+                !events.iter().any(|event| matches!(event, Event::Error { .. })),
+                "no byte sequence is a read failure",
+            );
+        }
+
+        /// A line never carries the delimiter that ended it. Only `\n`
+        /// delimits: a bare `\r` is content — it is how a progress bar
+        /// overwrites itself — and is stripped only as part of a `\r\n` pair.
+        #[test]
+        fn no_line_smuggles_its_delimiter(bytes in stream_bytes()) {
+            for line in lines_of(&pumped(&bytes)) {
+                prop_assert!(!line.contains('\n'), "got {line:?}");
+            }
+        }
+
+        /// And for text, lossiness costs nothing: what the child wrote is
+        /// exactly what the caller reads.
+        #[test]
+        fn text_arrives_unchanged(lines in prop::collection::vec("[^\r\n]{0,24}", 0..8)) {
+            let written: String = lines.iter().map(|line| format!("{line}\n")).collect();
+            prop_assert_eq!(lines_of(&pumped(written.as_bytes())), lines);
         }
     }
 }
