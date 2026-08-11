@@ -21,8 +21,8 @@
 use std::sync::{mpsc::sync_channel, Arc, Mutex};
 
 use harness::{
-    run_events_from_parsed, spawn_streaming, Spawn, CredentialSpec, Harness,
-    Error, Info, Readiness, ParsedLine, ProcessEvent,
+    run_events_from_parsed, Spawn, CredentialSpec, Harness,
+    Error, Info, Readiness, ParsedLine, Event,
     RunCallback, RunEvent, RunHandle, RunRequest, Registry, SessionInfo,
 };
 use serde_json::Value;
@@ -82,9 +82,11 @@ impl Harness for EchoHarness {
         // (invoked from reader threads), so per-run state lives behind an
         // `Arc<Mutex>` — the same shape the built-in codex adapter uses.
         let parser = Arc::new(Mutex::new(EchoParser::default()));
-        let handle = spawn_streaming(
-            Spawn::new("printf").cwd(cwd).run_id(request.run_id).args(args),
-            move |event| {
+        let handle = Spawn::new("printf")
+            .cwd(cwd)
+            .run_id(request.run_id)
+            .args(args)
+            .stream(move |event| {
                 let mut parser = parser.lock().expect("echo parser mutex");
                 for ev in parser.on_process_event(event) {
                     (*on_event)(ev);
@@ -106,10 +108,10 @@ struct EchoParser {
 }
 
 impl EchoParser {
-    fn on_process_event(&mut self, event: ProcessEvent) -> Vec<RunEvent> {
+    fn on_process_event(&mut self, event: Event) -> Vec<RunEvent> {
         match event {
-            ProcessEvent::Started { run_id } => vec![RunEvent::Started { run_id }],
-            ProcessEvent::Exited {
+            Event::Started { run_id } => vec![RunEvent::Started { run_id }],
+            Event::Exited {
                 run_id,
                 exit_code,
                 cancelled,
@@ -118,12 +120,12 @@ impl EchoParser {
                 exit_code,
                 cancelled,
             }],
-            ProcessEvent::Error { run_id, message } => vec![RunEvent::Error { run_id, message }],
-            ProcessEvent::Stderr { .. } => Vec::new(),
-            ProcessEvent::Stdout { run_id, line } => {
+            Event::Error { run_id, message } => vec![RunEvent::Error { run_id, message }],
+            Event::Stderr { .. } => Vec::new(),
+            Event::Stdout { run_id, line } => {
                 run_events_from_parsed(&run_id, self.parse_line(&line))
             }
-            // `ProcessEvent` is #[non_exhaustive]; ignore any future variant.
+            // `Event` is #[non_exhaustive]; ignore any future variant.
             _ => Vec::new(),
         }
     }

@@ -6,15 +6,15 @@
 //! It knows no CLI's output format and no agent's protocol — it moves lines.
 //!
 //! ```no_run
-//! use cli_stream::{spawn, ProcessEvent, Spawn};
+//! use cli_stream::{Event, Spawn};
 //!
 //! # fn main() -> Result<(), cli_stream::StreamError> {
-//! // Read the events off a channel — stdout and stderr are always streamed.
-//! let (handle, events) = spawn(Spawn::new("some-cli").args(["--verbose"]))?;
+//! // stdout and stderr are always streamed.
+//! let (handle, events) = Spawn::new("some-cli").args(["--verbose"]).start()?;
 //! for event in events {
 //!     match event {
-//!         ProcessEvent::Stdout { line, .. } => println!("out: {line}"),
-//!         ProcessEvent::Stderr { line, .. } => eprintln!("err: {line}"),
+//!         Event::Stdout { line, .. } => println!("out: {line}"),
+//!         Event::Stderr { line, .. } => eprintln!("err: {line}"),
 //!         _ => {}
 //!     }
 //! }
@@ -24,36 +24,27 @@
 //! ```
 //!
 //! Stdin is opt-in, because a child that inherits a terminal's stdin can block
-//! forever waiting for input nobody is typing. Ask for it to answer a child
-//! that asks something — the handle is `Clone`, so a reply can be written from
-//! inside the reader:
+//! forever waiting for input nobody is typing. Ask for it and answer the child
+//! as it asks — the handle is yours for the whole run:
 //!
 //! ```no_run
-//! use cli_stream::{spawn_streaming, ProcessEvent, Spawn, Stdin};
+//! use cli_stream::{Event, Spawn, Stdin};
 //!
 //! # fn main() -> Result<(), cli_stream::StreamError> {
-//! let spawn = Spawn::new("some-server").args(["--stdio"]).stdin(Stdin::Piped);
-//!
-//! let replier = std::sync::Arc::new(std::sync::Mutex::new(None));
-//! let slot = std::sync::Arc::clone(&replier);
-//! let handle = spawn_streaming(spawn, move |event| {
-//!     if let ProcessEvent::Stdout { line, .. } = event {
-//!         if line.contains("ready") {
-//!             if let Some(h) = slot.lock().unwrap().as_ref() {
-//!                 let _: &cli_stream::ProcessHandle = h;
-//!                 let _ = h.write_stdin_line(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#);
-//!             }
+//! let (handle, events) = Spawn::new("some-cli").stdin(Stdin::Piped).start()?;
+//! for event in events {
+//!     if let Event::Stdout { line, .. } = event {
+//!         if line.contains("Password:") {
+//!             handle.write_stdin_line("hunter2")?;
 //!         }
 //!     }
-//! })?;
-//! *replier.lock().unwrap() = Some(handle.clone());
-//!
-//! // …or just write to it directly, whenever you like.
-//! handle.write_stdin_line("hello")?;
-//! handle.cancel()?;
+//! }
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! [`Spawn::stream`] takes a callback instead, for a caller forwarding onto a
+//! sink rather than looping.
 //!
 //! [`InstallEvent`] is the sibling shape for streamed install/login output.
 //!
@@ -68,4 +59,4 @@ pub mod process;
 
 pub use error::StreamError;
 pub use install::InstallEvent;
-pub use process::{hidden_command, spawn, spawn_streaming, ProcessEvent, ProcessHandle, Spawn, Stdin};
+pub use process::{hidden_command, Event, ProcessHandle, Spawn, Stdin};

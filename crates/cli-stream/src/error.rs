@@ -1,6 +1,6 @@
 //! Typed errors for the streaming engine.
 
-/// Why [`spawn_streaming`](crate::spawn_streaming) or
+/// Why [`Spawn::stream`](crate::Spawn::stream) or
 /// [`ProcessHandle::cancel`](crate::ProcessHandle::cancel) failed.
 ///
 /// Carries the real underlying [`std::io::Error`] as a source (via

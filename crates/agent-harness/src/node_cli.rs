@@ -271,7 +271,7 @@ fn hardcoded_node_dirs() -> String {
 
 /// Spawn an agent CLI and stream it: resolve a bare name to its absolute path,
 /// put that program's own directory at the front of `PATH`, then hand off to
-/// [`cli_stream::spawn_streaming`].
+/// [`cli_stream::Spawn::stream`].
 ///
 /// Every adapter driving a CLI goes through here rather than calling
 /// `spawn_streaming` directly. The engine takes the environment it is given —
@@ -282,12 +282,12 @@ fn hardcoded_node_dirs() -> String {
 /// A `PATH` the caller supplies still wins: it is applied after this one.
 pub fn spawn_cli<F>(spawn: cli_stream::Spawn, callback: F) -> Result<cli_stream::ProcessHandle, cli_stream::StreamError>
 where
-    F: FnMut(cli_stream::ProcessEvent) + Send + Sync + Clone + 'static,
+    F: FnMut(cli_stream::Event) + Send + Sync + Clone + 'static,
 {
     let program = resolve_program(spawn.program);
     let mut env = vec![("PATH".to_owned(), augment_path_for_node(&program))];
     env.extend(spawn.env);
-    cli_stream::spawn_streaming(cli_stream::Spawn { program, env, ..spawn }, callback)
+    cli_stream::Spawn { program, env, ..spawn }.stream(callback)
 }
 
 #[cfg(test)]
@@ -534,8 +534,8 @@ mod spawned {
         let spawn = cli_stream::Spawn::new(program).cwd(std::env::temp_dir()).run_id("t").env(env);
         let _handle = spawn_cli(spawn, move |event| {
             match event {
-                cli_stream::ProcessEvent::Stdout { line, .. } => sink.lock().unwrap().push(line),
-                cli_stream::ProcessEvent::Exited { .. } => flag.store(true, std::sync::atomic::Ordering::SeqCst),
+                cli_stream::Event::Stdout { line, .. } => sink.lock().unwrap().push(line),
+                cli_stream::Event::Exited { .. } => flag.store(true, std::sync::atomic::Ordering::SeqCst),
                 _ => {}
             }
         })

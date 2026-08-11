@@ -11,7 +11,7 @@
 use std::time::{Duration, Instant};
 
 use harness::{
-    normalize_process_event, spawn_streaming, Spawn, CredentialSpec, Harness,
+    normalize_process_event, Spawn, CredentialSpec, Harness,
     Error, Info, Readiness, ParsedLine, RunCallback,
     RunEvent, RunHandle, RunMode, RunRequest, RunTuning,
 };
@@ -46,10 +46,11 @@ impl Harness for StubHarness {
     }
 
     fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
-        let handle = spawn_streaming(
-            Spawn::new("sh").cwd(std::env::current_dir().unwrap_or_default()).run_id(request.run_id)
-                .args(["-c", &self.script]),
-            move |event| {
+        let handle = Spawn::new("sh")
+            .cwd(std::env::current_dir().unwrap_or_default())
+            .run_id(request.run_id)
+            .args(["-c", &self.script])
+            .stream(move |event| {
                 for ev in normalize_process_event(event, |line| ParsedLine {
                     text: Some(line.to_owned()),
                     ..Default::default()

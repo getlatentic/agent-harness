@@ -26,7 +26,7 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::events::RunEvent;
-use cli_stream::{InstallEvent, ProcessEvent, ProcessHandle};
+use cli_stream::{InstallEvent, Event, ProcessHandle};
 use crate::node_cli::spawn_cli;
 use cli_stream::Spawn;
 
@@ -708,7 +708,7 @@ pub fn run_login_command(
     let _handle = spawn_cli(
         spawn,
         move |event| {
-            let finished = matches!(event, ProcessEvent::Exited { .. });
+            let finished = matches!(event, Event::Exited { .. });
             if let Some(install) = login_event(&event) {
                 (*events_cb)(install);
             }
@@ -741,16 +741,16 @@ pub fn run_login_command(
 /// would otherwise end with no explanation at all. Those paths are provoked by
 /// OS-level failures no test can arrange, so the mapping is checked here with
 /// values instead.
-fn login_event(event: &ProcessEvent) -> Option<InstallEvent> {
+fn login_event(event: &Event) -> Option<InstallEvent> {
     match event {
-        ProcessEvent::Stdout { line, .. } => Some(InstallEvent::Stdout { text: line.clone() }),
-        ProcessEvent::Stderr { line, .. } => Some(InstallEvent::Stderr { text: line.clone() }),
-        ProcessEvent::Error { message, .. } => Some(InstallEvent::Stderr { text: message.clone() }),
-        ProcessEvent::Exited { exit_code, .. } => {
+        Event::Stdout { line, .. } => Some(InstallEvent::Stdout { text: line.clone() }),
+        Event::Stderr { line, .. } => Some(InstallEvent::Stderr { text: line.clone() }),
+        Event::Error { message, .. } => Some(InstallEvent::Stderr { text: message.clone() }),
+        Event::Exited { exit_code, .. } => {
             Some(InstallEvent::Done { exit_code: *exit_code, ok: *exit_code == Some(0) })
         }
         // `Started` is the spawn itself, which the caller already knows about;
-        // `ProcessEvent` is #[non_exhaustive], so anything new is ignored too.
+        // `Event` is #[non_exhaustive], so anything new is ignored too.
         _ => None,
     }
 }
@@ -963,26 +963,26 @@ mod tests {
         // read failure is an OS-level fault — so the mapping is checked with
         // values. Losing any of these leaves a stalled sign-in with nothing on
         // screen to explain it.
-        let ev = |e: ProcessEvent| login_event(&e);
+        let ev = |e: Event| login_event(&e);
         let run_id = || "r".to_owned();
 
-        assert!(ev(ProcessEvent::Started { run_id: run_id() }).is_none(), "the spawn is not news");
+        assert!(ev(Event::Started { run_id: run_id() }).is_none(), "the spawn is not news");
 
-        let out = ev(ProcessEvent::Stdout { run_id: run_id(), line: "visit https://x.test".into() });
+        let out = ev(Event::Stdout { run_id: run_id(), line: "visit https://x.test".into() });
         assert!(matches!(out, Some(InstallEvent::Stdout { text }) if text.contains("x.test")));
 
         // A device code arrives on stderr as often as stdout, and so does the
         // reason a login failed.
-        let err = ev(ProcessEvent::Stderr { run_id: run_id(), line: "code ABCD".into() });
+        let err = ev(Event::Stderr { run_id: run_id(), line: "code ABCD".into() });
         assert!(matches!(err, Some(InstallEvent::Stderr { text }) if text == "code ABCD"));
 
         // A stream that dies is reported, not swallowed.
-        let broken = ev(ProcessEvent::Error { run_id: run_id(), message: "stream read failed".into() });
+        let broken = ev(Event::Error { run_id: run_id(), message: "stream read failed".into() });
         assert!(matches!(broken, Some(InstallEvent::Stderr { text }) if text.contains("read failed")));
 
-        let ok = ev(ProcessEvent::Exited { run_id: run_id(), exit_code: Some(0), cancelled: false });
+        let ok = ev(Event::Exited { run_id: run_id(), exit_code: Some(0), cancelled: false });
         assert!(matches!(ok, Some(InstallEvent::Done { ok: true, exit_code: Some(0) })));
-        let failed = ev(ProcessEvent::Exited { run_id: run_id(), exit_code: Some(1), cancelled: false });
+        let failed = ev(Event::Exited { run_id: run_id(), exit_code: Some(1), cancelled: false });
         assert!(matches!(failed, Some(InstallEvent::Done { ok: false, .. })), "only zero is success");
     }
 

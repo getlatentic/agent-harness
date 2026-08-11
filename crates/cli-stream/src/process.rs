@@ -1,5 +1,5 @@
 //! Streaming subprocess control: spawn a child, pipe its stdout/stderr
-//! line-by-line through a callback as [`ProcessEvent`]s, and hand back a
+//! line-by-line through a callback as [`Event`]s, and hand back a
 //! [`ProcessHandle`] for cancellation (SIGTERM → SIGKILL).
 //!
 //! The environment is the caller's: this spawns what it is told to spawn, with
@@ -33,7 +33,7 @@ use std::time::Duration;
 // consumers must carry a `_` arm. (Construction of existing variants is
 // unaffected, so it's still ergonomic to build them.)
 #[non_exhaustive]
-pub enum ProcessEvent {
+pub enum Event {
     /// First event. Sent before the child has produced any output so the
     /// UI can show a "thinking…" state.
     Started { run_id: String },
@@ -87,7 +87,7 @@ pub struct Spawn {
     /// Extra environment for the child, applied over the inherited one.
     pub env: Vec<(String, String)>,
     pub cwd: PathBuf,
-    /// The caller's correlation id, echoed on every [`ProcessEvent`].
+    /// The caller's correlation id, echoed on every [`Event`].
     pub run_id: String,
     pub stdin: Stdin,
 }
@@ -116,7 +116,7 @@ impl Spawn {
         self
     }
 
-    /// A correlation id echoed on every [`ProcessEvent`], for a caller
+    /// A correlation id echoed on every [`Event`], for a caller
     /// multiplexing several runs through one callback. Defaults to empty —
     /// with one run the handle already identifies it.
     #[must_use]
@@ -150,13 +150,37 @@ impl Spawn {
 
     /// What the child's stdin is connected to. `stdout` and `stderr` are always
     /// piped — streaming them is what this crate is for — and arrive as
-    /// [`ProcessEvent::Stdout`] / [`ProcessEvent::Stderr`].
+    /// [`Event::Stdout`] / [`Event::Stderr`].
     #[must_use]
     pub fn stdin(mut self, stdin: Stdin) -> Self {
         self.stdin = stdin;
         self
     }
+
+    /// Run it, reading events off a channel.
+    ///
+    /// The channel closes on its own when the run ends: the forwarding closure
+    /// is the only owner of the `Sender`, and it drops with the reader threads.
+    pub fn start(self) -> Result<(ProcessHandle, std::sync::mpsc::Receiver<Event>), StreamError> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = self.stream(move |event| {
+            // A hung-up receiver is not an error: the run continues, and the
+            // event nobody is waiting for is dropped.
+            let _ = tx.send(event);
+        })?;
+        Ok((handle, rx))
+    }
+
+    /// Run it, pushing each event to `callback` as it happens — for a caller
+    /// forwarding straight onto a sink rather than looping.
+    pub fn stream<F>(self, callback: F) -> Result<ProcessHandle, StreamError>
+    where
+        F: FnMut(Event) + Send + Sync + Clone + 'static,
+    {
+        spawn_streaming(self, callback)
+    }
 }
+
 
 #[derive(Debug)]
 struct HandleInner {
@@ -248,7 +272,7 @@ impl ProcessHandle {
 /// every process-backed harness (bob, Claude Code, Codex).
 ///
 /// Pipes stdout/stderr line-by-line through `callback` using the raw
-/// [`ProcessEvent`] vocabulary (Started / Stdout / Stderr / Error /
+/// [`Event`] vocabulary (Started / Stdout / Stderr / Error /
 /// Exited). `env` supplies per-harness secrets (each harness's API-key
 /// var, or none for self-authenticating CLIs). PATH is augmented so
 /// Node-based CLIs find `node`. Returns a [`ProcessHandle`] for
@@ -260,59 +284,23 @@ impl ProcessHandle {
 /// events with the handle.
 ///
 /// ```no_run
-/// use cli_stream::{spawn_streaming, ProcessEvent, Spawn};
+/// use cli_stream::{Event, Spawn};
 ///
 /// # fn main() -> Result<(), cli_stream::StreamError> {
-/// let handle = spawn_streaming(
-///     Spawn::new("echo").cwd(std::env::current_dir().unwrap()).run_id("run-1")
-///         .args(vec!["hello".to_owned()]),
-///     |event| match event {
-///         ProcessEvent::Stdout { line, .. } => println!("{line}"),
-///         ProcessEvent::Exited { exit_code, .. } => eprintln!("exit {exit_code:?}"),
-///         _ => {}
-///     },
-/// )?;
+/// let handle = Spawn::new("echo").args(["hello"]).stream(|event| match event {
+///     Event::Stdout { line, .. } => println!("{line}"),
+///     Event::Exited { exit_code, .. } => eprintln!("exit {exit_code:?}"),
+///     _ => {}
+/// })?;
 /// // `handle.cancel()` stops it early; dropping the handle does not.
 /// let _ = handle;
 /// # Ok(())
 /// # }
 /// ```
 ///
-/// Spawn and read the events off a channel, rather than supplying a callback.
-///
-/// The same run either way; this is the shape to reach for when the reading is
-/// a loop rather than a reaction:
-///
-/// ```no_run
-/// use cli_stream::{spawn, ProcessEvent, Spawn};
-///
-/// # fn main() -> Result<(), cli_stream::StreamError> {
-/// let (handle, events) = spawn(Spawn::new("echo").args(["hi"]))?;
-/// for event in events {
-///     if let ProcessEvent::Stdout { line, .. } = event {
-///         println!("{line}");
-///     }
-/// }
-/// # let _ = handle;
-/// # Ok(())
-/// # }
-/// ```
-///
-/// The channel closes on its own when the run ends: the forwarding callback is
-/// the only owner of the `Sender`).run_id(and it drops with the reader threads.
-pub fn spawn(spawn: Spawn) -> Result<(ProcessHandle, std::sync::mpsc::Receiver<ProcessEvent>), StreamError> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let handle = spawn_streaming(spawn, move |event| {
-        // A hung-up receiver is not an error: the run continues, and the event
-        // nobody is waiting for is dropped.
-        let _ = tx.send(event);
-    })?;
-    Ok((handle, rx))
-}
-
-pub fn spawn_streaming<F>(spawn: Spawn, callback: F) -> Result<ProcessHandle, StreamError>
+pub(crate) fn spawn_streaming<F>(spawn: Spawn, callback: F) -> Result<ProcessHandle, StreamError>
 where
-    F: FnMut(ProcessEvent) + Send + Sync + Clone + 'static,
+    F: FnMut(Event) + Send + Sync + Clone + 'static,
 {
     let Spawn { program, args, env, cwd, run_id, stdin } = spawn;
     let mut command = hidden_command(&program);
@@ -356,7 +344,7 @@ where
     // Emit Started immediately so the caller doesn't wait on the first
     // output line for a UI signal.
     let mut started_cb = callback.clone();
-    started_cb(ProcessEvent::Started {
+    started_cb(Event::Started {
         run_id: run_id.clone(),
     });
 
@@ -406,12 +394,12 @@ where
         let cancelled = exit_inner.cancelled.load(Ordering::SeqCst);
 
         match wait_result {
-            Ok(status) => exit_cb(ProcessEvent::Exited {
+            Ok(status) => exit_cb(Event::Exited {
                 run_id: exit_run_id.clone(),
                 exit_code: status.code(),
                 cancelled,
             }),
-            Err(err) => exit_cb(ProcessEvent::Error {
+            Err(err) => exit_cb(Event::Error {
                 run_id: exit_run_id.clone(),
                 message: format!("wait failed: {err}"),
             }),
@@ -430,19 +418,19 @@ where
 fn pump_lines<R, F>(reader: R, run_id: String, is_stdout: bool, mut callback: F)
 where
     R: Read,
-    F: FnMut(ProcessEvent),
+    F: FnMut(Event),
 {
     let buffered = BufReader::new(reader);
     for line in buffered.lines() {
         match line {
             Ok(text) => {
                 let event = if is_stdout {
-                    ProcessEvent::Stdout {
+                    Event::Stdout {
                         run_id: run_id.clone(),
                         line: text,
                     }
                 } else {
-                    ProcessEvent::Stderr {
+                    Event::Stderr {
                         run_id: run_id.clone(),
                         line: text,
                     }
@@ -450,7 +438,7 @@ where
                 callback(event);
             }
             Err(err) => {
-                callback(ProcessEvent::Error {
+                callback(Event::Error {
                     run_id: run_id.clone(),
                     message: format!("stream read failed: {err}"),
                 });
@@ -513,8 +501,8 @@ mod tests {
     /// A thread-safe event collector that signals `done` on the terminal
     /// event. Returns the (cloneable) callback + the shared collections.
     fn collector() -> (
-        impl FnMut(ProcessEvent) + Send + Sync + Clone + 'static,
-        Arc<Mutex<Vec<ProcessEvent>>>,
+        impl FnMut(Event) + Send + Sync + Clone + 'static,
+        Arc<Mutex<Vec<Event>>>,
         Done,
     ) {
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -522,9 +510,9 @@ mod tests {
         let cb = {
             let events = Arc::clone(&events);
             let done = Arc::clone(&done);
-            move |ev: ProcessEvent| {
+            move |ev: Event| {
                 let terminal =
-                    matches!(ev, ProcessEvent::Exited { .. } | ProcessEvent::Error { .. });
+                    matches!(ev, Event::Exited { .. } | Event::Error { .. });
                 events.lock().unwrap().push(ev);
                 if terminal {
                     let (lock, cvar) = &*done;
@@ -550,7 +538,7 @@ mod tests {
     }
 
     /// Spawn `program args`, block until it exits, return every event.
-    fn run(program: &str, args: &[&str]) -> Vec<ProcessEvent> {
+    fn run(program: &str, args: &[&str]) -> Vec<Event> {
         let (cb, events, done) = collector();
         let _handle = spawn_streaming(
             Spawn::new(program).run_id("t").args(args.iter().copied()),
@@ -566,10 +554,10 @@ mod tests {
     fn streams_stdout_lines_then_exits_zero() {
         let events = run("printf", &["%s\n", "alpha", "beta"]);
         // Started leads, Exited(0, not cancelled) closes.
-        assert!(matches!(events.first(), Some(ProcessEvent::Started { .. })));
+        assert!(matches!(events.first(), Some(Event::Started { .. })));
         assert!(matches!(
             events.last(),
-            Some(ProcessEvent::Exited {
+            Some(Event::Exited {
                 exit_code: Some(0),
                 cancelled: false,
                 ..
@@ -579,7 +567,7 @@ mod tests {
         let lines: Vec<&str> = events
             .iter()
             .filter_map(|e| match e {
-                ProcessEvent::Stdout { line, .. } => Some(line.as_str()),
+                Event::Stdout { line, .. } => Some(line.as_str()),
                 _ => None,
             })
             .collect();
@@ -591,7 +579,7 @@ mod tests {
         let events = run("sh", &["-c", "exit 3"]);
         assert!(matches!(
             events.last(),
-            Some(ProcessEvent::Exited {
+            Some(Event::Exited {
                 exit_code: Some(3),
                 cancelled: false,
                 ..
@@ -617,7 +605,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, ProcessEvent::Stdout { line, .. } if line == "from-env")),
+                .any(|e| matches!(e, Event::Stdout { line, .. } if line == "from-env")),
             "child should observe the injected env var, got {events:?}"
         );
     }
@@ -627,13 +615,13 @@ mod tests {
         let events = run("sh", &["-c", "echo to-stderr 1>&2"]);
         assert!(events
             .iter()
-            .any(|e| matches!(e, ProcessEvent::Stderr { line, .. } if line == "to-stderr")));
+            .any(|e| matches!(e, Event::Stderr { line, .. } if line == "to-stderr")));
         assert!(!events
             .iter()
-            .any(|e| matches!(e, ProcessEvent::Stdout { .. })));
+            .any(|e| matches!(e, Event::Stdout { .. })));
         assert!(events.iter().any(|e| matches!(
             e,
-            ProcessEvent::Exited {
+            Event::Exited {
                 exit_code: Some(0),
                 ..
             }
@@ -665,7 +653,7 @@ mod tests {
         assert!(
             matches!(
                 events.last(),
-                Some(ProcessEvent::Exited {
+                Some(Event::Exited {
                     cancelled: true,
                     ..
                 })
@@ -701,7 +689,7 @@ mod tests {
     fn spawning_a_missing_binary_is_err() {
         let result = spawn_streaming(
             Spawn::new("cli-stream-no-such-binary-zzz").run_id("t"),
-            |_ev: ProcessEvent| {},
+            |_ev: Event| {},
         );
         // Typed: a `Spawn` error carrying the OS `NotFound` io::Error as its
         // source — the whole point of `StreamError` over a `String`. A caller

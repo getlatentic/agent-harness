@@ -18,7 +18,7 @@ use serde_json::{Map, Value};
 
 use crate::events::run_events_from_parsed;
 use crate::{
-    ParsedLine, ProcessEvent, RunEvent, SessionInfo, ToolCallEnd, ToolCallStart, ToolKind,
+    ParsedLine, Event, RunEvent, SessionInfo, ToolCallEnd, ToolCallStart, ToolKind,
     UsageInfo,
 };
 
@@ -141,19 +141,19 @@ impl CodexStreamParser {
 
     /// Normalize one raw process event, applying the agent_message state
     /// machine to stdout and dropping stderr noise.
-    pub fn on_process_event(&mut self, event: ProcessEvent) -> Vec<RunEvent> {
+    pub fn on_process_event(&mut self, event: Event) -> Vec<RunEvent> {
         match event {
             // codex's stderr is tracing noise in `--json` mode; real errors
             // arrive as stdout `error` items. Don't surface it as status.
-            ProcessEvent::Stderr { .. } => Vec::new(),
-            ProcessEvent::Started { run_id } => vec![RunEvent::Started { run_id }],
-            ProcessEvent::Error { run_id, message } => {
+            Event::Stderr { .. } => Vec::new(),
+            Event::Started { run_id } => vec![RunEvent::Started { run_id }],
+            Event::Error { run_id, message } => {
                 // Flush a held message as the answer before the terminal error.
                 let mut out = self.take_pending_as_answer(&run_id);
                 out.push(RunEvent::Error { run_id, message });
                 out
             }
-            ProcessEvent::Exited {
+            Event::Exited {
                 run_id,
                 exit_code,
                 cancelled,
@@ -169,8 +169,8 @@ impl CodexStreamParser {
                 });
                 out
             }
-            ProcessEvent::Stdout { run_id, line } => self.on_stdout(&run_id, &line),
-            // `ProcessEvent` is #[non_exhaustive]; ignore any future variant.
+            Event::Stdout { run_id, line } => self.on_stdout(&run_id, &line),
+            // `Event` is #[non_exhaustive]; ignore any future variant.
             _ => Vec::new(),
         }
     }
@@ -592,7 +592,7 @@ mod tests {
     // --- CodexStreamParser: preamble-vs-answer + stderr drop ----------------
 
     fn stdout(p: &mut CodexStreamParser, line: &str) -> Vec<RunEvent> {
-        p.on_process_event(ProcessEvent::Stdout {
+        p.on_process_event(Event::Stdout {
             run_id: "r".to_owned(),
             line: line.to_owned(),
         })
@@ -682,7 +682,7 @@ mod tests {
     #[test]
     fn codex_stderr_is_dropped_as_noise() {
         let mut p = CodexStreamParser::new();
-        let out = p.on_process_event(ProcessEvent::Stderr {
+        let out = p.on_process_event(Event::Stderr {
             run_id: "r".to_owned(),
             line: "2026-05-31T05:20:28Z ERROR codex_core::memories::phase2::job: failed to claim job"
                 .to_owned(),
@@ -732,7 +732,7 @@ mod tests {
             &mut p,
             r#"{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":"Final."}}"#,
         );
-        let out = p.on_process_event(ProcessEvent::Exited {
+        let out = p.on_process_event(Event::Exited {
             run_id: "r".to_owned(),
             exit_code: Some(0),
             cancelled: false,
