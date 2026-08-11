@@ -1,18 +1,22 @@
 //! The stdio MCP transport: launch the server process and exchange
 //! newline-delimited JSON-RPC over its stdin/stdout (one message per line, no
-//! embedded newlines). A background reader thread parses lines into a channel,
-//! and [`request`](StdioConnection::request) blocks for the response carrying
-//! its id, skipping any interleaved notifications. The child is killed on `Drop`.
+//! embedded newlines). [`request`](StdioConnection::request) writes a line and
+//! blocks for the response carrying its id, skipping any interleaved
+//! notifications. The child is killed on `Drop`.
+//!
+//! Spawning, reading and cancelling are [`cli_stream`]'s job; this bridges its
+//! pushed lines into a channel a blocking request can pull from, and adds the
+//! id correlation the protocol needs.
 
-use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex;
-use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use serde_json::{json, Value};
+
+use cli_stream::{ProcessEvent, ProcessHandle, Spawn};
 
 use super::client::McpConnection;
 
@@ -24,22 +28,17 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 pub(super) struct StdioConnection {
     /// Server name, for prefixing error messages.
     server: String,
-    inner: Mutex<Inner>,
-}
-
-struct Inner {
-    child: Child,
-    stdin: ChildStdin,
-    /// Parsed messages from the server, fed by the reader thread.
-    rx: Receiver<Value>,
-    /// The reader thread, joined on `Drop` (it exits once stdout closes).
-    reader: Option<JoinHandle<()>>,
-    next_id: i64,
+    handle: ProcessHandle,
+    /// Parsed messages from the server. Behind a mutex because a request reads
+    /// until it sees *its* id, and two concurrent readers would steal each
+    /// other's replies.
+    inbox: Mutex<Receiver<Value>>,
+    next_id: AtomicI64,
 }
 
 impl StdioConnection {
-    /// Spawn `command` and wire up the reader thread. Does not handshake — that's
-    /// the [`McpClient`](super::client::McpClient)'s job.
+    /// Spawn `command` and start reading it. Does not handshake — that's the
+    /// [`McpClient`](super::client::McpClient)'s job.
     pub(super) fn spawn(
         server: &str,
         command: &str,
@@ -47,59 +46,51 @@ impl StdioConnection {
         env: &[(String, String)],
         cwd: &Path,
     ) -> Result<StdioConnection, String> {
-        let mut child = crate::hidden_command(command)
-            .args(args)
-            .envs(env.iter().map(|(k, v)| (k.clone(), v.clone())))
-            .current_dir(cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("spawning `{command}`: {e}"))?;
-        let stdin = child.stdin.take().ok_or("no stdin pipe")?;
-        let stdout = child.stdout.take().ok_or("no stdout pipe")?;
-
         let (tx, rx) = mpsc::channel();
-        let reader = thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                if line.trim().is_empty() {
-                    continue;
-                }
-                // Skip non-JSON lines (stray logging); stop if the receiver is
-                // gone (the connection was dropped).
-                if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                    if tx.send(v).is_err() {
-                        break;
-                    }
+        let spawn = Spawn::new(command, cwd, format!("mcp-{server}"))
+            .args(args.to_vec())
+            .env(env.to_vec())
+            .writable();
+        let handle = crate::node_cli::spawn_cli(spawn, move |event| {
+            // Only stdout carries protocol; a server's stderr is its logging,
+            // and a line that is not JSON is logging too.
+            if let ProcessEvent::Stdout { line, .. } = event {
+                if let Ok(message) = serde_json::from_str::<Value>(line.trim()) {
+                    let _ = tx.send(message);
                 }
             }
-        });
+        })
+        .map_err(|e| format!("spawning `{command}`: {e}"))?;
 
         Ok(StdioConnection {
             server: server.to_owned(),
-            inner: Mutex::new(Inner { child, stdin, rx, reader: Some(reader), next_id: 1 }),
+            handle,
+            inbox: Mutex::new(rx),
+            next_id: AtomicI64::new(1),
         })
+    }
+
+    fn send(&self, message: &Value) -> Result<(), String> {
+        let line = serde_json::to_string(message).map_err(|e| format!("{}: encoding: {e}", self.server))?;
+        self.handle.write_line(&line).map_err(|e| format!("{}: write failed: {e}", self.server))
     }
 }
 
 impl McpConnection for StdioConnection {
     fn request(&self, method: &str, params: Value) -> Result<Value, String> {
-        let mut inner = self.inner.lock().map_err(|_| format!("{}: connection poisoned", self.server))?;
-        let id = inner.next_id;
-        inner.next_id += 1;
-        write_line(&mut inner.stdin, &json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
-            .map_err(|e| format!("{} {method}: write failed: {e}", self.server))?;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let inbox = self.inbox.lock().map_err(|_| format!("{}: connection poisoned", self.server))?;
+        self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))?;
         loop {
-            match inner.rx.recv_timeout(REQUEST_TIMEOUT) {
-                Ok(v) => {
-                    if v.get("id").and_then(Value::as_i64) != Some(id) {
+            match inbox.recv_timeout(REQUEST_TIMEOUT) {
+                Ok(message) => {
+                    if message.get("id").and_then(Value::as_i64) != Some(id) {
                         continue; // a notification or stale message — keep waiting
                     }
-                    if let Some(err) = v.get("error") {
+                    if let Some(err) = message.get("error") {
                         return Err(format!("{} {method}: {err}", self.server));
                     }
-                    return Ok(v.get("result").cloned().unwrap_or(Value::Null));
+                    return Ok(message.get("result").cloned().unwrap_or(Value::Null));
                 }
                 Err(RecvTimeoutError::Timeout) => return Err(format!("{} {method}: timed out", self.server)),
                 Err(RecvTimeoutError::Disconnected) => return Err(format!("{} {method}: server closed", self.server)),
@@ -108,30 +99,14 @@ impl McpConnection for StdioConnection {
     }
 
     fn notify(&self, method: &str, params: Value) -> Result<(), String> {
-        let mut inner = self.inner.lock().map_err(|_| format!("{}: connection poisoned", self.server))?;
-        write_line(&mut inner.stdin, &json!({ "jsonrpc": "2.0", "method": method, "params": params }))
-            .map_err(|e| format!("{} {method}: write failed: {e}", self.server))
+        self.send(&json!({ "jsonrpc": "2.0", "method": method, "params": params }))
     }
 }
 
 impl Drop for StdioConnection {
     fn drop(&mut self) {
-        if let Ok(mut inner) = self.inner.lock() {
-            let _ = inner.child.kill();
-            let _ = inner.child.wait();
-            // Killing the child closes stdout, so the reader thread's `lines()`
-            // ends and the thread returns — join it so it doesn't outlive us.
-            if let Some(h) = inner.reader.take() {
-                let _ = h.join();
-            }
-        }
+        // The reader threads end when the child's pipes close, so cancelling is
+        // the whole teardown.
+        let _ = self.handle.cancel();
     }
-}
-
-/// Write one JSON message as a single newline-terminated line (the stdio frame).
-fn write_line(stdin: &mut ChildStdin, msg: &Value) -> std::io::Result<()> {
-    let mut line = serde_json::to_string(msg)?;
-    line.push('\n');
-    stdin.write_all(line.as_bytes())?;
-    stdin.flush()
 }

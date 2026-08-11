@@ -22,4 +22,4 @@ pub mod process;
 
 pub use error::StreamError;
 pub use install::InstallEvent;
-pub use process::{hidden_command, spawn_streaming, ProcessEvent, ProcessHandle};
+pub use process::{hidden_command, spawn_streaming, ProcessEvent, ProcessHandle, Spawn, Stdin};

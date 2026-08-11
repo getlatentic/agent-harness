@@ -8,11 +8,10 @@
 //! Unix-only: it drives `sh` / `printf` / `sleep`, and cancel is signal-based.
 #![cfg(unix)]
 
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use harness::{
-    normalize_process_event, spawn_streaming, CredentialSpec, Harness,
+    normalize_process_event, spawn_streaming, Spawn, CredentialSpec, Harness,
     Error, Info, Readiness, ParsedLine, RunCallback,
     RunEvent, RunHandle, RunMode, RunRequest, RunTuning,
 };
@@ -48,11 +47,8 @@ impl Harness for StubHarness {
 
     fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
         let handle = spawn_streaming(
-            PathBuf::from("sh"),
-            vec!["-c".to_owned(), self.script.clone()],
-            Vec::new(),
-            std::env::current_dir().unwrap_or_default(),
-            request.run_id,
+            Spawn::new("sh", std::env::current_dir().unwrap_or_default(), request.run_id)
+                .args(vec!["-c".to_owned(), self.script.clone()]),
             move |event| {
                 for ev in normalize_process_event(event, |line| ParsedLine {
                     text: Some(line.to_owned()),

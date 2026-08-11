@@ -46,7 +46,7 @@ pub use harness::{
 // source back to the typed spawn/cancel error.
 pub use node_cli::{augmented_node_path, probe_version, resolve_program, spawn_cli};
 pub use cli_stream::{
-    hidden_command, spawn_streaming, InstallEvent, ProcessEvent,
+    hidden_command, spawn_streaming, InstallEvent, ProcessEvent, Spawn,
     ProcessHandle, StreamError,
 };
 

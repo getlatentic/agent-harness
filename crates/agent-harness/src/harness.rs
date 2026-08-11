@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::events::RunEvent;
 use cli_stream::{InstallEvent, ProcessEvent, ProcessHandle};
 use crate::node_cli::spawn_cli;
+use cli_stream::Spawn;
 
 // --- Streaming callbacks --------------------------------------------
 
@@ -702,12 +703,10 @@ pub fn run_login_command(
     let events_cb = Arc::clone(&on_event);
     // Bound, not `_`, so the handle outlives the wait (dropping it could
     // signal the child); by the time we return, the process has exited.
+    let spawn = Spawn::new(program, std::env::current_dir().unwrap_or_default(), format!("login-{program}"))
+        .args(args.iter().map(|s| (*s).to_owned()).collect());
     let _handle = spawn_cli(
-        PathBuf::from(program),
-        args.iter().map(|s| (*s).to_owned()).collect(),
-        Vec::new(),
-        std::env::current_dir().unwrap_or_default(),
-        format!("login-{program}"),
+        spawn,
         move |event| {
             let finished = matches!(event, ProcessEvent::Exited { .. });
             if let Some(install) = login_event(&event) {
@@ -1008,11 +1007,7 @@ mod tests {
         // that finished on its own. Forwarding either wrongly is invisible
         // until a stale agent is left running.
         let child = spawn_cli(
-            PathBuf::from("sleep"),
-            vec!["30".to_owned()],
-            Vec::new(),
-            std::env::temp_dir(),
-            "pid-test".to_owned(),
+            Spawn::new("sleep", std::env::temp_dir(), "pid-test").args(vec!["30".to_owned()]),
             |_| {},
         )
         .expect("sleep should spawn");

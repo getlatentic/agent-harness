@@ -18,11 +18,10 @@
 //!     ordering stays canonical. (For a *stateless* parser, the one-liner
 //!     `normalize_process_event(event, my_fn)` does the same without the Mutex.)
 
-use std::path::PathBuf;
 use std::sync::{mpsc::sync_channel, Arc, Mutex};
 
 use harness::{
-    run_events_from_parsed, spawn_streaming, CredentialSpec, Harness,
+    run_events_from_parsed, spawn_streaming, Spawn, CredentialSpec, Harness,
     Error, Info, Readiness, ParsedLine, ProcessEvent,
     RunCallback, RunEvent, RunHandle, RunRequest, Registry, SessionInfo,
 };
@@ -84,11 +83,7 @@ impl Harness for EchoHarness {
         // `Arc<Mutex>` — the same shape the built-in codex adapter uses.
         let parser = Arc::new(Mutex::new(EchoParser::default()));
         let handle = spawn_streaming(
-            PathBuf::from("printf"),
-            args,
-            Vec::new(),
-            cwd,
-            request.run_id,
+            Spawn::new("printf", cwd, request.run_id).args(args),
             move |event| {
                 let mut parser = parser.lock().expect("echo parser mutex");
                 for ev in parser.on_process_event(event) {

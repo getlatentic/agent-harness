@@ -280,21 +280,14 @@ fn hardcoded_node_dirs() -> String {
 /// packaged app cannot find a CLI a terminal finds fine.
 ///
 /// A `PATH` the caller supplies still wins: it is applied after this one.
-pub fn spawn_cli<F>(
-    program: PathBuf,
-    args: Vec<String>,
-    env: Vec<(String, String)>,
-    cwd: PathBuf,
-    run_id: String,
-    callback: F,
-) -> Result<cli_stream::ProcessHandle, cli_stream::StreamError>
+pub fn spawn_cli<F>(spawn: cli_stream::Spawn, callback: F) -> Result<cli_stream::ProcessHandle, cli_stream::StreamError>
 where
     F: FnMut(cli_stream::ProcessEvent) + Send + Sync + Clone + 'static,
 {
-    let program = resolve_program(program);
-    let mut with_path = vec![("PATH".to_owned(), augment_path_for_node(&program))];
-    with_path.extend(env);
-    cli_stream::spawn_streaming(program, args, with_path, cwd, run_id, callback)
+    let program = resolve_program(spawn.program);
+    let mut env = vec![("PATH".to_owned(), augment_path_for_node(&program))];
+    env.extend(spawn.env);
+    cli_stream::spawn_streaming(cli_stream::Spawn { program, env, ..spawn }, callback)
 }
 
 #[cfg(test)]
@@ -538,7 +531,8 @@ mod spawned {
         let sink = Arc::clone(&lines);
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = Arc::clone(&done);
-        let _handle = spawn_cli(program, Vec::new(), env, std::env::temp_dir(), "t".to_owned(), move |event| {
+        let spawn = cli_stream::Spawn::new(program, std::env::temp_dir(), "t").env(env);
+        let _handle = spawn_cli(spawn, move |event| {
             match event {
                 cli_stream::ProcessEvent::Stdout { line, .. } => sink.lock().unwrap().push(line),
                 cli_stream::ProcessEvent::Exited { .. } => flag.store(true, std::sync::atomic::Ordering::SeqCst),

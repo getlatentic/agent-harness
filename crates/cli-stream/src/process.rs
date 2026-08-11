@@ -64,9 +64,73 @@ pub struct ProcessHandle {
     inner: Arc<HandleInner>,
 }
 
+/// What the child's stdin is connected to.
+///
+/// Most CLIs get everything as arguments and want [`Closed`](Stdin::Closed): a
+/// child that inherits a terminal's stdin can block forever waiting for input
+/// nobody is typing. A child that *answers* — a JSON-RPC server over stdio —
+/// needs [`Piped`](Stdin::Piped) and [`ProcessHandle::write_line`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Stdin {
+    #[default]
+    Closed,
+    Piped,
+}
+
+/// What to spawn. Named fields rather than six positional arguments, so a call
+/// site says which string is the program and which is the run id, and a new
+/// knob is a field with a default instead of a break.
+#[derive(Debug, Clone)]
+pub struct Spawn {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    /// Extra environment for the child, applied over the inherited one.
+    pub env: Vec<(String, String)>,
+    pub cwd: PathBuf,
+    /// The caller's correlation id, echoed on every [`ProcessEvent`].
+    pub run_id: String,
+    pub stdin: Stdin,
+}
+
+impl Spawn {
+    /// A run of `program` in `cwd`, with stdin closed.
+    pub fn new(program: impl Into<PathBuf>, cwd: impl Into<PathBuf>, run_id: impl Into<String>) -> Self {
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: cwd.into(),
+            run_id: run_id.into(),
+            stdin: Stdin::Closed,
+        }
+    }
+
+    #[must_use]
+    pub fn args(mut self, args: Vec<String>) -> Self {
+        self.args = args;
+        self
+    }
+
+    #[must_use]
+    pub fn env(mut self, env: Vec<(String, String)>) -> Self {
+        self.env = env;
+        self
+    }
+
+    /// Give the child a stdin pipe, so the caller can talk to it.
+    #[must_use]
+    pub fn writable(mut self) -> Self {
+        self.stdin = Stdin::Piped;
+        self
+    }
+}
+
 #[derive(Debug)]
 struct HandleInner {
     child: Mutex<Option<Child>>,
+    /// The child's stdin, when it was piped. Taken from the `Child` at spawn so
+    /// writing never has to lock the same mutex `cancel` uses.
+    stdin: Mutex<Option<std::process::ChildStdin>>,
     cancelled: AtomicBool,
 }
 
@@ -114,6 +178,22 @@ impl ProcessHandle {
         Ok(())
     }
 
+    /// Send one newline-terminated line to the child's stdin.
+    ///
+    /// `Err` when the child was not spawned [`writable`](Spawn::writable), or
+    /// when it has exited and the pipe is gone — both of which a caller
+    /// expecting an answer needs to hear about rather than block on.
+    pub fn write_line(&self, line: &str) -> Result<(), StreamError> {
+        let mut guard = self.inner.stdin.lock().map_err(|_| StreamError::CancelLockPoisoned)?;
+        let stdin = guard.as_mut().ok_or(StreamError::PipeNotCaptured { stream: "stdin" })?;
+        use std::io::Write;
+        stdin
+            .write_all(line.as_bytes())
+            .and_then(|()| stdin.write_all(b"\n"))
+            .and_then(|()| stdin.flush())
+            .map_err(|source| StreamError::Spawn { program: "stdin".to_owned(), source })
+    }
+
     /// Whether `cancel()` was called. Tagged on the final `Exited` event.
     pub fn was_cancelled(&self) -> bool {
         self.inner.cancelled.load(Ordering::SeqCst)
@@ -147,16 +227,12 @@ impl ProcessHandle {
 /// events with the handle.
 ///
 /// ```no_run
-/// use cli_stream::{spawn_streaming, ProcessEvent};
-/// use std::path::PathBuf;
+/// use cli_stream::{spawn_streaming, ProcessEvent, Spawn};
 ///
 /// # fn main() -> Result<(), cli_stream::StreamError> {
 /// let handle = spawn_streaming(
-///     PathBuf::from("echo"),
-///     vec!["hello".to_owned()],
-///     Vec::new(),                      // extra env vars (key, value)
-///     std::env::current_dir().unwrap(),
-///     "run-1".to_owned(),              // your correlation id
+///     Spawn::new("echo", std::env::current_dir().unwrap(), "run-1")
+///         .args(vec!["hello".to_owned()]),
 ///     |event| match event {
 ///         ProcessEvent::Stdout { line, .. } => println!("{line}"),
 ///         ProcessEvent::Exited { exit_code, .. } => eprintln!("exit {exit_code:?}"),
@@ -168,22 +244,19 @@ impl ProcessHandle {
 /// # Ok(())
 /// # }
 /// ```
-pub fn spawn_streaming<F>(
-    program: PathBuf,
-    args: Vec<String>,
-    env: Vec<(String, String)>,
-    cwd: PathBuf,
-    run_id: String,
-    callback: F,
-) -> Result<ProcessHandle, StreamError>
+pub fn spawn_streaming<F>(spawn: Spawn, callback: F) -> Result<ProcessHandle, StreamError>
 where
     F: FnMut(ProcessEvent) + Send + Sync + Clone + 'static,
 {
+    let Spawn { program, args, env, cwd, run_id, stdin } = spawn;
     let mut command = hidden_command(&program);
     command
         .args(&args)
         .current_dir(&cwd)
-        .stdin(Stdio::null())
+        .stdin(match stdin {
+            Stdin::Closed => Stdio::null(),
+            Stdin::Piped => Stdio::piped(),
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (key, value) in &env {
@@ -203,8 +276,11 @@ where
         .take()
         .ok_or(StreamError::PipeNotCaptured { stream: "stderr" })?;
 
+    // Taken now so `write_line` never contends with `cancel` for the child.
+    let child_stdin = child.stdin.take();
     let inner = Arc::new(HandleInner {
         child: Mutex::new(Some(child)),
+        stdin: Mutex::new(child_stdin),
         cancelled: AtomicBool::new(false),
     });
     let handle = ProcessHandle {
@@ -411,11 +487,7 @@ mod tests {
     fn run(program: &str, args: &[&str]) -> Vec<ProcessEvent> {
         let (cb, events, done) = collector();
         let _handle = spawn_streaming(
-            PathBuf::from(program),
-            args.iter().map(|s| (*s).to_owned()).collect(),
-            Vec::new(),
-            PathBuf::from("."),
-            "t".to_owned(),
+            Spawn::new(program, ".", "t").args(args.iter().map(|s| (*s).to_owned()).collect()),
             cb,
         )
         .expect("spawn");
@@ -467,14 +539,10 @@ mod tests {
         // directly (the other lifecycle tests pass an empty env).
         let (cb, events, done) = collector();
         let _handle = spawn_streaming(
-            PathBuf::from("sh"),
-            vec![
+            Spawn::new(PathBuf::from("sh"), PathBuf::from("."), "t".to_owned()).args(vec![
                 "-c".to_owned(),
                 "printf '%s\\n' \"$CLI_STREAM_STUB\"".to_owned(),
-            ],
-            vec![("CLI_STREAM_STUB".to_owned(), "from-env".to_owned())],
-            PathBuf::from("."),
-            "t".to_owned(),
+            ]).env(vec![("CLI_STREAM_STUB".to_owned(), "from-env".to_owned())]),
             cb,
         )
         .expect("spawn");
@@ -512,11 +580,7 @@ mod tests {
         // far sooner than 10s. `exec` so the process *is* sleep (no orphan).
         let (cb, events, done) = collector();
         let handle = spawn_streaming(
-            PathBuf::from("sh"),
-            vec!["-c".to_owned(), "exec sleep 10".to_owned()],
-            Vec::new(),
-            PathBuf::from("."),
-            "t".to_owned(),
+            Spawn::new(PathBuf::from("sh"), PathBuf::from("."), "t".to_owned()).args(vec!["-c".to_owned(), "exec sleep 10".to_owned()]),
             cb,
         )
         .expect("spawn");
@@ -554,11 +618,7 @@ mod tests {
         // forwarding, which is exactly the kind of code that silently returns
         // the wrong constant.
         let handle = spawn_streaming(
-            PathBuf::from("/bin/sleep"),
-            vec!["30".to_owned()],
-            Vec::new(),
-            std::env::temp_dir(),
-            "pid".to_owned(),
+            Spawn::new(PathBuf::from("/bin/sleep"), std::env::temp_dir(), "pid".to_owned()).args(vec!["30".to_owned()]),
             |_| {},
         )
         .expect("sleep should spawn");
@@ -574,11 +634,7 @@ mod tests {
     #[test]
     fn spawning_a_missing_binary_is_err() {
         let result = spawn_streaming(
-            PathBuf::from("cli-stream-no-such-binary-zzz"),
-            Vec::new(),
-            Vec::new(),
-            PathBuf::from("."),
-            "t".to_owned(),
+            Spawn::new(PathBuf::from("cli-stream-no-such-binary-zzz"), PathBuf::from("."), "t".to_owned()),
             |_ev: ProcessEvent| {},
         );
         // Typed: a `Spawn` error carrying the OS `NotFound` io::Error as its
