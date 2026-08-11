@@ -186,3 +186,97 @@ pub(crate) fn get_prompt(
     let (client, _tools) = McpClient::connect(cfg, cwd)?;
     client.get_prompt(name, arguments)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A server that speaks just enough of the protocol to be connected to,
+    /// offering `n_tools` tools and `n_resources` resources.
+    fn sh_server(name: &str, n_tools: usize, n_resources: usize) -> McpServer {
+        let tools: Vec<String> = (0..n_tools)
+            .map(|i| format!(r#"{{"name":"t{i}","description":"d","inputSchema":{{"type":"object"}}}}"#))
+            .collect();
+        let resources: Vec<String> =
+            (0..n_resources).map(|i| format!(r#"{{"uri":"file:///r{i}","name":"R{i}"}}"#)).collect();
+        let script = format!(
+            r#"
+            read _initialize
+            printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2025-11-25"}}}}'
+            read _initialized
+            read _list
+            printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{}]}}}}'
+            read _reslist
+            printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"resources":[{}]}}}}'
+            "#,
+            tools.join(","),
+            resources.join(",")
+        );
+        McpServer::stdio(name, "sh", vec!["-c".to_owned(), script])
+    }
+
+    #[test]
+    fn a_transport_option_meant_for_the_other_transport_does_nothing() {
+        // Both builders take anything, because a host assembling servers from
+        // config should not have to branch. The quiet part is that the option
+        // is dropped rather than misapplied — an `env` on an HTTP server is not
+        // smuggled in as a header.
+        let stdio = McpServer::stdio("s", "npx", vec!["-y".to_owned()])
+            .env("TOKEN", "abc")
+            .header("Authorization", "Bearer x");
+        match &stdio.transport {
+            McpTransport::Stdio { command, args, env } => {
+                assert_eq!(command, "npx");
+                assert_eq!(args, &["-y"]);
+                assert_eq!(env, &[("TOKEN".to_owned(), "abc".to_owned())], "the env applies");
+            }
+            other => panic!("expected stdio, got {other:?}"),
+        }
+
+        let http = McpServer::http("h", "https://example.test/mcp")
+            .header("Authorization", "Bearer x")
+            .env("TOKEN", "abc");
+        match &http.transport {
+            McpTransport::Http { url, headers } => {
+                assert_eq!(url, "https://example.test/mcp");
+                assert_eq!(headers, &[("Authorization".to_owned(), "Bearer x".to_owned())], "the header applies");
+            }
+            other => panic!("expected http, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_server_that_will_not_start_is_reported_and_skipped() {
+        // Best-effort is the whole contract here: one misconfigured server must
+        // not take the run down with it, and the reason has to reach the user
+        // or the tools simply appear to be missing.
+        let servers = vec![McpServer::stdio("broken", "definitely-not-a-real-binary-xyz", vec![])];
+        let (tools, status) = connect_all(&servers, Path::new("."));
+
+        assert!(tools.is_empty());
+        assert_eq!(status.len(), 1);
+        assert!(status[0].contains("`broken` unavailable"), "got {:?}", status[0]);
+        assert!(status[0].contains("spawning"), "with the reason: {:?}", status[0]);
+    }
+
+    #[test]
+    fn a_connected_server_reports_what_it_actually_offered() {
+        // The status line is the only place a user learns an MCP server came up
+        // with nothing, which is otherwise indistinguishable from it working.
+        let (tools, status) = connect_all(&[sh_server("many", 2, 1)], Path::new("."));
+        assert_eq!(tools.len(), 3, "two tools plus the resource reader");
+        assert_eq!(status, ["mcp: connected `many` (2 tools, 1 resource)"]);
+
+        // Singular, and no resource note when there are none to read.
+        let (tools, status) = connect_all(&[sh_server("one", 1, 0)], Path::new("."));
+        assert_eq!(tools.len(), 1, "no resource tool is added for a server with no resources");
+        assert_eq!(status, ["mcp: connected `one` (1 tool)"]);
+    }
+
+    #[test]
+    fn asking_an_unregistered_server_for_a_prompt_says_which_name_was_wrong() {
+        let servers = vec![McpServer::stdio("known", "sh", vec![])];
+        let err = get_prompt(&servers, "unknown", "p", &[], Path::new(".")).unwrap_err();
+        assert!(err.contains("no MCP server named `unknown`"), "got {err}");
+    }
+}
