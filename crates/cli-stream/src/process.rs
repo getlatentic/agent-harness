@@ -348,6 +348,23 @@ where
 /// probe. `CREATE_NO_WINDOW` suppresses it. Use this in place of
 /// `Command::new` for anything a desktop app spawns; it is a plain
 /// `Command::new` on every other platform, so call sites stay `cfg`-free.
+/// Ask a CLI for its version, on the augmented PATH. `None` when it cannot be
+/// run, exits non-zero, or says nothing — each of which means the same thing to
+/// a caller: this is not an installed, working CLI.
+///
+/// Every adapter wrapping a CLI needs exactly this, and it is the probe that
+/// decides whether a harness reads as installed at all — so it lives once,
+/// beside [`hidden_command`] and [`augmented_node_path`], rather than being
+/// copied per adapter and drifting.
+pub fn probe_version(program: &str) -> Option<String> {
+    let output = hidden_command(program).arg("--version").env("PATH", augmented_node_path()).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
 pub fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     #[allow(unused_mut)]
     let mut command = Command::new(program);
@@ -594,6 +611,35 @@ mod tests {
     /// window on Windows for every run and every `--version` probe. The flag is
     /// Windows-only, so what's portable to assert is that the constructor is a
     /// drop-in for `Command::new` — it still runs, and still captures output.
+    /// A throwaway CLI that answers however the test needs.
+    #[cfg(unix)]
+    fn fake_cli(tag: &str, script: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("cs-probe-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cli");
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_version_is_only_reported_when_the_cli_actually_gave_one() {
+        // This is what "installed" means to every adapter that wraps a CLI, so
+        // an empty or failed `--version` must not read as a successful probe.
+        let ok = fake_cli("version", "echo '1.2.3 (Some CLI)'");
+        assert_eq!(probe_version(ok.to_str().unwrap()).as_deref(), Some("1.2.3 (Some CLI)"));
+
+        let blank = fake_cli("blank", "exit 0");
+        assert_eq!(probe_version(blank.to_str().unwrap()), None, "no version is not a version");
+
+        let broken = fake_cli("broken", "echo 9.9.9; exit 3");
+        assert_eq!(probe_version(broken.to_str().unwrap()), None, "a failed probe is not installed");
+
+        assert_eq!(probe_version("definitely-not-a-real-binary-xyz"), None, "and neither is an absent one");
+    }
+
     #[test]
     fn hidden_command_runs_like_a_plain_command() {
         let program = if cfg!(windows) { "cmd" } else { "echo" };

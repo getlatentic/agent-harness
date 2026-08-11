@@ -44,7 +44,7 @@ pub use harness::{
 // is re-exported too so a consumer can `downcast_ref` a `HarnessError`'s
 // source back to the typed spawn/cancel error.
 pub use cli_stream::{
-    augmented_node_path, hidden_command, spawn_streaming, InstallEvent, ProcessEvent,
+    augmented_node_path, hidden_command, probe_version, spawn_streaming, InstallEvent, ProcessEvent,
     ProcessHandle, StreamError,
 };
 

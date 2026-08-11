@@ -20,9 +20,9 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use crate::{
-    spawn_streaming, CredentialSpec, Harness, HarnessCapabilities, HarnessError, HarnessInfo, InstallHint,
-    HarnessModel, HarnessReadiness, InstallCallback, RunCallback, RunHandle, RunMode,
-    RunRequest, RunTuning,
+    probe_version, spawn_streaming, CredentialSpec, Harness, HarnessCapabilities, HarnessError,
+    HarnessInfo, HarnessModel, HarnessReadiness, InstallCallback, InstallHint, RunCallback,
+    RunHandle, RunMode, RunRequest, RunTuning,
 };
 
 mod parser;
@@ -224,26 +224,6 @@ fn codex_resolved_details(command: &str) -> Value {
     Value::Object(details)
 }
 
-fn probe_version(program: &str) -> Option<String> {
-    // Augment PATH so a packaged `.app` (minimal launchd PATH) can find a
-    // CLI installed via nvm / Homebrew / official installer — otherwise an
-    // installed CLI is mis-reported as "not installed".
-    let output = crate::hidden_command(program)
-        .arg("--version")
-        .env("PATH", crate::augmented_node_path())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
-}
-
 /// Probe Codex's auth: `codex login status` exits 0 when signed in.
 /// Lets [`CodexHarness::readiness`] distinguish installed from signed-in
 /// (so the picker can offer "Sign in").
@@ -330,6 +310,33 @@ mod tests {
         assert_eq!(CodexHarness::default().command, DEFAULT_CODEX_COMMAND);
     }
     use crate::ReasoningEffort;
+
+    /// A throwaway CLI standing in for `codex login status`.
+    #[cfg(unix)]
+    fn fake_cli(tag: &str, script: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("hl-codex-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cli");
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sign_in_is_read_from_the_exit_code_of_login_status() {
+        // Codex answers in prose rather than JSON, so the exit code is the
+        // whole signal. Getting it backwards sends a signed-in user to a Sign
+        // in button, or lets a signed-out one start a run that cannot work.
+        let signed_in = fake_cli("in", "echo 'Logged in'; exit 0");
+        assert!(probe_codex_signed_in(signed_in.to_str().unwrap()));
+
+        let signed_out = fake_cli("out", "echo 'Not logged in'; exit 1");
+        assert!(!probe_codex_signed_in(signed_out.to_str().unwrap()));
+
+        assert!(!probe_codex_signed_in("definitely-not-a-real-binary-xyz"), "an absent CLI is not signed in");
+    }
 
     #[test]
     fn codex_info_and_credential() {

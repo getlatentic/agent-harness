@@ -18,9 +18,9 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::{
-    normalize_process_event, spawn_streaming, CredentialSpec, Harness, HarnessCapabilities,
-    HarnessError, HarnessInfo, HarnessModel, HarnessReadiness, InstallCallback, InstallHint,
-    RunCallback, RunHandle, RunMode, RunRequest, RunTuning,
+    normalize_process_event, probe_version, spawn_streaming, CredentialSpec, Harness,
+    HarnessCapabilities, HarnessError, HarnessInfo, HarnessModel, HarnessReadiness,
+    InstallCallback, InstallHint, RunCallback, RunHandle, RunMode, RunRequest, RunTuning,
 };
 
 mod parser;
@@ -311,28 +311,6 @@ fn extra_args_sets(extra_args: &[String], flag: &str) -> bool {
     extra_args.iter().any(|a| a == flag || a.starts_with(&with_eq))
 }
 
-/// Run `<program> --version`, returning the trimmed stdout on
-/// success. Used by readiness to detect the CLI on PATH.
-fn probe_version(program: &str) -> Option<String> {
-    // Augment PATH so a packaged `.app` (minimal launchd PATH) can find a
-    // CLI installed via nvm / Homebrew / official installer — otherwise an
-    // installed CLI is mis-reported as "not installed".
-    let output = crate::hidden_command(program)
-        .arg("--version")
-        .env("PATH", crate::augmented_node_path())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,6 +343,51 @@ mod tests {
         assert_eq!(ClaudeHarness::new().command, DEFAULT_CLAUDE_COMMAND);
         assert_eq!(ClaudeHarness::default().command, DEFAULT_CLAUDE_COMMAND);
     }
+
+    /// A throwaway CLI that behaves however the test needs. The probes take the
+    /// command as an argument, so no PATH juggling is involved — the same trick
+    /// the MCP client uses to test a protocol against a real process.
+    #[cfg(unix)]
+    fn fake_cli(tag: &str, script: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("hl-claude-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cli");
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_signed_out_cli_is_believed_over_the_exit_code() {
+        // `auth status` answering `{"loggedIn": false}` while exiting 0 is the
+        // case that matters: the fallback below would read that as signed in,
+        // and the user would be told to try a run that cannot work.
+        let out = fake_cli("signedout", r#"echo '{"loggedIn": false}'"#);
+        assert!(!probe_claude_signed_in(out.to_str().unwrap()));
+
+        let inn = fake_cli("signedin", r#"echo '{"loggedIn": true}'"#);
+        assert!(probe_claude_signed_in(inn.to_str().unwrap()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_does_not_answer_in_json_falls_back_to_how_it_exited() {
+        // Older builds print prose. Exit 0 with something to say is the best
+        // available evidence; silence or a failure is not.
+        let prose = fake_cli("prose", "echo 'Logged in as someone@example.test'");
+        assert!(probe_claude_signed_in(prose.to_str().unwrap()));
+
+        let silent = fake_cli("silent", "exit 0");
+        assert!(!probe_claude_signed_in(silent.to_str().unwrap()), "exit 0 with nothing said proves nothing");
+
+        let failed = fake_cli("authfail", "echo 'not logged in'; exit 1");
+        assert!(!probe_claude_signed_in(failed.to_str().unwrap()));
+
+        assert!(!probe_claude_signed_in("definitely-not-a-real-binary-xyz"), "an absent CLI is not signed in");
+    }
+
 
     #[test]
     fn every_documented_alias_is_offered() {
