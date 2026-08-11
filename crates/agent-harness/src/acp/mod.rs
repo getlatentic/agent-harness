@@ -503,6 +503,111 @@ mod tests {
         assert!(run.was_cancelled(), "a stopped run says so");
     }
 
+    /// An ACP agent that speaks just enough of the protocol to complete one
+    /// run: the three requests a prompt needs, plus a streamed reply.
+    ///
+    /// It echoes back each request's id rather than assuming a sequence — the
+    /// client sends UUIDs, and a reply carrying the wrong id is simply never
+    /// matched, so the run hangs with no error to explain it.
+    #[cfg(unix)]
+    fn fake_acp_agent(reply: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("hl-acpagent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agent");
+        let script = format!(
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":"%s","result":{{"protocolVersion":1,"agentCapabilities":{{}},"authMethods":[]}}}}\n' "$id" ;;
+    *'"session/new"'*)
+      printf '{{"jsonrpc":"2.0","id":"%s","result":{{"sessionId":"ses-1"}}}}\n' "$id" ;;
+    *'"session/prompt"'*)
+      printf '%s\n' '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"ses-1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{reply}"}}}}}}}}'
+      printf '{{"jsonrpc":"2.0","id":"%s","result":{{"stopReason":"end_turn"}}}}\n' "$id" ;;
+  esac
+done
+"#
+        );
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn collect_run(agent: &std::path::Path) -> Vec<RunEvent> {
+        use std::sync::atomic::AtomicBool as Flag;
+        use std::sync::Mutex;
+
+        let harness = AcpHarness::custom(AcpHarnessConfig {
+            id: "fake".to_owned(),
+            display_name: "Fake".to_owned(),
+            command: agent.to_string_lossy().into_owned(),
+            args: Vec::new(),
+            install_hint: None,
+        });
+        let events: Arc<Mutex<Vec<RunEvent>>> = Arc::default();
+        let sink = Arc::clone(&events);
+        let done = Arc::new(Flag::new(false));
+        let flag = Arc::clone(&done);
+        let handle = harness
+            .start(
+                RunRequest {
+                    run_id: "acp-run".to_owned(),
+                    prompt: "hello".to_owned(),
+                    cwd: Some(std::env::temp_dir()),
+                    mode: RunMode::Ask,
+                    ..Default::default()
+                },
+                Arc::new(move |event| {
+                    if matches!(event, RunEvent::Exited { .. }) {
+                        flag.store(true, Ordering::SeqCst);
+                    }
+                    sink.lock().unwrap().push(event);
+                }),
+            )
+            .expect("the run should start");
+        for _ in 0..400 {
+            if done.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let _ = handle;
+        let out = events.lock().unwrap().clone();
+        out
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_run_against_a_real_acp_agent_streams_its_reply_and_finishes() {
+        // Everything under `run_acp` — the handshake, the session, the prompt,
+        // and the notification translation — only happens together. Its pieces
+        // being tested says nothing about whether the sequence works.
+        let agent = fake_acp_agent("the answer");
+        let events = collect_run(&agent);
+
+        assert!(
+            events.iter().any(|e| matches!(e, RunEvent::Started { .. })),
+            "the run announces itself: {events:?}"
+        );
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::Text { delta, .. } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "the answer", "the agent's reply reaches the caller: {events:?}");
+        assert!(
+            matches!(events.last(), Some(RunEvent::Exited { .. })),
+            "and exactly one Exited ends it: {events:?}"
+        );
+        let _ = std::fs::remove_dir_all(agent.parent().unwrap());
+    }
+
     #[test]
     fn generic_acp_agent_lists_no_models_without_shelling_out() {
         // A `custom` agent has no model_control, so list_models() short-circuits
