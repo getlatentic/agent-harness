@@ -132,11 +132,9 @@ fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
-/// Prepend the directory containing `program` (where `node` also lives in an
-/// nvm install) to `base_path`, so the resolved binary's own dir is searched
-/// first. Pure (no env / no spawn) so it's unit-tested directly.
 /// `base_path` with the program's own directory in front, so the `node` it was
-/// installed beside is the one its shebang finds.
+/// installed beside — the sibling in an nvm install — is the one its shebang
+/// finds. Pure (no env, no spawn), so it is unit-tested directly.
 ///
 /// Only an **absolute** directory is prepended. This runs after
 /// [`keep_absolute_entries`] and lands at the front, so a relative one would
@@ -398,6 +396,19 @@ mod tests {
             }
             for entry in entries(&kept) {
                 prop_assert!(entry.starts_with('/'), "{entry:?} is not absolute");
+            }
+        }
+
+        /// The other half, and the one a safety property cannot state: every
+        /// real directory survives. "Drop everything" satisfies "nothing
+        /// relative survives" perfectly, and would present every installed CLI
+        /// as missing — so the filter has to be pinned from both sides.
+        #[test]
+        fn every_absolute_directory_survives(path in path_string()) {
+            let kept = keep_absolute_entries(&path);
+            let survivors = entries(&kept);
+            for entry in entries(&path).into_iter().filter(|entry| entry.starts_with('/')) {
+                prop_assert!(survivors.contains(&entry), "dropped {entry:?}");
             }
         }
 
