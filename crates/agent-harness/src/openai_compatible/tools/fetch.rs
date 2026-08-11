@@ -59,15 +59,38 @@ impl Tool for WebFetch {
     }
 }
 
-fn fetch(url: &str, format: &str, timeout: Option<u64>) -> ToolOutcome {
+/// The URL actually requested. `http://` is upgraded rather than refused —
+/// models paste plain-http links constantly and the page is nearly always
+/// served over TLS anyway — and every other scheme is refused outright.
+///
+/// The refusal is the point: a fetch tool that followed `file://` would read
+/// the host's disk on the model's say-so, and this tool is offered even in
+/// read-only runs because reading the *web* is not reading the machine.
+fn resolve_url(url: &str) -> Result<String, String> {
     let url = match url.strip_prefix("http://") {
         Some(rest) => format!("https://{rest}"),
         None => url.to_owned(),
     };
-    if !url.starts_with("https://") {
-        return ToolOutcome::err(format!("webfetch: `{url}` is not a valid http(s) URL"));
+    if url.starts_with("https://") {
+        Ok(url)
+    } else {
+        Err(format!("webfetch: `{url}` is not a valid http(s) URL"))
     }
-    let secs = timeout.filter(|&t| t > 0).unwrap_or(DEFAULT_TIMEOUT_SECS).min(MAX_TIMEOUT_SECS);
+}
+
+/// How long to wait. A host may ask for less, never for more: an unbounded
+/// wait is a run that never finishes and a turn budget spent on one URL.
+/// Zero reads as "unset" rather than "give up immediately".
+fn timeout_secs(requested: Option<u64>) -> u64 {
+    requested.filter(|&t| t > 0).unwrap_or(DEFAULT_TIMEOUT_SECS).min(MAX_TIMEOUT_SECS)
+}
+
+fn fetch(url: &str, format: &str, timeout: Option<u64>) -> ToolOutcome {
+    let url = match resolve_url(url) {
+        Ok(url) => url,
+        Err(message) => return ToolOutcome::err(message),
+    };
+    let secs = timeout_secs(timeout);
     let resp = match ureq::get(&url).timeout(Duration::from_secs(secs)).call() {
         Ok(r) => r,
         Err(e) => return ToolOutcome::err(format!("webfetch: request to {url} failed: {e}")),
@@ -174,6 +197,30 @@ fn strip_span(s: &str, open: &str, close: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_web_is_fetchable_and_plain_http_is_upgraded() {
+        // `webfetch` is offered in read-only runs on the grounds that reading
+        // the web is not reading the machine. A scheme that reaches the disk or
+        // the local network would quietly make that untrue.
+        assert_eq!(resolve_url("http://example.test/a").unwrap(), "https://example.test/a");
+        assert_eq!(resolve_url("https://example.test/a").unwrap(), "https://example.test/a");
+
+        for refused in ["file:///etc/passwd", "ftp://example.test/x", "/etc/passwd", "example.test"] {
+            let err = resolve_url(refused).unwrap_err();
+            assert!(err.contains("not a valid http(s) URL"), "{refused} → {err}");
+        }
+    }
+
+    #[test]
+    fn a_fetch_waits_for_a_bounded_time_the_host_can_shorten_but_not_extend() {
+        // An unbounded wait is a run that never finishes; a zero one would make
+        // every fetch fail on a slow page.
+        assert_eq!(timeout_secs(None), DEFAULT_TIMEOUT_SECS);
+        assert_eq!(timeout_secs(Some(0)), DEFAULT_TIMEOUT_SECS, "zero reads as unset, not as give up now");
+        assert_eq!(timeout_secs(Some(5)), 5, "a shorter wait is the host's to choose");
+        assert_eq!(timeout_secs(Some(9_999)), MAX_TIMEOUT_SECS, "a longer one is not");
+    }
 
     #[test]
     fn render_converts_html_per_format() {

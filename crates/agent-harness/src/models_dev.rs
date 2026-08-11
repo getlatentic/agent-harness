@@ -55,7 +55,7 @@ pub fn provider_models(provider: &str) -> Vec<ModelChoice> {
 #[cfg(feature = "models-dev")]
 mod imp {
     use std::collections::HashMap;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::OnceLock;
     use std::time::Duration;
 
@@ -166,13 +166,21 @@ mod imp {
 
     /// Whether the cache file is at least a day old — the only time the
     /// background refresh fires, so we re-fetch the ~2 MB catalog at most daily.
+    ///
+    /// A host that named no cache directory has nothing to refresh.
     fn cache_is_stale() -> bool {
+        cache_path().is_some_and(|path| stale(&path))
+    }
+
+    /// How old is too old, given a path. Separate from [`cache_is_stale`] so the
+    /// rule can be checked against a real file without a process-wide
+    /// environment variable deciding where that file lives.
+    fn stale(path: &Path) -> bool {
         const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
-        let Some(path) = cache_path() else {
-            return false;
-        };
-        match std::fs::metadata(&path).and_then(|meta| meta.modified()) {
+        match std::fs::metadata(path).and_then(|meta| meta.modified()) {
             Ok(modified) => modified.elapsed().map(|age| age >= MAX_AGE).unwrap_or(true),
+            // Absent or unreadable: fetching is the way to find out, and the
+            // alternative is a picker that stays empty forever.
             Err(_) => true,
         }
     }
@@ -219,6 +227,37 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn a_cache_is_refetched_daily_and_a_missing_one_immediately() {
+            // The catalog is ~2 MB, so refreshing it on every launch is the
+            // thing this rule exists to prevent — but never refreshing means a
+            // model list that is wrong until someone clears a file by hand.
+            let dir = std::env::temp_dir().join(format!("hl-catalog-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("models_dev.json");
+
+            assert!(stale(&path), "nothing cached yet, so fetching is how we find out");
+
+            std::fs::write(&path, "{}").unwrap();
+            assert!(!stale(&path), "just written is not a day old");
+
+            // Backdate it past the threshold.
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            let long_ago = std::time::SystemTime::now() - Duration::from_secs(25 * 60 * 60);
+            file.set_times(std::fs::FileTimes::new().set_modified(long_ago)).unwrap();
+            assert!(stale(&path), "a day-old catalog is refetched");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn no_cache_directory_means_nothing_to_refresh() {
+            // The library does not pick a cache location: a host names one or
+            // there is no disk cache at all. Inventing a path under $HOME is
+            // exactly what this crate stopped doing for instruction files.
+            assert!(cache_path().is_none() || std::env::var_os("AGENT_HARNESS_CACHE_DIR").is_some());
+        }
 
         #[test]
         fn select_keeps_only_tool_call_models_and_maps_name() {
