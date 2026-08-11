@@ -768,6 +768,59 @@ mod spawned {
         cli
     }
 
+    /// A stand-in for the user's login shell. It ignores its `-lic` arguments
+    /// and answers the way a real one does: startup chatter first, then the
+    /// sentinel, then an `env` dump — the shape the parser has to survive.
+    fn fake_login_shell(tag: &str, path_line: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("hl-shell-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shell = dir.join("fake-shell");
+        std::fs::write(
+            &shell,
+            format!(
+                "#!/bin/sh\nprintf 'rc chatter\\n'\nprintf '\\n__CLI_STREAM_PATH__\\n'\n\
+                 printf 'HOME=/x\\n{path_line}\\nTERM=xterm\\n'\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        shell
+    }
+
+    /// `SHELL` is process-global, so the two cases below cannot run alongside
+    /// each other.
+    static SHELL_ENV: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn the_path_comes_from_the_shell_we_asked() {
+        // This is the mechanism behind a CLI reading as installed at all in a
+        // Finder-launched app, and it was previously covered only down to its
+        // parser — the spawn, the sentinel handshake and the `$SHELL` guard had
+        // nothing exercising them. A fake shell reaches all three without
+        // depending on how this machine's rc happens to be set up.
+        let _guard = SHELL_ENV.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let restore = std::env::var("SHELL").ok();
+
+        let shell = fake_login_shell("ok", "PATH=/fake/node/bin:/usr/bin");
+        std::env::set_var("SHELL", &shell);
+        assert_eq!(
+            login_shell_path().as_deref(),
+            Some("/fake/node/bin:/usr/bin"),
+            "the answer must come from the shell, past its startup chatter",
+        );
+
+        // No shell to ask is not an empty PATH — the caller must fall back to
+        // the hardcoded list rather than treat "" as the user's real PATH.
+        std::env::set_var("SHELL", "");
+        assert_eq!(login_shell_path(), None);
+
+        match restore {
+            Some(value) => std::env::set_var("SHELL", value),
+            None => std::env::remove_var("SHELL"),
+        }
+    }
+
     fn run(program: PathBuf, env: Vec<(String, String)>) -> String {
         let lines: Arc<Mutex<Vec<String>>> = Arc::default();
         let sink = Arc::clone(&lines);
