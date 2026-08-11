@@ -1,20 +1,40 @@
-//! Generic streaming subprocess engine.
+//! Streaming subprocess control: spawn a child, read its **stdout** and
+//! **stderr** line-by-line, write to its **stdin**, and cancel it
+//! (SIGTERM → SIGKILL on unix, `TerminateProcess` elsewhere). No console
+//! window is flashed on Windows.
 //!
-//! Spawn a child CLI, stream its stdout/stderr line-by-line through a
-//! callback as [`ProcessEvent`]s, cancel it (SIGTERM → SIGKILL), and
-//! augment `PATH` so Node-based CLIs resolve even from a Finder-launched
-//! `.app`. No agent / harness *protocol* knowledge — it parses no CLI's
-//! output and knows no agent's wire format. The one node-specific concession
-//! is the best-effort PATH resolver (`augmented_node_path`): every consumer in
-//! this family drives a Node-based CLI, and as the shared leaf this is the one
-//! place `bob-rs` and `agent-harness` can both reuse it without a cycle.
-//! Otherwise it's purely subprocess streaming, useful to anyone driving a CLI.
+//! It knows no CLI's output format and no agent's protocol — it moves lines.
+//!
+//! ```no_run
+//! use cli_stream::{spawn_streaming, ProcessEvent, Spawn, Stdin};
+//!
+//! # fn main() -> Result<(), cli_stream::StreamError> {
+//! // stdout and stderr are always streamed; stdin is opt-in.
+//! let spawn = Spawn::new("some-server", ".", "run-1")
+//!     .args(vec!["--stdio".to_owned()])
+//!     .env(vec![("RUST_LOG".to_owned(), "info".to_owned())])
+//!     .stdin(Stdin::Piped);
+//!
+//! let handle = spawn_streaming(spawn, |event| match event {
+//!     ProcessEvent::Stdout { line, .. } => println!("out: {line}"),
+//!     ProcessEvent::Stderr { line, .. } => eprintln!("err: {line}"),
+//!     ProcessEvent::Exited { exit_code, .. } => eprintln!("exit {exit_code:?}"),
+//!     _ => {}
+//! })?;
+//!
+//! // …and talk back to it.
+//! handle.write_stdin_line(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#)?;
+//! handle.cancel()?;
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! [`InstallEvent`] is the sibling shape for streamed install/login output.
 //!
-//! This is a deliberate *leaf* crate: both `bob-rs` (the bob SDK) and
-//! `agent-harness` (the framework) depend on it, which is what lets
-//! `bob-rs` stay standalone without a dependency cycle.
+//! A deliberate *leaf*: it depends on nothing of ours, so anything driving a
+//! CLI can use it. Finding a CLI a user installed — resolving a bare name,
+//! locating the `node` it was installed beside — is a different question, and
+//! lives with the caller that needs it (`agent_harness::node_cli`).
 
 pub mod error;
 pub mod install;

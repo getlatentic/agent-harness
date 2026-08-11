@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use cli_stream::{ProcessEvent, ProcessHandle, Spawn};
+use cli_stream::{ProcessEvent, ProcessHandle, Spawn, Stdin};
 
 use super::client::McpConnection;
 
@@ -50,7 +50,7 @@ impl StdioConnection {
         let spawn = Spawn::new(command, cwd, format!("mcp-{server}"))
             .args(args.to_vec())
             .env(env.to_vec())
-            .writable();
+            .stdin(Stdin::Piped);
         let handle = crate::node_cli::spawn_cli(spawn, move |event| {
             // Only stdout carries protocol; a server's stderr is its logging,
             // and a line that is not JSON is logging too.
@@ -72,7 +72,7 @@ impl StdioConnection {
 
     fn send(&self, message: &Value) -> Result<(), String> {
         let line = serde_json::to_string(message).map_err(|e| format!("{}: encoding: {e}", self.server))?;
-        self.handle.write_line(&line).map_err(|e| format!("{}: write failed: {e}", self.server))
+        self.handle.write_stdin_line(&line).map_err(|e| format!("{}: write failed: {e}", self.server))
     }
 }
 

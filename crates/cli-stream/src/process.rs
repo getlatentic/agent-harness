@@ -69,7 +69,7 @@ pub struct ProcessHandle {
 /// Most CLIs get everything as arguments and want [`Closed`](Stdin::Closed): a
 /// child that inherits a terminal's stdin can block forever waiting for input
 /// nobody is typing. A child that *answers* — a JSON-RPC server over stdio —
-/// needs [`Piped`](Stdin::Piped) and [`ProcessHandle::write_line`].
+/// needs [`Piped`](Stdin::Piped) and [`ProcessHandle::write_stdin_line`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Stdin {
     #[default]
@@ -117,10 +117,12 @@ impl Spawn {
         self
     }
 
-    /// Give the child a stdin pipe, so the caller can talk to it.
+    /// What the child's stdin is connected to. `stdout` and `stderr` are always
+    /// piped — streaming them is what this crate is for — and arrive as
+    /// [`ProcessEvent::Stdout`] / [`ProcessEvent::Stderr`].
     #[must_use]
-    pub fn writable(mut self) -> Self {
-        self.stdin = Stdin::Piped;
+    pub fn stdin(mut self, stdin: Stdin) -> Self {
+        self.stdin = stdin;
         self
     }
 }
@@ -178,12 +180,12 @@ impl ProcessHandle {
         Ok(())
     }
 
-    /// Send one newline-terminated line to the child's stdin.
+    /// Send one line to the child's **stdin**, newline-terminated and flushed.
     ///
-    /// `Err` when the child was not spawned [`writable`](Spawn::writable), or
+    /// `Err` when the child was spawned with [`Stdin::Closed`] (the default), or
     /// when it has exited and the pipe is gone — both of which a caller
     /// expecting an answer needs to hear about rather than block on.
-    pub fn write_line(&self, line: &str) -> Result<(), StreamError> {
+    pub fn write_stdin_line(&self, line: &str) -> Result<(), StreamError> {
         let mut guard = self.inner.stdin.lock().map_err(|_| StreamError::CancelLockPoisoned)?;
         let stdin = guard.as_mut().ok_or(StreamError::PipeNotCaptured { stream: "stdin" })?;
         use std::io::Write;
