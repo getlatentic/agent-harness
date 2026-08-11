@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use harness::{
-    normalize_process_event, spawn_streaming, CredentialSpec, Harness, Capabilities,
+    normalize_process_event, spawn_streaming, CredentialSpec, Harness,
     Error, Manifest, Readiness, ParsedLine, RunCallback,
     RunEvent, RunHandle, RunMode, RunRequest, RunTuning,
 };
@@ -31,7 +31,6 @@ impl Harness for StubHarness {
             display_name: "Stub".to_owned(),
             description: "integration-test stub harness".to_owned(),
             install_hint: None,
-            capabilities: Capabilities::default(),
         }
     }
 

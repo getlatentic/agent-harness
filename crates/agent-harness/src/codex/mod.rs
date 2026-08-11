@@ -87,17 +87,20 @@ impl Harness for CodexHarness {
                 InstallHint::url("https://developers.openai.com/codex")
                     .with_command("npm install -g @openai/codex"),
             ),
-            capabilities: Capabilities {
-                // Codex owns its own login and edits files directly. Model
-                // names change often, so it takes free-text entry rather than a
-                // curated list, and it exposes reasoning effort. What it does
-                // not support — a turn cap, previews, a stored credential — is
-                // left to `Default`.
-                allows_custom_model: true,
-                supports_effort: true,
-                supports_login: true,
-                ..Default::default()
-            },
+        }
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            // Codex owns its own login and edits files directly. Model
+            // names change often, so it takes free-text entry rather than a
+            // curated list, and it exposes reasoning effort. What it does
+            // not support — a turn cap, previews, a stored credential — is
+            // left to `Default`.
+            allows_custom_model: true,
+            supports_effort: true,
+            supports_login: true,
+            ..Default::default()
         }
     }
 

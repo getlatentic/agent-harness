@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn capabilities_match_each_adapter_and_back_credential_required() {
-        let caps = |id: &str| harness_by_id(id).unwrap().manifest().capabilities;
+        let caps = |id: &str| harness_by_id(id).unwrap().capabilities();
 
         let claude = caps("claude");
         assert!(!claude.credential_required && !claude.previews_edits);
@@ -174,8 +174,11 @@ mod tests {
                 display_name: "Acme".to_owned(),
                 description: "A custom third-party harness.".to_owned(),
                 install_hint: None,
-                capabilities: Capabilities { allows_custom_model: true, ..Default::default() },
             }
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities { allows_custom_model: true, ..Default::default() }
         }
         fn readiness(&self) -> Readiness {
             Readiness {

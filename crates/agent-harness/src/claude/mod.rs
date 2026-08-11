@@ -97,25 +97,28 @@ impl Harness for ClaudeHarness {
                 InstallHint::url("https://code.claude.com/docs")
                     .with_command("curl -fsSL https://claude.ai/install.sh | bash"),
             ),
-            capabilities: Capabilities {
-                // Claude Code owns its own login; it edits files directly, so
-                // no previews and no stored credential. Everything it does not
-                // support is left to `Default`.
-                //
-                // The aliases `claude --help` documents. This list is the whole
-                // picker when models.dev is unreachable, and `allows_custom_model`
-                // stays off, so anything missing here is unreachable — not merely
-                // unlisted.
-                models: vec![
-                    ModelChoice { value: "sonnet".to_owned(), label: "Sonnet (latest)".to_owned() },
-                    ModelChoice { value: "opus".to_owned(), label: "Opus (latest)".to_owned() },
-                    ModelChoice { value: "fable".to_owned(), label: "Fable (latest)".to_owned() },
-                    ModelChoice { value: "haiku".to_owned(), label: "Haiku (latest)".to_owned() },
-                ],
-                supports_max_turns: true,
-                supports_login: true,
-                ..Default::default()
-            },
+        }
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            // Claude Code owns its own login; it edits files directly, so
+            // no previews and no stored credential. Everything it does not
+            // support is left to `Default`.
+            //
+            // The aliases `claude --help` documents. This list is the whole
+            // picker when models.dev is unreachable, and `allows_custom_model`
+            // stays off, so anything missing here is unreachable — not merely
+            // unlisted.
+            models: vec![
+                ModelChoice { value: "sonnet".to_owned(), label: "Sonnet (latest)".to_owned() },
+                ModelChoice { value: "opus".to_owned(), label: "Opus (latest)".to_owned() },
+                ModelChoice { value: "fable".to_owned(), label: "Fable (latest)".to_owned() },
+                ModelChoice { value: "haiku".to_owned(), label: "Haiku (latest)".to_owned() },
+            ],
+            supports_max_turns: true,
+            supports_login: true,
+            ..Default::default()
         }
     }
 
@@ -123,7 +126,7 @@ impl Harness for ClaudeHarness {
         // Keep the curated aliases first (`sonnet`/`opus` track "latest" and don't
         // churn), then append models.dev's current `anthropic` lineup (exact ids)
         // when the `models-dev` feature is on. Offline / feature-off → just aliases.
-        let mut models = self.manifest().capabilities.models;
+        let mut models = self.capabilities().models;
         models.extend(crate::models_dev::provider_models("anthropic"));
         Ok(models)
     }
@@ -397,7 +400,7 @@ mod tests {
         // vec IS the picker. Combined with `allows_custom_model: false`, an
         // alias missing here cannot be selected or typed. `fable` was absent
         // and therefore unreachable in exactly that state.
-        let caps = ClaudeHarness::new().manifest().capabilities;
+        let caps = ClaudeHarness::new().capabilities();
         let offered: Vec<&str> = caps.models.iter().map(|m| m.value.as_str()).collect();
         for alias in ["sonnet", "opus", "fable", "haiku"] {
             assert!(offered.contains(&alias), "`--model {alias}` is documented, got {offered:?}");

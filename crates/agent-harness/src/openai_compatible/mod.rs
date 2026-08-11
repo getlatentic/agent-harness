@@ -643,20 +643,23 @@ impl Harness for OpenHarness {
                 Discovery::OllamaTags => Some(InstallHint::url("https://ollama.com/download")),
                 Discovery::Static(_) | Discovery::ModelsDev(_) => None,
             },
-            capabilities: Capabilities {
-                credential_required: self.api_key.is_needed(),
-                // Dynamic discovery surfaces models via list_models(); a
-                // static instance lists them here.
-                models: match &self.discovery {
-                    Discovery::Static(m) => m.clone(),
-                    // Dynamic — surfaced live via list_models().
-                    Discovery::OllamaTags | Discovery::ModelsDev(_) => Vec::new(),
-                },
-                allows_custom_model: true,
-                supports_max_turns: true,
-                supports_custom_instructions: true,
-                ..Default::default()
+        }
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            credential_required: self.api_key.is_needed(),
+            // Dynamic discovery surfaces models via list_models(); a
+            // static instance lists them here.
+            models: match &self.discovery {
+                Discovery::Static(m) => m.clone(),
+                // Dynamic — surfaced live via list_models().
+                Discovery::OllamaTags | Discovery::ModelsDev(_) => Vec::new(),
             },
+            allows_custom_model: true,
+            supports_max_turns: true,
+            supports_custom_instructions: true,
+            ..Default::default()
         }
     }
 
@@ -783,7 +786,7 @@ impl Harness for OpenHarness {
     fn list_models(&self) -> Result<Vec<ModelChoice>, Error> {
         match &self.discovery {
             Discovery::OllamaTags => ollama::list_tags(&self.base_url).map_err(Error::Other),
-            Discovery::Static(_) => Ok(self.manifest().capabilities.models),
+            Discovery::Static(_) => Ok(self.capabilities().models),
             Discovery::ModelsDev(provider) => Ok(crate::models_dev::provider_models(provider)),
         }
     }
@@ -832,11 +835,12 @@ mod tests {
         // A local server IS something the user installs — the hint is the only
         // way the picker can say where to get it now that nothing self-installs.
         assert!(info.install_hint.is_some_and(|h| h.url.contains("ollama.com")));
-        assert!(!info.capabilities.credential_required);
-        assert!(!info.capabilities.previews_edits);
-        assert!(info.capabilities.allows_custom_model);
-        // Dynamic discovery → no static models in manifest(); list_models() fills it.
-        assert!(info.capabilities.models.is_empty());
+        let can = h.capabilities();
+        assert!(!can.credential_required);
+        assert!(!can.previews_edits);
+        assert!(can.allows_custom_model);
+        // Dynamic discovery → no static models declared; list_models() fills it.
+        assert!(can.models.is_empty());
         assert!(!h.credential().required);
     }
 
@@ -875,7 +879,7 @@ mod tests {
         });
 
         // Declares that it needs a key, so a host shows the field for it.
-        assert!(h.manifest().capabilities.credential_required);
+        assert!(h.capabilities().credential_required);
         // Has one, so it is ready — no variable was ever set.
         assert!(h.readiness().ready);
         // And the credential slot is real, so a host can store into it.
@@ -911,7 +915,7 @@ mod tests {
             api_key: ApiKey::Env("OPENROUTER_API_KEY".to_owned()),
             ..Default::default()
         });
-        assert!(h.manifest().capabilities.credential_required);
+        assert!(h.capabilities().credential_required);
         assert!(h.credential().required);
     }
 
@@ -951,24 +955,24 @@ mod tests {
         };
 
         let local = harness(ApiKey::NotNeeded);
-        assert!(!local.manifest().capabilities.credential_required);
+        assert!(!local.capabilities().credential_required);
         assert!(!local.credential().required);
         assert!(local.readiness().ready, "no key needed means ready");
 
         let vaulted = harness(ApiKey::Value("sk-secret".to_owned()));
-        assert!(vaulted.manifest().capabilities.credential_required, "a value still needs a key");
+        assert!(vaulted.capabilities().credential_required, "a value still needs a key");
         assert!(vaulted.credential().required, "and the slot stays writable");
         assert!(vaulted.readiness().ready, "and it is satisfied");
 
         let awaiting = harness(ApiKey::Required);
-        assert!(awaiting.manifest().capabilities.credential_required);
+        assert!(awaiting.capabilities().credential_required);
         assert!(!awaiting.readiness().ready, "required but absent is not ready");
         let error = awaiting.readiness().error.unwrap_or_default();
         assert!(error.contains("Add an API key"), "no variable to name: {error}");
 
         std::env::set_var("ACME_ENV_KEY", "sk-from-env");
         let from_env = harness(ApiKey::Env("ACME_ENV_KEY".to_owned()));
-        assert!(from_env.manifest().capabilities.credential_required);
+        assert!(from_env.capabilities().credential_required);
         assert!(from_env.readiness().ready);
         assert_eq!(from_env.credential().keychain_account, "ACME_ENV_KEY");
         std::env::remove_var("ACME_ENV_KEY");
@@ -999,7 +1003,7 @@ mod tests {
             models: vec![ModelChoice { value: "x-ai/grok".to_owned(), label: "Grok".to_owned() }],
             ..Default::default()
         });
-        assert!(h.manifest().capabilities.credential_required);
+        assert!(h.capabilities().credential_required);
         assert!(h.credential().required);
         assert_eq!(h.credential().keychain_account, "OPENROUTER_API_KEY");
         // Static discovery → list_models() returns the curated list.

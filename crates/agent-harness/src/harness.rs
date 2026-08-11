@@ -503,7 +503,11 @@ impl InstallHint {
     }
 }
 
-/// Static metadata for the harness picker.
+/// Who a harness is: the identity and presentation a picker renders.
+///
+/// What it can *do* is [`Capabilities`], asked for separately — that question
+/// is put far more often than this one, and answering it should not mean
+/// building three strings.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Manifest {
@@ -513,9 +517,6 @@ pub struct Manifest {
     /// How the user installs this harness themselves. `None` when there is
     /// nothing to install — a hosted endpoint, or an agent they already supply.
     pub install_hint: Option<InstallHint>,
-    /// Declarative capabilities — what the harness supports, so the UI
-    /// and run-gating never special-case its id.
-    pub capabilities: Capabilities,
 }
 
 // --- The trait ------------------------------------------------------
@@ -524,8 +525,18 @@ pub struct Manifest {
 /// (they hold config, not connections) so a registry can hand out
 /// fresh boxes on demand.
 pub trait Harness: Send + Sync {
-    /// Static metadata for the UI.
+    /// Who this harness is — identity and presentation, for the picker.
     fn manifest(&self) -> Manifest;
+
+    /// What this harness supports, so a consumer adapts to it declaratively
+    /// instead of branching on [`Manifest::id`].
+    ///
+    /// Defaults to supporting nothing, which is the safe direction: an adapter
+    /// names what it does, and one that has not heard of a capability added
+    /// later does not claim it.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::default()
+    }
 
     /// Probe availability / version / auth. May shell out; callers
     /// should treat it as blocking and run it off the UI thread.
@@ -540,7 +551,7 @@ pub trait Harness: Send + Sync {
 
     /// Enumerate the models this harness can run, *live*. The default returns
     /// the static list declared in [`Manifest`]
-    /// (`manifest().capabilities.models`), so existing adapters need no change.
+    /// (`capabilities().models`), so existing adapters need no change.
     ///
     /// Override it when the model set is discovered at runtime rather than
     /// known at compile time — a hosted-API adapter querying the provider's
@@ -550,7 +561,7 @@ pub trait Harness: Send + Sync {
     /// the *absence* of models, not a separate flag. May shell out / hit the
     /// network; treat it as blocking and run it off the UI thread.
     fn list_models(&self) -> Result<Vec<ModelChoice>, Error> {
-        Ok(self.manifest().capabilities.models)
+        Ok(self.capabilities().models)
     }
 
     /// Whether this harness can install/list/delete its own models locally, and
@@ -808,10 +819,13 @@ mod tests {
                 display_name: "Minimal".to_owned(),
                 description: "implements the required surface and nothing else".to_owned(),
                 install_hint: None,
-                capabilities: Capabilities {
-                    models: vec![ModelChoice { value: "m1".to_owned(), label: "Model one".to_owned() }],
-                    ..Default::default()
-                },
+            }
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                models: vec![ModelChoice { value: "m1".to_owned(), label: "Model one".to_owned() }],
+                ..Default::default()
             }
         }
         fn readiness(&self) -> Readiness {
@@ -844,7 +858,7 @@ mod tests {
         // The picker asks every harness for models; the default answers from
         // the capabilities it already declared rather than making each adapter
         // write the same one-liner.
-        assert_eq!(harness.list_models().unwrap(), harness.manifest().capabilities.models);
+        assert_eq!(harness.list_models().unwrap(), harness.capabilities().models);
         assert!(harness.model_management().is_none(), "no model management is the default");
         assert!(NoopControl.pid().is_none(), "a harness with no process reports no pid");
     }

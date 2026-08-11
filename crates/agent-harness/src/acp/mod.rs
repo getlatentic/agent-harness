@@ -133,13 +133,16 @@ impl Harness for AcpHarness {
             display_name: self.display_name.clone(),
             description: self.description.clone(),
             install_hint: self.install_hint.clone(),
-            capabilities: Capabilities {
-                // Models are discovered live via `list_models()` (opencode lists
-                // its own; a generic ACP agent has none), so the static list is
-                // left empty by `Default`; a free-text model id is accepted.
-                allows_custom_model: true,
-                ..Default::default()
-            },
+        }
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            // Models are discovered live via `list_models()` (opencode lists
+            // its own; a generic ACP agent has none), so the static list is
+            // left empty by `Default`; a free-text model id is accepted.
+            allows_custom_model: true,
+            ..Default::default()
         }
     }
 
@@ -443,7 +446,7 @@ mod tests {
             install_hint: None,
         });
         assert!(harness.list_models().expect("ok").is_empty());
-        let caps = harness.manifest().capabilities;
+        let caps = harness.capabilities();
         assert!(caps.models.is_empty());
         assert!(caps.allows_custom_model, "ACP agents accept a free-text model");
     }

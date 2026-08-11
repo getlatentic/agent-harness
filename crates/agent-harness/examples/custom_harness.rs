@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::{mpsc::sync_channel, Arc, Mutex};
 
 use harness::{
-    run_events_from_parsed, spawn_streaming, CredentialSpec, Harness, Capabilities,
+    run_events_from_parsed, spawn_streaming, CredentialSpec, Harness,
     Error, Manifest, Readiness, ParsedLine, ProcessEvent,
     RunCallback, RunEvent, RunHandle, RunRequest, Registry, SessionInfo,
 };
@@ -42,7 +42,6 @@ impl Harness for EchoHarness {
             description: "A toy harness that echoes the prompt — a template for your own."
                 .to_owned(),
             install_hint: None,
-            capabilities: Capabilities::default(),
         }
     }
 

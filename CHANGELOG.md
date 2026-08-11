@@ -17,7 +17,7 @@ was renamed away from. Mechanical:
 |---|---|
 | `HarnessError` | `Error` |
 | `HarnessInfo` | `Manifest` (and `Harness::info` → `Harness::manifest`) |
-| `HarnessCapabilities` | `Capabilities` |
+| `HarnessCapabilities` | `Capabilities` (moved off `Manifest` onto `Harness::capabilities`) |
 | `HarnessReadiness` | `Readiness` |
 | `HarnessModel` | `ModelChoice` |
 
