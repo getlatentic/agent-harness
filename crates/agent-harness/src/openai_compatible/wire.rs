@@ -118,13 +118,21 @@ pub(super) fn send_with_retry(url: &str, make: impl Fn() -> Result<ureq::Respons
         match make() {
             Ok(resp) => return Ok(resp),
             Err(e) if attempt < MAX_RETRIES && is_retryable(&e) => {
-                let backoff = retry_after(&e).unwrap_or_else(|| Duration::from_millis(1000 * 2u64.pow(attempt)));
-                std::thread::sleep(backoff);
+                // The provider's own `Retry-After` wins: it knows when it will
+                // be ready, and guessing shorter just spends another attempt.
+                std::thread::sleep(retry_after(&e).unwrap_or_else(|| backoff(attempt)));
                 attempt += 1;
             }
             Err(e) => return Err(describe_failure(url, e)),
         }
     }
+}
+
+/// How long to wait before retry number `attempt`, counting from zero: one
+/// second, doubling. Backing off at all is what keeps a rate limit from
+/// becoming a tighter loop against the thing that just asked for less.
+fn backoff(attempt: u32) -> Duration {
+    Duration::from_millis(1000 * 2u64.pow(attempt))
 }
 
 /// Mark the cacheable prefix with Anthropic-style `cache_control` breakpoints.
@@ -617,6 +625,17 @@ mod tests {
         assert!(status_is_retryable(429), "rate limit retries");
         assert!(status_is_retryable(500) && status_is_retryable(503), "5xx retries");
         assert!(!status_is_retryable(400) && !status_is_retryable(401) && !status_is_retryable(404), "4xx is terminal");
+    }
+
+    #[test]
+    fn the_wait_between_attempts_doubles() {
+        // Retrying is only half of backing off. A flat or shrinking wait turns
+        // the provider asking for less traffic into three requests in as many
+        // milliseconds.
+        assert_eq!(backoff(0), Duration::from_secs(1));
+        assert_eq!(backoff(1), Duration::from_secs(2));
+        assert_eq!(backoff(2), Duration::from_secs(4));
+        assert!(backoff(1) > backoff(0) && backoff(2) > backoff(1));
     }
 
     #[test]

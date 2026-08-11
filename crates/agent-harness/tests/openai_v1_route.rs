@@ -56,9 +56,16 @@ fn fake_openai(responses: Vec<(u16, String)>) -> (String, Seen) {
             log.lock().unwrap().push(Request { url, authorization, body });
 
             let (status, payload) = queued.next().unwrap_or_else(|| (200, sse(&[])));
+            // A real 429 carries `Retry-After`, and honouring it is what the
+            // backoff defers to — so saying "now" keeps these tests instant
+            // instead of sleeping out the exponential default.
+            let headers = match status {
+                429 => vec![tiny_http::Header::from_bytes(&b"Retry-After"[..], &b"0"[..]).unwrap()],
+                _ => Vec::new(),
+            };
             let _ = request.respond(tiny_http::Response::new(
                 tiny_http::StatusCode(status),
-                Vec::new(),
+                headers,
                 Cursor::new(payload.into_bytes()),
                 None,
                 None,
@@ -324,4 +331,16 @@ fn a_transient_failure_is_retried_rather_than_ending_the_run() {
     assert_eq!(streamed_text(&events), "pong", "the retry is what the caller sees: {events:?}");
     assert!(!events.iter().any(|e| matches!(e, RunEvent::Error { .. })), "{events:?}");
     assert_eq!(seen.lock().unwrap().len(), 2, "refused once, then sent again");
+}
+
+#[test]
+fn retrying_gives_up_rather_than_hammering_a_provider_that_keeps_refusing() {
+    // The other end of the same policy. Retrying without a bound is how a
+    // rate-limited client becomes the reason it stays rate-limited.
+    let refusals = std::iter::repeat_with(|| (429, "slow down".to_owned())).take(10).collect();
+    let (base, seen) = fake_openai(refusals);
+    let events = collect(&harness_at(&base, ApiKey::NotNeeded, PromptCache::default()), ask("ping"));
+
+    assert_eq!(seen.lock().unwrap().len(), 4, "the first attempt plus three retries, then it stops");
+    assert!(events.iter().any(|e| matches!(e, RunEvent::Error { .. })), "and says so: {events:?}");
 }
