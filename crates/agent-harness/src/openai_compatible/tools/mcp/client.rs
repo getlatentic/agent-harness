@@ -69,6 +69,16 @@ impl McpClient {
             }
             McpTransport::Http { url, headers } => Box::new(super::http::HttpConnection::new(&server.name, url, headers)),
         };
+        Self::handshake(conn)
+    }
+
+    /// The protocol lifecycle, independent of how the bytes get there: announce
+    /// ourselves, confirm, then ask what the server offers.
+    ///
+    /// Separate from [`Self::connect`] because opening a transport and speaking
+    /// the protocol are different concerns — and because the sequence is worth
+    /// exercising without a process on the other end.
+    fn handshake(conn: Box<dyn McpConnection>) -> Result<(McpClient, Vec<McpToolDef>), String> {
         let client = McpClient { conn };
         client.initialize()?;
         let tools = client.list_tools()?;
@@ -288,6 +298,86 @@ pub(super) fn parse_rpc_result(text: &str, id: i64) -> Result<Value, String> {
     }
 }
 
+/// An [`McpConnection`] that answers from a script rather than a server.
+///
+/// The transport is the only part of MCP that needs a process; the lifecycle,
+/// the pagination and the result handling are decisions about JSON. Those get
+/// tested here, against replies queued per method, with the requests recorded
+/// so a test can assert what was *asked* and not only what came back.
+///
+/// Cloneable, sharing one script and one log, so a test can keep a handle on
+/// the recording after handing the connection to the client.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(super) struct ScriptedConnection {
+    #[allow(clippy::type_complexity)]
+    replies: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<String, std::collections::VecDeque<Result<Value, String>>>>,
+    >,
+    asked: std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>,
+}
+
+#[cfg(test)]
+impl ScriptedConnection {
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Queue one reply for `method`. Called twice for the same method, the
+    /// replies come back in order — which is how a paginated list is scripted.
+    pub(super) fn on(self, method: &str, reply: Value) -> Self {
+        self.queue(method, Ok(reply));
+        self
+    }
+
+    /// Queue a failure — a JSON-RPC error or a dead transport, which the client
+    /// cannot tell apart and should not need to.
+    pub(super) fn failing(self, method: &str, error: &str) -> Self {
+        self.queue(method, Err(error.to_owned()));
+        self
+    }
+
+    fn queue(&self, method: &str, reply: Result<Value, String>) {
+        self.replies.lock().unwrap().entry(method.to_owned()).or_default().push_back(reply);
+    }
+
+    /// Every request and notification, in the order it was sent.
+    pub(super) fn asked(&self) -> Vec<(String, Value)> {
+        self.asked.lock().unwrap().clone()
+    }
+
+    pub(super) fn methods(&self) -> Vec<String> {
+        self.asked().into_iter().map(|(method, _)| method).collect()
+    }
+}
+
+#[cfg(test)]
+impl McpConnection for ScriptedConnection {
+    fn request(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.asked.lock().unwrap().push((method.to_owned(), params));
+        self.replies
+            .lock()
+            .unwrap()
+            .get_mut(method)
+            .and_then(std::collections::VecDeque::pop_front)
+            .unwrap_or_else(|| Err(format!("nothing scripted for {method}")))
+    }
+
+    fn notify(&self, method: &str, params: Value) -> Result<(), String> {
+        self.asked.lock().unwrap().push((method.to_owned(), params));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl McpClient {
+    /// A client over a given connection, skipping the handshake — for tests
+    /// that are about a single call rather than the lifecycle.
+    pub(super) fn over(conn: Box<dyn McpConnection>) -> Self {
+        Self { conn }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +403,115 @@ mod tests {
         // JSON-RPC error surfaces as Err.
         let err = r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32601,"message":"nope"}}"#;
         assert!(parse_rpc_result(err, 3).unwrap_err().contains("nope"));
+    }
+
+    fn tools_page(tools: &[&str], next: Option<&str>) -> Value {
+        let listed: Vec<Value> = tools
+            .iter()
+            .map(|name| json!({ "name": name, "description": format!("does {name}"), "inputSchema": { "type": "object" } }))
+            .collect();
+        match next {
+            Some(cursor) => json!({ "tools": listed, "nextCursor": cursor }),
+            None => json!({ "tools": listed }),
+        }
+    }
+
+    #[test]
+    fn the_handshake_announces_itself_before_asking_what_is_offered() {
+        // A server may reject anything sent before `initialize`, and the
+        // `initialized` notification is what tells it the client is ready.
+        let conn = ScriptedConnection::new()
+            .on("initialize", json!({ "protocolVersion": PROTOCOL_VERSION }))
+            .on("tools/list", tools_page(&["search"], None));
+        let recorder = conn.clone();
+
+        let (_client, tools) = McpClient::handshake(Box::new(conn)).expect("handshake");
+
+        assert_eq!(
+            recorder.methods(),
+            ["initialize", "notifications/initialized", "tools/list"],
+            "in that order"
+        );
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "search");
+    }
+
+    #[test]
+    fn a_server_that_refuses_the_handshake_is_not_reported_as_having_no_tools() {
+        // Failing open here would offer the model an empty toolset from a server
+        // that never came up, and nothing downstream would know why.
+        let conn = ScriptedConnection::new().failing("initialize", "protocol version not supported");
+        let err = McpClient::handshake(Box::new(conn)).map(|_| ()).expect_err("must fail");
+        assert!(err.contains("protocol version"), "got {err}");
+    }
+
+    #[test]
+    fn a_paginated_tool_list_is_followed_to_the_end() {
+        // `nextCursor` is the server saying "there are more". Stopping at the
+        // first page silently hides tools; not passing the cursor back re-reads
+        // page one forever.
+        let conn = ScriptedConnection::new()
+            .on("initialize", json!({}))
+            .on("tools/list", tools_page(&["one", "two"], Some("page2")))
+            .on("tools/list", tools_page(&["three"], None));
+        let recorder = conn.clone();
+
+        let (_client, tools) = McpClient::handshake(Box::new(conn)).expect("handshake");
+
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["one", "two", "three"], "every page is collected");
+        let cursors: Vec<Value> = recorder
+            .asked()
+            .into_iter()
+            .filter(|(method, _)| method == "tools/list")
+            .map(|(_, params)| params)
+            .collect();
+        assert_eq!(cursors[0], json!({}), "the first page asks for no cursor");
+        assert_eq!(cursors[1], json!({ "cursor": "page2" }), "and the second sends the one it was given");
+    }
+
+    #[test]
+    fn a_tool_that_reports_its_own_failure_is_an_error_not_an_answer() {
+        // `isError` is the tool saying it failed while the transport succeeded.
+        // Passing its text back as a result would have the model treat a failure
+        // as the answer.
+        let client = McpClient::over(Box::new(
+            ScriptedConnection::new()
+                .on("tools/call", json!({ "content": [{ "type": "text", "text": "no such file" }], "isError": true }))
+                .on("tools/call", json!({ "content": [{ "type": "text", "text": "it worked" }] })),
+        ));
+        assert_eq!(client.call("read", &json!({})).unwrap_err(), "no such file");
+        assert_eq!(client.call("read", &json!({})).unwrap(), "it worked");
+    }
+
+    #[test]
+    fn optional_capabilities_are_skipped_rather_than_fatal() {
+        // Resources and prompts are a bonus. A server without them answers
+        // "method not found", and treating that as a failure would lose the
+        // tools it *does* offer.
+        let client = McpClient::over(Box::new(
+            ScriptedConnection::new()
+                .failing("resources/list", "method not found")
+                .failing("prompts/list", "method not found"),
+        ));
+        assert!(client.list_resources().is_empty());
+        assert!(client.list_prompts().is_empty());
+    }
+
+    #[test]
+    fn a_resource_without_a_name_is_listed_under_its_uri() {
+        let client = McpClient::over(Box::new(ScriptedConnection::new().on(
+            "resources/list",
+            json!({ "resources": [
+                { "uri": "file:///a.txt", "name": "A", "description": "the first" },
+                { "uri": "file:///b.txt" },
+                { "name": "no uri, so not addressable" }
+            ]}),
+        )));
+        let resources = client.list_resources();
+        assert_eq!(resources.len(), 2, "an entry with no uri cannot be read, so it is dropped");
+        assert_eq!(resources[0].name, "A");
+        assert_eq!(resources[1].name, "file:///b.txt", "the uri stands in for a missing name");
     }
 
     #[test]
