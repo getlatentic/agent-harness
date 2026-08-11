@@ -545,6 +545,32 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_live_child_reports_a_pid_and_flips_when_cancelled() {
+        // An embedder records the pid so a child a hard crash orphaned can be
+        // reaped on the next launch, and reads `was_cancelled` to tell a run
+        // the user stopped from one that finished. Both are answered by
+        // forwarding, which is exactly the kind of code that silently returns
+        // the wrong constant.
+        let handle = spawn_streaming(
+            PathBuf::from("/bin/sleep"),
+            vec!["30".to_owned()],
+            Vec::new(),
+            std::env::temp_dir(),
+            "pid".to_owned(),
+            |_| {},
+        )
+        .expect("sleep should spawn");
+
+        let pid = handle.pid().expect("a live child has a pid");
+        assert!(pid > 1, "a real OS pid, not a placeholder: {pid}");
+        assert!(!handle.was_cancelled(), "nothing has stopped it yet");
+
+        handle.cancel().expect("cancel");
+        assert!(handle.was_cancelled(), "a stopped run says so");
+    }
+
     #[test]
     fn spawning_a_missing_binary_is_err() {
         let result = spawn_streaming(

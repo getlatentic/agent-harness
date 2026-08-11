@@ -447,9 +447,76 @@ mod tests {
     }
 }
 
-/// End-to-end lifecycle tests that spawn real processes. Unix-only: they use
-/// `printf` / `sh` / `sleep`, and the cancel path is signal-based here.
+/// Spawning a real CLI and looking at the environment it actually got. Unix
+/// only: the fixture is a shell script.
 #[cfg(all(test, unix))]
-mod lifecycle {
+mod spawned {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// A CLI that prints the PATH it was handed, so a test can see what the
+    /// child really received rather than what we meant to send.
+    fn path_echoing_cli(tag: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("hl-spawn-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cli = dir.join("fake-agent");
+        std::fs::write(&cli, "#!/bin/sh\nprintf '%s\\n' \"$PATH\"\n").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        cli
+    }
+
+    fn run(program: PathBuf, env: Vec<(String, String)>) -> String {
+        let lines: Arc<Mutex<Vec<String>>> = Arc::default();
+        let sink = Arc::clone(&lines);
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&done);
+        let _handle = spawn_cli(program, Vec::new(), env, std::env::temp_dir(), "t".to_owned(), move |event| {
+            match event {
+                cli_stream::ProcessEvent::Stdout { line, .. } => sink.lock().unwrap().push(line),
+                cli_stream::ProcessEvent::Exited { .. } => flag.store(true, std::sync::atomic::Ordering::SeqCst),
+                _ => {}
+            }
+        })
+        .expect("the fixture should spawn");
+        for _ in 0..200 {
+            if done.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let out = lines.lock().unwrap().join("\n");
+        out
+    }
+
+    #[test]
+    fn a_spawned_cli_gets_its_own_directory_at_the_front_of_path() {
+        // The whole reason this module exists. A Finder-launched .app inherits
+        // `/usr/bin:/bin:/usr/sbin:/sbin`, so a CLI installed under nvm cannot
+        // see the `node` it was installed beside and exits 127.
+        //
+        // Nothing in a terminal reproduces that — `open <app>` leaks the
+        // launching shell's PATH and passes either way — so this assertion is
+        // the only thing standing between the fix and its silent removal.
+        let cli = path_echoing_cli("front");
+        let parent = cli.parent().unwrap().display().to_string();
+        let seen = run(cli.clone(), Vec::new());
+
+        assert!(
+            seen.starts_with(&parent),
+            "the program's own directory must lead PATH.\n  wanted first: {parent}\n  child saw:    {seen}"
+        );
+        let _ = std::fs::remove_dir_all(cli.parent().unwrap());
+    }
+
+    #[test]
+    fn a_path_the_caller_supplies_still_wins() {
+        // Documented behaviour: the augmentation is a floor, not a cage. A host
+        // that knows exactly which environment it wants gets it.
+        let cli = path_echoing_cli("override");
+        let seen = run(cli.clone(), vec![("PATH".to_owned(), "/only/this".to_owned())]);
+        assert_eq!(seen.trim(), "/only/this", "the caller's PATH is applied last");
+        let _ = std::fs::remove_dir_all(cli.parent().unwrap());
+    }
 }
 
