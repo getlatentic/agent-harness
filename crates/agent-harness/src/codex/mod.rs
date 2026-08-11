@@ -78,7 +78,7 @@ impl CodexHarness {
 }
 
 impl Harness for CodexHarness {
-    fn info(&self) -> Manifest {
+    fn manifest(&self) -> Manifest {
         Manifest {
             id: CODEX_HARNESS_ID.to_owned(),
             display_name: "Codex".to_owned(),
@@ -341,8 +341,8 @@ mod tests {
     #[test]
     fn codex_info_and_credential() {
         let h = CodexHarness::new();
-        assert_eq!(h.info().id, CODEX_HARNESS_ID);
-        let hint = h.info().install_hint.expect("Codex is a CLI the user installs");
+        assert_eq!(h.manifest().id, CODEX_HARNESS_ID);
+        let hint = h.manifest().install_hint.expect("Codex is a CLI the user installs");
         assert_eq!(hint.command.as_deref(), Some("npm install -g @openai/codex"));
         assert!(!h.credential().required);
     }

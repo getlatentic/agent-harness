@@ -59,14 +59,14 @@ impl Registry {
         self.harnesses
             .iter()
             .map(Box::as_ref)
-            .find(|h| h.info().id == id)
+            .find(|h| h.manifest().id == id)
     }
 
     /// Resolve a harness by id, taking ownership of its box out of the registry —
     /// for a host that needs an owned `Box<dyn Harness>` to hold across a run,
     /// rather than the borrow [`by_id`](Registry::by_id) returns.
     pub fn into_by_id(self, id: &str) -> Option<Box<dyn Harness>> {
-        self.harnesses.into_iter().find(|h| h.info().id == id)
+        self.harnesses.into_iter().find(|h| h.manifest().id == id)
     }
 
     /// Probe readiness of every registered harness, in registration order — the
@@ -78,12 +78,12 @@ impl Registry {
 
     /// Metadata for every registered harness, in registration order.
     pub fn catalog(&self) -> Vec<Manifest> {
-        self.harnesses.iter().map(|h| h.info()).collect()
+        self.harnesses.iter().map(|h| h.manifest()).collect()
     }
 
     /// The ids of every registered harness, in registration order.
     pub fn ids(&self) -> Vec<String> {
-        self.harnesses.iter().map(|h| h.info().id).collect()
+        self.harnesses.iter().map(|h| h.manifest().id).collect()
     }
 }
 
@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn capabilities_match_each_adapter_and_back_credential_required() {
-        let caps = |id: &str| harness_by_id(id).unwrap().info().capabilities;
+        let caps = |id: &str| harness_by_id(id).unwrap().manifest().capabilities;
 
         let claude = caps("claude");
         assert!(!claude.credential_required && !claude.previews_edits);
@@ -168,7 +168,7 @@ mod tests {
     // type lives "outside" the built-ins yet registers + resolves the same.
     struct Acme;
     impl Harness for Acme {
-        fn info(&self) -> Manifest {
+        fn manifest(&self) -> Manifest {
             Manifest {
                 id: "acme".to_owned(),
                 display_name: "Acme".to_owned(),

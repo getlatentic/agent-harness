@@ -3,7 +3,7 @@
 //! `cargo run --example setup`
 //!
 //! `readiness()` reports whether the CLI is installed and authenticated. This
-//! crate never installs an agent — when one is missing, `info().install_hint`
+//! crate never installs an agent — when one is missing, `manifest().install_hint`
 //! says where to get it, and the host shows that to the user. `login()` still
 //! runs the CLI's own OAuth (`claude auth login`, which opens the browser),
 //! because that is the agent authenticating itself, not us installing it.
@@ -18,7 +18,7 @@ fn main() -> Result<(), Error> {
     let r = claude.readiness();
     if !r.installed {
         // Not our job to install it — tell the user where it comes from.
-        if let Some(hint) = claude.info().install_hint {
+        if let Some(hint) = claude.manifest().install_hint {
             eprintln!("Claude Code isn't installed. Get it from {}", hint.url);
             if let Some(command) = hint.command {
                 eprintln!("  {command}");

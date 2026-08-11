@@ -25,7 +25,7 @@ struct StubHarness {
 }
 
 impl Harness for StubHarness {
-    fn info(&self) -> Manifest {
+    fn manifest(&self) -> Manifest {
         Manifest {
             id: "stub".to_owned(),
             display_name: "Stub".to_owned(),

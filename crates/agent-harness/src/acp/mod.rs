@@ -127,7 +127,7 @@ impl AcpHarness {
 }
 
 impl Harness for AcpHarness {
-    fn info(&self) -> Manifest {
+    fn manifest(&self) -> Manifest {
         Manifest {
             id: self.id.clone(),
             display_name: self.display_name.clone(),
@@ -443,7 +443,7 @@ mod tests {
             install_hint: None,
         });
         assert!(harness.list_models().expect("ok").is_empty());
-        let caps = harness.info().capabilities;
+        let caps = harness.manifest().capabilities;
         assert!(caps.models.is_empty());
         assert!(caps.allows_custom_model, "ACP agents accept a free-text model");
     }

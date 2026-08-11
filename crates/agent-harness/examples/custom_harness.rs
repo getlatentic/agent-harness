@@ -35,7 +35,7 @@ const ECHO_ID: &str = "echo";
 struct EchoHarness;
 
 impl Harness for EchoHarness {
-    fn info(&self) -> Manifest {
+    fn manifest(&self) -> Manifest {
         Manifest {
             id: ECHO_ID.to_owned(),
             display_name: "Echo".to_owned(),
@@ -163,7 +163,7 @@ fn main() -> Result<(), String> {
     // Register your harness alongside (or instead of) the built-ins — no fork.
     let reg = Registry::new().register(EchoHarness);
     let h = reg.by_id(ECHO_ID).expect("registered");
-    println!("harness: {} — {}", h.info().display_name, h.info().description);
+    println!("harness: {} — {}", h.manifest().display_name, h.manifest().description);
 
     let (tx, rx) = sync_channel::<RunEvent>(64);
     let on_event: RunCallback = Arc::new(move |ev| {

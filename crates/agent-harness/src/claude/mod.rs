@@ -87,7 +87,7 @@ impl ClaudeHarness {
 }
 
 impl Harness for ClaudeHarness {
-    fn info(&self) -> Manifest {
+    fn manifest(&self) -> Manifest {
         Manifest {
             id: CLAUDE_HARNESS_ID.to_owned(),
             display_name: "Claude Code".to_owned(),
@@ -123,7 +123,7 @@ impl Harness for ClaudeHarness {
         // Keep the curated aliases first (`sonnet`/`opus` track "latest" and don't
         // churn), then append models.dev's current `anthropic` lineup (exact ids)
         // when the `models-dev` feature is on. Offline / feature-off → just aliases.
-        let mut models = self.info().capabilities.models;
+        let mut models = self.manifest().capabilities.models;
         models.extend(crate::models_dev::provider_models("anthropic"));
         Ok(models)
     }
@@ -319,8 +319,8 @@ mod tests {
     #[test]
     fn claude_info_and_credential() {
         let h = ClaudeHarness::new();
-        assert_eq!(h.info().id, CLAUDE_HARNESS_ID);
-        let hint = h.info().install_hint.expect("Claude Code is a CLI the user installs");
+        assert_eq!(h.manifest().id, CLAUDE_HARNESS_ID);
+        let hint = h.manifest().install_hint.expect("Claude Code is a CLI the user installs");
         assert!(hint.command.is_some_and(|c| c.contains("claude.ai/install.sh")));
         // Claude manages its own auth — Compose doesn't require a key.
         assert!(!h.credential().required);
@@ -397,7 +397,7 @@ mod tests {
         // vec IS the picker. Combined with `allows_custom_model: false`, an
         // alias missing here cannot be selected or typed. `fable` was absent
         // and therefore unreachable in exactly that state.
-        let caps = ClaudeHarness::new().info().capabilities;
+        let caps = ClaudeHarness::new().manifest().capabilities;
         let offered: Vec<&str> = caps.models.iter().map(|m| m.value.as_str()).collect();
         for alias in ["sonnet", "opus", "fable", "haiku"] {
             assert!(offered.contains(&alias), "`--model {alias}` is documented, got {offered:?}");

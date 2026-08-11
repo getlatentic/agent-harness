@@ -28,7 +28,7 @@ fn main() -> Result<(), Error> {
     let readiness = model.readiness();
     if !readiness.ready {
         eprintln!("Ollama is not reachable: {}", readiness.error.unwrap_or_default());
-        if let Some(hint) = model.info().install_hint {
+        if let Some(hint) = model.manifest().install_hint {
             eprintln!("Get it from {}", hint.url);
         }
         return Ok(());

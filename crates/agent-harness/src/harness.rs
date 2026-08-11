@@ -525,7 +525,7 @@ pub struct Manifest {
 /// fresh boxes on demand.
 pub trait Harness: Send + Sync {
     /// Static metadata for the UI.
-    fn info(&self) -> Manifest;
+    fn manifest(&self) -> Manifest;
 
     /// Probe availability / version / auth. May shell out; callers
     /// should treat it as blocking and run it off the UI thread.
@@ -540,7 +540,7 @@ pub trait Harness: Send + Sync {
 
     /// Enumerate the models this harness can run, *live*. The default returns
     /// the static list declared in [`Manifest`]
-    /// (`info().capabilities.models`), so existing adapters need no change.
+    /// (`manifest().capabilities.models`), so existing adapters need no change.
     ///
     /// Override it when the model set is discovered at runtime rather than
     /// known at compile time — a hosted-API adapter querying the provider's
@@ -550,7 +550,7 @@ pub trait Harness: Send + Sync {
     /// the *absence* of models, not a separate flag. May shell out / hit the
     /// network; treat it as blocking and run it off the UI thread.
     fn list_models(&self) -> Result<Vec<ModelChoice>, Error> {
-        Ok(self.info().capabilities.models)
+        Ok(self.manifest().capabilities.models)
     }
 
     /// Whether this harness can install/list/delete its own models locally, and
@@ -802,7 +802,7 @@ mod tests {
     struct MinimalHarness;
 
     impl Harness for MinimalHarness {
-        fn info(&self) -> Manifest {
+        fn manifest(&self) -> Manifest {
             Manifest {
                 id: "minimal".to_owned(),
                 display_name: "Minimal".to_owned(),
@@ -844,7 +844,7 @@ mod tests {
         // The picker asks every harness for models; the default answers from
         // the capabilities it already declared rather than making each adapter
         // write the same one-liner.
-        assert_eq!(harness.list_models().unwrap(), harness.info().capabilities.models);
+        assert_eq!(harness.list_models().unwrap(), harness.manifest().capabilities.models);
         assert!(harness.model_management().is_none(), "no model management is the default");
         assert!(NoopControl.pid().is_none(), "a harness with no process reports no pid");
     }
@@ -965,7 +965,7 @@ mod tests {
         events: Vec<RunEvent>,
     }
     impl Harness for MockHarness {
-        fn info(&self) -> Manifest {
+        fn manifest(&self) -> Manifest {
             unreachable!("not exercised by run")
         }
         fn readiness(&self) -> Readiness {
