@@ -682,7 +682,7 @@ pub trait Harness: Send + Sync {
 
 /// Run a harness's interactive sign-in command, streaming its output as
 /// [`InstallEvent`]s and blocking until it exits. Reuses
-/// [`ResolveCli`](crate::ResolveCli) (CLI resolution + reader threads, so a packaged
+/// [`ResolveCli`] (CLI resolution + reader threads, so a packaged
 /// `.app` finds the CLI), mapping its process events onto the
 /// install-stream shape (Step / Stdout / Stderr / Done). The login CLI
 /// opens the user's browser for OAuth; we surface its output (incl. any
