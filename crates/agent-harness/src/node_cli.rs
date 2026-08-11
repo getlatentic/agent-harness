@@ -402,6 +402,73 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn only_a_runnable_file_counts_as_the_program() {
+        // This is the filter that decides whether a name found on PATH is a CLI
+        // we can run. Saying yes to a directory or an unexecutable file picks it
+        // over the real binary further down PATH.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("hl-exec-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let runnable = dir.join("runnable");
+        std::fs::write(&runnable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&runnable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(is_executable_file(&runnable));
+
+        let plain = dir.join("plain.txt");
+        std::fs::write(&plain, "not a program").unwrap();
+        assert!(!is_executable_file(&plain), "a readable file is not a runnable one");
+        assert!(!is_executable_file(&dir), "a directory is not a program");
+        assert!(!is_executable_file(&dir.join("absent")), "and neither is nothing");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bare_name_is_resolved_to_the_binary_it_will_actually_run() {
+        // The point of resolving before spawning: the absolute path is what
+        // pairs a CLI with the `node` beside it. Left as a bare name, the child
+        // resolves it against whatever PATH it ends up with instead.
+        let resolved = resolve_program(PathBuf::from("sh"));
+        assert!(resolved.is_absolute(), "a name on PATH resolves to its real location: {resolved:?}");
+        assert!(resolved.ends_with("sh"), "and to the right binary: {resolved:?}");
+
+        let unknown = PathBuf::from("definitely-not-a-real-binary-xyz");
+        assert_eq!(
+            resolve_program(unknown.clone()),
+            unknown,
+            "an unresolvable name is left alone so the spawn reports the real error"
+        );
+    }
+
+    #[test]
+    fn the_augmented_path_extends_the_one_we_already_have() {
+        // Augmenting must add, never replace: a PATH the host deliberately set
+        // has to keep working, or a run that was fine becomes "not installed".
+        let existing = std::env::var("PATH").expect("a test process has a PATH");
+        let augmented = compute_augmented_node_path();
+        let first = existing.split(':').find(|e| e.starts_with('/')).expect("an absolute entry");
+        assert!(augmented.contains(first), "{first} must survive into {augmented}");
+    }
+
+    #[test]
+    fn the_fallback_looks_where_agent_clis_are_actually_installed() {
+        // Used when the login shell cannot be asked. Missing the home-relative
+        // directories is what leaves an nvm-installed CLI invisible.
+        let dirs = hardcoded_node_dirs();
+        assert!(dirs.contains("/usr/local/bin") && dirs.contains("/opt/homebrew/bin"));
+        if let Ok(home) = std::env::var("HOME") {
+            if !home.is_empty() {
+                assert!(
+                    dirs.contains(&format!("{home}/.local/bin")),
+                    "the official-installer location is where several agent CLIs land: {dirs}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn augmented_node_path_is_nonempty_and_resolves_system_bin() {
         // Exercises the cached public path once. `/usr/bin` is present whether
@@ -479,12 +546,15 @@ mod spawned {
             }
         })
         .expect("the fixture should spawn");
+        let mut finished = false;
         for _ in 0..200 {
             if done.load(std::sync::atomic::Ordering::SeqCst) {
+                finished = true;
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
+        assert!(finished, "the fixture never exited; its output would be whatever arrived in time");
         let out = lines.lock().unwrap().join("\n");
         out
     }

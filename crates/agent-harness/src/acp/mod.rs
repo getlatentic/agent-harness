@@ -228,19 +228,27 @@ impl Harness for AcpHarness {
                     mc.list_subcommand.join(" ")
                 ))
             })?;
-        // A non-zero exit (agent offline / unauthenticated) isn't fatal here —
-        // surface no list rather than failing the picker.
-        if !output.status.success() {
-            return Ok(Vec::new());
-        }
-        let models = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(|line| ModelChoice { value: line.to_owned(), label: line.to_owned() })
-            .collect();
-        Ok(models)
+        Ok(models_from_listing(output.status.success(), &String::from_utf8_lossy(&output.stdout)))
     }
+}
+
+/// The models a listing subcommand reported, one id per line.
+///
+/// A non-zero exit is deliberately not an error: an agent that is offline or
+/// signed out should leave the picker empty, not fail the harness that owns it.
+/// Separate from the spawn because both of those are decisions, and neither is
+/// reachable through a process.
+fn models_from_listing(succeeded: bool, stdout: &str) -> Vec<ModelChoice> {
+    if !succeeded {
+        return Vec::new();
+    }
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        // No prettier name is on offer, so the id is also the label.
+        .map(|line| ModelChoice { value: line.to_owned(), label: line.to_owned() })
+        .collect()
 }
 
 /// Whether `command` is runnable on the (augmented) PATH — `<command> --version`
@@ -432,6 +440,68 @@ fn is_allow(kind: &acp::schema::PermissionOptionKind) -> bool {
 mod tests {
     use super::*;
     use crate::Harness;
+
+    /// A throwaway CLI standing in for an ACP agent's own binary.
+    #[cfg(unix)]
+    fn fake_cli(tag: &str, script: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("hl-acp-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cli");
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_is_present_only_if_its_command_runs() {
+        // This is what the picker shows as installed-or-not, and the only
+        // evidence is whether the binary answers at all.
+        let present = fake_cli("present", "exit 0");
+        assert!(probe_command(present.to_str().unwrap()));
+
+        let broken = fake_cli("broken", "exit 1");
+        assert!(!probe_command(broken.to_str().unwrap()), "a command that fails is not usable");
+        assert!(!probe_command("definitely-not-a-real-command"), "and one that is absent is not there");
+    }
+
+    #[test]
+    fn an_agent_that_cannot_list_leaves_the_picker_empty_rather_than_failing() {
+        // Offline or signed out is not a broken harness. Failing here would take
+        // the whole picker down over a model list nobody asked for yet.
+        assert!(models_from_listing(false, "anthropic/claude\nopenai/gpt").is_empty());
+    }
+
+    #[test]
+    fn a_model_listing_is_one_id_per_line_with_the_blanks_dropped() {
+        let models = models_from_listing(true, "  anthropic/claude  \n\n openai/gpt \n   \n");
+        assert_eq!(models.len(), 2, "blank lines are not models: {models:?}");
+        assert_eq!(models[0].value, "anthropic/claude", "trimmed");
+        assert_eq!(models[0].label, models[0].value, "no prettier name is on offer, so the id is the label");
+        assert_eq!(models[1].value, "openai/gpt");
+        assert!(models_from_listing(true, "").is_empty());
+    }
+
+    #[test]
+    fn only_an_allow_option_counts_as_permission() {
+        // The agent offers a list and we pick one. Choosing a reject as though
+        // it were an allow would silently deny every tool call; the reverse
+        // would approve them without asking.
+        use acp::schema::PermissionOptionKind as Kind;
+        assert!(is_allow(&Kind::AllowOnce));
+        assert!(is_allow(&Kind::AllowAlways));
+        assert!(!is_allow(&Kind::RejectOnce));
+        assert!(!is_allow(&Kind::RejectAlways));
+    }
+
+    #[test]
+    fn cancelling_a_run_is_visible_to_whoever_asks_afterwards() {
+        let run = AcpRun { cancel: Arc::new(AtomicBool::new(false)) };
+        assert!(!run.was_cancelled());
+        run.cancel().expect("cancel");
+        assert!(run.was_cancelled(), "a stopped run says so");
+    }
 
     #[test]
     fn generic_acp_agent_lists_no_models_without_shelling_out() {
