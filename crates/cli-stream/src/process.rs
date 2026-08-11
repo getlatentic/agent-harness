@@ -77,6 +77,18 @@ pub enum Stdin {
     Piped,
 }
 
+/// What happens to the child's stderr.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Stderr {
+    /// Read it and deliver each line as [`Event::Stderr`].
+    #[default]
+    Streamed,
+    /// Send it to the null device. The OS discards it, so a chatty child
+    /// costs nothing and can never block on a full pipe — right for a server
+    /// whose stderr is its own logging.
+    Discarded,
+}
+
 /// What to spawn. Named fields rather than six positional arguments, so a call
 /// site says which string is the program and which is the run id, and a new
 /// knob is a field with a default instead of a break.
@@ -90,6 +102,7 @@ pub struct Command {
     /// The caller's correlation id, echoed on every [`Event`].
     pub run_id: String,
     pub stdin: Stdin,
+    pub stderr: Stderr,
 }
 
 impl Command {
@@ -106,6 +119,7 @@ impl Command {
             cwd: std::env::current_dir().unwrap_or_default(),
             run_id: String::new(),
             stdin: Stdin::Closed,
+            stderr: Stderr::Streamed,
         }
     }
 
@@ -154,6 +168,13 @@ impl Command {
     #[must_use]
     pub fn stdin(mut self, stdin: Stdin) -> Self {
         self.stdin = stdin;
+        self
+    }
+
+    /// Whether the child's stderr is streamed or thrown away.
+    #[must_use]
+    pub fn stderr(mut self, stderr: Stderr) -> Self {
+        self.stderr = stderr;
         self
     }
 
@@ -244,14 +265,21 @@ impl ProcessHandle {
     /// when it has exited and the pipe is gone — both of which a caller
     /// expecting an answer needs to hear about rather than block on.
     pub fn write_line(&self, line: &str) -> Result<(), StreamError> {
+        self.write(line.as_bytes())?;
+        self.write(b"\n")
+    }
+
+    /// Send raw bytes to the child's stdin, flushed.
+    ///
+    /// [`write_line`](Self::write_line) covers newline-delimited protocols,
+    /// which most CLIs and MCP's stdio transport use. This is for the ones that
+    /// frame differently — LSP counts bytes in a `Content-Length` header, and a
+    /// stray newline there is a protocol error.
+    pub fn write(&self, bytes: &[u8]) -> Result<(), StreamError> {
         let mut guard = self.inner.stdin.lock().map_err(|_| StreamError::CancelLockPoisoned)?;
         let stdin = guard.as_mut().ok_or(StreamError::PipeNotCaptured { stream: "stdin" })?;
         use std::io::Write;
-        stdin
-            .write_all(line.as_bytes())
-            .and_then(|()| stdin.write_all(b"\n"))
-            .and_then(|()| stdin.flush())
-            .map_err(|source| StreamError::Write { source })
+        stdin.write_all(bytes).and_then(|()| stdin.flush()).map_err(|source| StreamError::Write { source })
     }
 
     /// Whether `cancel()` was called. Tagged on the final `Exited` event.
@@ -305,7 +333,7 @@ pub(crate) fn spawn_streaming<F>(spawn: Command, callback: F) -> Result<ProcessH
 where
     F: FnMut(Event) + Send + Sync + Clone + 'static,
 {
-    let Command { program, args, env, cwd, run_id, stdin } = spawn;
+    let Command { program, args, env, cwd, run_id, stdin, stderr } = spawn;
     let mut command = hidden_command(&program);
     command
         .args(&args)
@@ -315,7 +343,10 @@ where
             Stdin::Piped => Stdio::piped(),
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(match stderr {
+            Stderr::Streamed => Stdio::piped(),
+            Stderr::Discarded => Stdio::null(),
+        });
     for (key, value) in &env {
         command.env(key, value);
     }
@@ -328,10 +359,9 @@ where
         .stdout
         .take()
         .ok_or(StreamError::PipeNotCaptured { stream: "stdout" })?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or(StreamError::PipeNotCaptured { stream: "stderr" })?;
+    // Absent by design when discarded — the OS is dropping it, so there is
+    // nothing to read and no thread to spend on reading it.
+    let stderr_pipe = child.stderr.take();
 
     // Taken now so `write_line` never contends with `cancel` for the child.
     let child_stdin = child.stdin.take();
@@ -359,10 +389,10 @@ where
         pump_lines(stdout, stdout_run_id, true, stdout_cb);
     });
 
-    let stderr_cb = callback.clone();
-    let stderr_run_id = run_id.clone();
-    let stderr_handle = thread::spawn(move || {
-        pump_lines(stderr, stderr_run_id, false, stderr_cb);
+    let stderr_handle = stderr_pipe.map(|pipe| {
+        let stderr_cb = callback.clone();
+        let stderr_run_id = run_id.clone();
+        thread::spawn(move || pump_lines(pipe, stderr_run_id, false, stderr_cb))
     });
 
     // Exit watcher — emits the terminal Exited event with the cancellation
@@ -393,7 +423,9 @@ where
             thread::sleep(Duration::from_millis(50));
         };
         let _ = stdout_handle.join();
-        let _ = stderr_handle.join();
+        if let Some(stderr_handle) = stderr_handle {
+            let _ = stderr_handle.join();
+        }
         let cancelled = exit_inner.cancelled.load(Ordering::SeqCst);
 
         match wait_result {
@@ -664,6 +696,27 @@ mod tests {
             "expected Exited(cancelled=true), got {:?}",
             events.last()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discarded_stderr_never_reaches_the_caller() {
+        // A server whose stderr is its own logging should cost nothing: the OS
+        // drops it, so there is no pipe to fill and no thread reading it.
+        let noisy = "echo out; echo noise 1>&2";
+        let (_h, events) = Command::new("sh")
+            .run_id("quiet")
+            .args(["-c", noisy])
+            .stderr(Stderr::Discarded)
+            .start()
+            .expect("spawn");
+        let seen: Vec<Event> = events.into_iter().collect();
+        assert!(seen.iter().any(|e| matches!(e, Event::Stdout { line, .. } if line == "out")));
+        assert!(!seen.iter().any(|e| matches!(e, Event::Stderr { .. })), "got {seen:?}");
+
+        // And streamed is still the default.
+        let (_h, events) = Command::new("sh").run_id("loud").args(["-c", noisy]).start().expect("spawn");
+        assert!(events.into_iter().any(|e| matches!(e, Event::Stderr { line, .. } if line == "noise")));
     }
 
     #[cfg(unix)]

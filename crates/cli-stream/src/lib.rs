@@ -59,4 +59,4 @@ pub mod process;
 
 pub use error::StreamError;
 pub use install::InstallEvent;
-pub use process::{hidden_command, Command, Event, ProcessHandle, Stdin};
+pub use process::{hidden_command, Command, Event, ProcessHandle, Stderr, Stdin};

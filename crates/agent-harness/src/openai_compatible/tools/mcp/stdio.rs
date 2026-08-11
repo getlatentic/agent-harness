@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use cli_stream::{Event, ProcessHandle, Command, Stdin};
+use cli_stream::{Command, Event, ProcessHandle, Stderr, Stdin};
 
 use super::client::McpConnection;
 
@@ -50,10 +50,12 @@ impl StdioConnection {
         let spawn = Command::new(command).cwd(cwd).run_id(format!("mcp-{server}"))
             .args(args.iter().map(String::as_str))
             .env(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-            .stdin(Stdin::Piped);
+            .stdin(Stdin::Piped)
+            .stderr(Stderr::Discarded);
         let handle = crate::node_cli::spawn_cli(spawn, move |event| {
-            // Only stdout carries protocol; a server's stderr is its logging,
-            // and a line that is not JSON is logging too.
+            // Only stdout carries protocol, and stderr is dropped by the OS,
+            // so the one thing left to filter is a non-JSON line — a server
+            // logging to stdout.
             if let Event::Stdout { line, .. } = event {
                 if let Ok(message) = serde_json::from_str::<Value>(line.trim()) {
                     let _ = tx.send(message);
