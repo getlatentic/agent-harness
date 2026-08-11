@@ -24,6 +24,7 @@ pub mod events;
 pub mod harness;
 pub mod raw;
 pub mod models_dev;
+mod node_cli;
 
 pub use events::{
     normalize_process_event, run_events_from_parsed, ByteRange, ParsedLine, PlanEntry,
@@ -43,8 +44,9 @@ pub use harness::{
 // through the framework (e.g. `use harness::spawn_streaming`). `StreamError`
 // is re-exported too so a consumer can `downcast_ref` a `Error`'s
 // source back to the typed spawn/cancel error.
+pub use node_cli::{augmented_node_path, probe_version, resolve_program, spawn_cli};
 pub use cli_stream::{
-    augmented_node_path, hidden_command, probe_version, spawn_streaming, InstallEvent, ProcessEvent,
+    hidden_command, spawn_streaming, InstallEvent, ProcessEvent,
     ProcessHandle, StreamError,
 };
 

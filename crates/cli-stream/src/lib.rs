@@ -22,8 +22,4 @@ pub mod process;
 
 pub use error::StreamError;
 pub use install::InstallEvent;
-pub use process::{
-    probe_version,
-    augmented_node_path, hidden_command, resolve_program, spawn_streaming, ProcessEvent,
-    ProcessHandle,
-};
+pub use process::{hidden_command, spawn_streaming, ProcessEvent, ProcessHandle};

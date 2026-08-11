@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::{
-    normalize_process_event, probe_version, spawn_streaming, CredentialSpec, Harness,
+    normalize_process_event, probe_version, spawn_cli, CredentialSpec, Harness,
     Features, Error, Info, ModelChoice, Readiness,
     InstallCallback, InstallHint, RunCallback, RunHandle, RunMode, RunRequest, RunTuning,
 };
@@ -179,7 +179,7 @@ impl Harness for ClaudeHarness {
         // augmentation inside `spawn_streaming` ensures `node` is
         // found for a Finder-launched .app.
         let program = tuning.binary_path.clone().unwrap_or_else(|| PathBuf::from(&self.command));
-        let handle = spawn_streaming(
+        let handle = spawn_cli(
             program,
             args,
             Vec::new(),

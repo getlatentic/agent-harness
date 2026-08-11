@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use crate::{
-    probe_version, spawn_streaming, CredentialSpec, Harness, Features, Error,
+    probe_version, spawn_cli, CredentialSpec, Harness, Features, Error,
     Info, ModelChoice, Readiness, InstallCallback, InstallHint, RunCallback,
     RunHandle, RunMode, RunRequest, RunTuning,
 };
@@ -168,7 +168,7 @@ impl Harness for CodexHarness {
         // shape as bob's.
         let parser = Arc::new(Mutex::new(CodexStreamParser::new()));
         let program = tuning.binary_path.clone().unwrap_or_else(|| PathBuf::from(&self.command));
-        let handle = spawn_streaming(
+        let handle = spawn_cli(
             program,
             args,
             Vec::new(),

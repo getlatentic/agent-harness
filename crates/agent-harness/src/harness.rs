@@ -26,7 +26,8 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::events::RunEvent;
-use cli_stream::{spawn_streaming, InstallEvent, ProcessEvent, ProcessHandle};
+use cli_stream::{InstallEvent, ProcessEvent, ProcessHandle};
+use crate::node_cli::spawn_cli;
 
 // --- Streaming callbacks --------------------------------------------
 
@@ -681,7 +682,7 @@ pub trait Harness: Send + Sync {
 
 /// Run a harness's interactive sign-in command, streaming its output as
 /// [`InstallEvent`]s and blocking until it exits. Reuses
-/// [`spawn_streaming`] (PATH augmentation + reader threads, so a packaged
+/// [`spawn_cli`] (CLI resolution + reader threads, so a packaged
 /// `.app` finds the CLI), mapping its process events onto the
 /// install-stream shape (Step / Stdout / Stderr / Done). The login CLI
 /// opens the user's browser for OAuth; we surface its output (incl. any
@@ -701,7 +702,7 @@ pub fn run_login_command(
     let events_cb = Arc::clone(&on_event);
     // Bound, not `_`, so the handle outlives the wait (dropping it could
     // signal the child); by the time we return, the process has exited.
-    let _handle = spawn_streaming(
+    let _handle = spawn_cli(
         PathBuf::from(program),
         args.iter().map(|s| (*s).to_owned()).collect(),
         Vec::new(),
@@ -1006,7 +1007,7 @@ mod tests {
         // `was_cancelled` is how a run the user stopped is told apart from one
         // that finished on its own. Forwarding either wrongly is invisible
         // until a stale agent is left running.
-        let child = spawn_streaming(
+        let child = spawn_cli(
             PathBuf::from("sleep"),
             vec!["30".to_owned()],
             Vec::new(),
