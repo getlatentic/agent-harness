@@ -432,7 +432,17 @@ pub struct ModelManagement {
 /// to it *declaratively* instead of branching on the harness id. A new
 /// adapter that, say, needs a stored key just sets `credential_required:
 /// true` here — no `id == "bob"` checks to hunt down.
-#[derive(Debug, Clone, Serialize)]
+///
+/// [`Default`] is "supports nothing", which is the honest starting point: an
+/// adapter names what it does support and leaves the rest, rather than
+/// restating eight fields and risking one being wrong by omission.
+///
+/// ```
+/// # use harness::HarnessCapabilities;
+/// let claude_like = HarnessCapabilities { supports_max_turns: true, ..Default::default() };
+/// assert!(!claude_like.supports_effort);
+/// ```
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessCapabilities {
     /// Compose stores this harness's credential (bob). When `false`,
@@ -784,6 +794,153 @@ mod tests {
         assert!(!api_key_value_usable(Some(String::new())));
         assert!(!api_key_value_usable(Some("   ".to_owned())));
         assert!(!api_key_value_usable(None));
+    }
+
+    /// An adapter that implements only the four required methods — the whole
+    /// point of the trait's provided ones. What it gets for free is a contract
+    /// third-party adapters depend on, so it is asserted rather than assumed.
+    struct MinimalHarness;
+
+    impl Harness for MinimalHarness {
+        fn info(&self) -> HarnessInfo {
+            HarnessInfo {
+                id: "minimal".to_owned(),
+                display_name: "Minimal".to_owned(),
+                description: "implements the required surface and nothing else".to_owned(),
+                install_hint: None,
+                capabilities: HarnessCapabilities {
+                    models: vec![HarnessModel { value: "m1".to_owned(), label: "Model one".to_owned() }],
+                    ..Default::default()
+                },
+            }
+        }
+        fn readiness(&self) -> HarnessReadiness {
+            HarnessReadiness {
+                harness_id: "minimal".to_owned(),
+                ready: true,
+                installed: true,
+                version: None,
+                auth_configured: true,
+                error: None,
+                details: serde_json::Value::Null,
+            }
+        }
+        fn start(&self, _request: RunRequest, _on_event: RunCallback) -> Result<RunHandle, HarnessError> {
+            Ok(Box::new(NoopControl))
+        }
+        fn credential(&self) -> CredentialSpec {
+            CredentialSpec {
+                label: "none".to_owned(),
+                keychain_service: "s".to_owned(),
+                keychain_account: "a".to_owned(),
+                required: false,
+            }
+        }
+    }
+
+    #[test]
+    fn an_adapter_that_implements_only_the_required_surface_still_answers_the_rest() {
+        let harness = MinimalHarness;
+        // The picker asks every harness for models; the default answers from
+        // the capabilities it already declared rather than making each adapter
+        // write the same one-liner.
+        assert_eq!(harness.list_models().unwrap(), harness.info().capabilities.models);
+        assert!(harness.model_management().is_none(), "no model management is the default");
+        assert!(NoopControl.pid().is_none(), "a harness with no process reports no pid");
+    }
+
+    #[test]
+    fn unsupported_optional_features_refuse_rather_than_pretend_to_succeed() {
+        // Returning Ok(vec![]) here would read as "you have no models
+        // installed" from a harness that cannot install any — the same
+        // absent-versus-unsupported confusion the session store had.
+        let harness = MinimalHarness;
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+
+        for message in [
+            harness.list_installed_models().map(|_| ()).unwrap_err().to_string(),
+            harness.pull_model("m", &cancel, &mut |_| {}).unwrap_err().to_string(),
+            harness.delete_model("m").unwrap_err().to_string(),
+        ] {
+            assert!(message.contains("does not support managing models"), "got {message}");
+        }
+        assert!(
+            harness.login(Arc::new(|_| {})).unwrap_err().to_string().contains("interactive sign-in"),
+            "and sign-in says which thing is unsupported"
+        );
+    }
+
+    #[test]
+    fn capabilities_default_to_supporting_nothing() {
+        // The safe direction: a new field defaults to off, so an adapter that
+        // has not heard of it does not silently claim it.
+        let none = HarnessCapabilities::default();
+        assert!(!none.credential_required && !none.previews_edits && !none.allows_custom_model);
+        assert!(!none.supports_effort && !none.supports_max_turns && !none.supports_login);
+        assert!(!none.supports_custom_instructions);
+        assert!(none.models.is_empty());
+    }
+
+    #[test]
+    fn reasoning_effort_keeps_the_tokens_a_cli_actually_accepts() {
+        // These are sent verbatim as `model_reasoning_effort=<value>`; a
+        // prettified variant name would be rejected by the CLI, not by us.
+        assert_eq!(ReasoningEffort::Minimal.as_cli_value(), "minimal");
+        assert_eq!(ReasoningEffort::Low.as_cli_value(), "low");
+        assert_eq!(ReasoningEffort::Medium.as_cli_value(), "medium");
+        assert_eq!(ReasoningEffort::High.as_cli_value(), "high");
+    }
+
+    #[test]
+    fn an_install_hint_always_has_a_url_and_optionally_a_command() {
+        // Not every agent has a one-liner that works on every platform, so the
+        // command is optional while the home page never is.
+        let bare = InstallHint::url("https://example.test/install");
+        assert_eq!(bare.url, "https://example.test/install");
+        assert!(bare.command.is_none());
+        assert_eq!(bare.with_command("brew install thing").command.as_deref(), Some("brew install thing"));
+    }
+
+    fn login_events(program: &str, args: &[&str]) -> (Result<(), HarnessError>, Vec<InstallEvent>) {
+        let seen: Arc<Mutex<Vec<InstallEvent>>> = Arc::default();
+        let sink = Arc::clone(&seen);
+        let result = run_login_command(program, args, Arc::new(move |event| sink.lock().unwrap().push(event)));
+        let events = seen.lock().unwrap().clone();
+        (result, events)
+    }
+
+    #[test]
+    fn a_sign_in_streams_the_cli_output_the_user_has_to_act_on() {
+        // The whole reason this streams rather than waiting: an OAuth flow
+        // prints a device code or a URL, and a user who never sees it cannot
+        // finish signing in.
+        let (result, events) = login_events("echo", &["visit https://example.test/device"]);
+        assert!(result.is_ok(), "{result:?}");
+
+        assert!(
+            matches!(events.first(), Some(InstallEvent::Step { .. })),
+            "something is said before the browser opens: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, InstallEvent::Stdout { text } if text.contains("example.test/device"))),
+            "the URL reaches the host: {events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(InstallEvent::Done { ok: true, exit_code: Some(0) })),
+            "and it ends exactly once, saying how: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_sign_in_says_so_rather_than_completing_quietly() {
+        // `false` exits non-zero without printing. Reporting ok here would
+        // leave a host believing the user is signed in.
+        let (result, events) = login_events("false", &[]);
+        assert!(result.is_ok(), "the command ran; it is its exit code that failed");
+        assert!(
+            matches!(events.last(), Some(InstallEvent::Done { ok: false, .. })),
+            "got {events:?}"
+        );
     }
 
     /// A no-op [`RunControl`] so the mock harness below can hand back a
