@@ -21,7 +21,7 @@
 use std::sync::{mpsc::sync_channel, Arc, Mutex};
 
 use harness::{
-    run_events_from_parsed, Spawn, CredentialSpec, Harness,
+    run_events_from_parsed, Command, CredentialSpec, Harness,
     Error, Info, Readiness, ParsedLine, Event,
     RunCallback, RunEvent, RunHandle, RunRequest, Registry, SessionInfo,
 };
@@ -82,7 +82,7 @@ impl Harness for EchoHarness {
         // (invoked from reader threads), so per-run state lives behind an
         // `Arc<Mutex>` — the same shape the built-in codex adapter uses.
         let parser = Arc::new(Mutex::new(EchoParser::default()));
-        let handle = Spawn::new("printf")
+        let handle = Command::new("printf")
             .cwd(cwd)
             .run_id(request.run_id)
             .args(args)

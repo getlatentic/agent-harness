@@ -98,9 +98,9 @@ fn default_chat_mode() -> BobChatMode { BobChatMode::Ask }
 fn default_approval_mode() -> BobApprovalMode { BobApprovalMode::Default }
 fn default_max_coins() -> u32 { 30 }
 
-// --- Spawn ----------------------------------------------------------
+// --- Command ----------------------------------------------------------
 
-/// Spawn bob and stream output through `callback` until the child exits.
+/// Command bob and stream output through `callback` until the child exits.
 /// Returns a [`ProcessHandle`] immediately — the reader + wait threads
 /// continue in the background.
 ///

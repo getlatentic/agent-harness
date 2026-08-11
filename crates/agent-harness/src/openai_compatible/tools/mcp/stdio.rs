@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use cli_stream::{Event, ProcessHandle, Spawn, Stdin};
+use cli_stream::{Event, ProcessHandle, Command, Stdin};
 
 use super::client::McpConnection;
 
@@ -37,7 +37,7 @@ pub(super) struct StdioConnection {
 }
 
 impl StdioConnection {
-    /// Spawn `command` and start reading it. Does not handshake — that's the
+    /// Command `command` and start reading it. Does not handshake — that's the
     /// [`McpClient`](super::client::McpClient)'s job.
     pub(super) fn spawn(
         server: &str,
@@ -47,7 +47,7 @@ impl StdioConnection {
         cwd: &Path,
     ) -> Result<StdioConnection, String> {
         let (tx, rx) = mpsc::channel();
-        let spawn = Spawn::new(command).cwd(cwd).run_id(format!("mcp-{server}"))
+        let spawn = Command::new(command).cwd(cwd).run_id(format!("mcp-{server}"))
             .args(args.iter().map(String::as_str))
             .env(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdin(Stdin::Piped);
@@ -72,7 +72,7 @@ impl StdioConnection {
 
     fn send(&self, message: &Value) -> Result<(), String> {
         let line = serde_json::to_string(message).map_err(|e| format!("{}: encoding: {e}", self.server))?;
-        self.handle.write_stdin_line(&line).map_err(|e| format!("{}: write failed: {e}", self.server))
+        self.handle.write_line(&line).map_err(|e| format!("{}: write failed: {e}", self.server))
     }
 }
 

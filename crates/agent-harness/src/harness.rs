@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::events::RunEvent;
 use cli_stream::{InstallEvent, Event, ProcessHandle};
 use crate::node_cli::spawn_cli;
-use cli_stream::Spawn;
+use cli_stream::Command;
 
 // --- Streaming callbacks --------------------------------------------
 
@@ -79,7 +79,7 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 ///
 /// // …while the real typed cause stays reachable for a consumer that wants
 /// // to branch on it rather than parse a string.
-/// let source = err.source().expect("Spawn carries a source");
+/// let source = err.source().expect("Command carries a source");
 /// assert!(source.downcast_ref::<StreamError>().is_some());
 /// ```
 ///
@@ -703,7 +703,7 @@ pub fn run_login_command(
     let events_cb = Arc::clone(&on_event);
     // Bound, not `_`, so the handle outlives the wait (dropping it could
     // signal the child); by the time we return, the process has exited.
-    let spawn = Spawn::new(program).cwd(std::env::current_dir().unwrap_or_default()).run_id(format!("login-{program}"))
+    let spawn = Command::new(program).cwd(std::env::current_dir().unwrap_or_default()).run_id(format!("login-{program}"))
         .args(args.iter().copied());
     let _handle = spawn_cli(
         spawn,
@@ -1007,7 +1007,7 @@ mod tests {
         // that finished on its own. Forwarding either wrongly is invisible
         // until a stale agent is left running.
         let child = spawn_cli(
-            Spawn::new("sleep").cwd(std::env::temp_dir()).run_id("pid-test").args(["30"]),
+            Command::new("sleep").cwd(std::env::temp_dir()).run_id("pid-test").args(["30"]),
             |_| {},
         )
         .expect("sleep should spawn");
@@ -1124,7 +1124,7 @@ mod tests {
     fn harness_error_preserves_typed_source_and_flattened_message() {
         use std::error::Error as _;
 
-        // Categorize a real typed engine error as a Spawn failure.
+        // Categorize a real typed engine error as a Command failure.
         let err = Error::spawn(cli_stream::StreamError::PipeNotCaptured { stream: "stdout" });
 
         // Display still flattens the source into the message, so a consumer

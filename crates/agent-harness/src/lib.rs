@@ -6,7 +6,7 @@
 //!     ([`RunRequest`] / [`RunTuning`] / [`Info`] / …),
 //!   * the normalized [`RunEvent`] vocabulary every adapter parses into
 //!     ([`normalize_process_event`] + [`ParsedLine`]),
-//!   * the generic streaming subprocess engine ([`Spawn`] +
+//!   * the generic streaming subprocess engine ([`Command`] +
 //!     [`Event`] + [`ProcessHandle`]) + the install/login event
 //!     shape ([`InstallEvent`]), and
 //!   * the shared interactive-login helper ([`run_login_command`]).
@@ -46,7 +46,7 @@ pub use harness::{
 // source back to the typed spawn/cancel error.
 pub use node_cli::{augmented_node_path, probe_version, resolve_program, spawn_cli};
 pub use cli_stream::{
-    hidden_command, InstallEvent, Event, Spawn,
+    hidden_command, InstallEvent, Event, Command,
     ProcessHandle, StreamError,
 };
 

@@ -16,7 +16,7 @@ use crate::error::StreamError;
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(unix)]
 use std::sync::{Arc, Mutex};
@@ -42,7 +42,7 @@ pub enum Event {
     Stdout { run_id: String, line: String },
     /// Raw stderr line. Warnings + the occasional error.
     Stderr { run_id: String, line: String },
-    /// Spawn / IO failure. Terminal — followed by `Exited`.
+    /// Command / IO failure. Terminal — followed by `Exited`.
     Error { run_id: String, message: String },
     /// Process exited. Always sent exactly once at the end.
     Exited {
@@ -69,7 +69,7 @@ pub struct ProcessHandle {
 /// Most CLIs get everything as arguments and want [`Closed`](Stdin::Closed): a
 /// child that inherits a terminal's stdin can block forever waiting for input
 /// nobody is typing. A child that *answers* — a JSON-RPC server over stdio —
-/// needs [`Piped`](Stdin::Piped) and [`ProcessHandle::write_stdin_line`].
+/// needs [`Piped`](Stdin::Piped) and [`ProcessHandle::write_line`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Stdin {
     #[default]
@@ -81,7 +81,7 @@ pub enum Stdin {
 /// site says which string is the program and which is the run id, and a new
 /// knob is a field with a default instead of a break.
 #[derive(Debug, Clone)]
-pub struct Spawn {
+pub struct Command {
     pub program: PathBuf,
     pub args: Vec<String>,
     /// Extra environment for the child, applied over the inherited one.
@@ -92,7 +92,7 @@ pub struct Spawn {
     pub stdin: Stdin,
 }
 
-impl Spawn {
+impl Command {
     /// A run of `program`, in the current directory, with stdin closed.
     ///
     /// The program is the only thing a spawn cannot default, so it is the only
@@ -216,7 +216,7 @@ impl ProcessHandle {
             // SAFETY: pid is the child's PID owned by this Child; sending
             // SIGTERM is well-defined.
             unsafe { libc::kill(pid, libc::SIGTERM) };
-            // Spawn the SIGKILL fallback inline to avoid holding the mutex
+            // Command the SIGKILL fallback inline to avoid holding the mutex
             // while sleeping.
             let inner = Arc::clone(&self.inner);
             thread::spawn(move || {
@@ -235,12 +235,15 @@ impl ProcessHandle {
         Ok(())
     }
 
-    /// Send one line to the child's **stdin**, newline-terminated and flushed.
+    /// Send one line to the child's stdin, newline-terminated and flushed.
+    ///
+    /// There is only one stream a caller can write to, so the name does not
+    /// repeat it — [`Stdin::Piped`] on the command is where that was said.
     ///
     /// `Err` when the child was spawned with [`Stdin::Closed`] (the default), or
     /// when it has exited and the pipe is gone — both of which a caller
     /// expecting an answer needs to hear about rather than block on.
-    pub fn write_stdin_line(&self, line: &str) -> Result<(), StreamError> {
+    pub fn write_line(&self, line: &str) -> Result<(), StreamError> {
         let mut guard = self.inner.stdin.lock().map_err(|_| StreamError::CancelLockPoisoned)?;
         let stdin = guard.as_mut().ok_or(StreamError::PipeNotCaptured { stream: "stdin" })?;
         use std::io::Write;
@@ -248,7 +251,7 @@ impl ProcessHandle {
             .write_all(line.as_bytes())
             .and_then(|()| stdin.write_all(b"\n"))
             .and_then(|()| stdin.flush())
-            .map_err(|source| StreamError::Spawn { program: "stdin".to_owned(), source })
+            .map_err(|source| StreamError::Command { program: "stdin".to_owned(), source })
     }
 
     /// Whether `cancel()` was called. Tagged on the final `Exited` event.
@@ -268,7 +271,7 @@ impl ProcessHandle {
     }
 }
 
-/// Spawn an arbitrary streaming child process — the generic engine behind
+/// Command an arbitrary streaming child process — the generic engine behind
 /// every process-backed harness (bob, Claude Code, Codex).
 ///
 /// Pipes stdout/stderr line-by-line through `callback` using the raw
@@ -284,10 +287,10 @@ impl ProcessHandle {
 /// events with the handle.
 ///
 /// ```no_run
-/// use cli_stream::{Event, Spawn};
+/// use cli_stream::{Command, Event};
 ///
 /// # fn main() -> Result<(), cli_stream::StreamError> {
-/// let handle = Spawn::new("echo").args(["hello"]).stream(|event| match event {
+/// let handle = Command::new("echo").args(["hello"]).stream(|event| match event {
 ///     Event::Stdout { line, .. } => println!("{line}"),
 ///     Event::Exited { exit_code, .. } => eprintln!("exit {exit_code:?}"),
 ///     _ => {}
@@ -298,11 +301,11 @@ impl ProcessHandle {
 /// # }
 /// ```
 ///
-pub(crate) fn spawn_streaming<F>(spawn: Spawn, callback: F) -> Result<ProcessHandle, StreamError>
+pub(crate) fn spawn_streaming<F>(spawn: Command, callback: F) -> Result<ProcessHandle, StreamError>
 where
     F: FnMut(Event) + Send + Sync + Clone + 'static,
 {
-    let Spawn { program, args, env, cwd, run_id, stdin } = spawn;
+    let Command { program, args, env, cwd, run_id, stdin } = spawn;
     let mut command = hidden_command(&program);
     command
         .args(&args)
@@ -316,7 +319,7 @@ where
     for (key, value) in &env {
         command.env(key, value);
     }
-    let mut child = command.spawn().map_err(|source| StreamError::Spawn {
+    let mut child = command.spawn().map_err(|source| StreamError::Command {
         program: program.display().to_string(),
         source,
     })?;
@@ -459,9 +462,9 @@ where
 /// probe. `CREATE_NO_WINDOW` suppresses it. Use this in place of
 /// `Command::new` for anything a desktop app spawns; it is a plain
 /// `Command::new` on every other platform, so call sites stay `cfg`-free.
-pub fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+pub fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     #[allow(unused_mut)]
-    let mut command = Command::new(program);
+    let mut command = std::process::Command::new(program);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -537,11 +540,11 @@ mod tests {
         }
     }
 
-    /// Spawn `program args`, block until it exits, return every event.
+    /// Command `program args`, block until it exits, return every event.
     fn run(program: &str, args: &[&str]) -> Vec<Event> {
         let (cb, events, done) = collector();
         let _handle = spawn_streaming(
-            Spawn::new(program).run_id("t").args(args.iter().copied()),
+            Command::new(program).run_id("t").args(args.iter().copied()),
             cb,
         )
         .expect("spawn");
@@ -593,7 +596,7 @@ mod tests {
         // directly (the other lifecycle tests pass an empty env).
         let (cb, events, done) = collector();
         let _handle = spawn_streaming(
-            Spawn::new("sh").run_id("t").args(vec![
+            Command::new("sh").run_id("t").args(vec![
                 "-c".to_owned(),
                 "printf '%s\\n' \"$CLI_STREAM_STUB\"".to_owned(),
             ]).env(vec![("CLI_STREAM_STUB".to_owned(), "from-env".to_owned())]),
@@ -634,7 +637,7 @@ mod tests {
         // far sooner than 10s. `exec` so the process *is* sleep (no orphan).
         let (cb, events, done) = collector();
         let handle = spawn_streaming(
-            Spawn::new("sh").run_id("t").args(["-c", "exec sleep 10"]),
+            Command::new("sh").run_id("t").args(["-c", "exec sleep 10"]),
             cb,
         )
         .expect("spawn");
@@ -672,7 +675,7 @@ mod tests {
         // forwarding, which is exactly the kind of code that silently returns
         // the wrong constant.
         let handle = spawn_streaming(
-            Spawn::new("/bin/sleep").cwd(std::env::temp_dir()).run_id("pid").args(["30"]),
+            Command::new("/bin/sleep").cwd(std::env::temp_dir()).run_id("pid").args(["30"]),
             |_| {},
         )
         .expect("sleep should spawn");
@@ -688,7 +691,7 @@ mod tests {
     #[test]
     fn spawning_a_missing_binary_is_err() {
         let result = spawn_streaming(
-            Spawn::new("cli-stream-no-such-binary-zzz").run_id("t"),
+            Command::new("cli-stream-no-such-binary-zzz").run_id("t"),
             |_ev: Event| {},
         );
         // Typed: a `Spawn` error carrying the OS `NotFound` io::Error as its
@@ -696,7 +699,7 @@ mod tests {
         // can branch on `ErrorKind` to tell "not installed" (NotFound) from
         // "permission denied", which a flattened string can't support.
         match result {
-            Err(StreamError::Spawn { program, source }) => {
+            Err(StreamError::Command { program, source }) => {
                 assert!(program.contains("cli-stream-no-such-binary-zzz"));
                 assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
             }

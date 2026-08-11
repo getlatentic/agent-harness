@@ -1,6 +1,6 @@
 //! Typed errors for the streaming engine.
 
-/// Why [`Spawn::stream`](crate::Spawn::stream) or
+/// Why [`Command::stream`](crate::Command::stream) or
 /// [`ProcessHandle::cancel`](crate::ProcessHandle::cancel) failed.
 ///
 /// Carries the real underlying [`std::io::Error`] as a source (via
@@ -15,7 +15,7 @@ pub enum StreamError {
     /// isn't executable, or the OS refused. `source` is the spawn `io::Error`
     /// (commonly `NotFound`).
     #[error("failed to spawn {program}: {source}")]
-    Spawn {
+    Command {
         /// The program that failed to launch (as passed to the engine).
         program: String,
         /// The OS error from `Command::spawn`.

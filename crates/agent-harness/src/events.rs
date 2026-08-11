@@ -267,7 +267,7 @@ pub enum RunEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         updated_at: Option<String>,
     },
-    /// Spawn / IO / parse failure. Terminal — followed by `Exited`.
+    /// Command / IO / parse failure. Terminal — followed by `Exited`.
     Error { run_id: String, message: String },
     /// The run finished. Sent exactly once. Like every `RunEvent` variant it is
     /// constructible out-of-tree: harnesses live in their own crates (the

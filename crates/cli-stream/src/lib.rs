@@ -6,11 +6,11 @@
 //! It knows no CLI's output format and no agent's protocol — it moves lines.
 //!
 //! ```no_run
-//! use cli_stream::{Event, Spawn};
+//! use cli_stream::{Command, Event};
 //!
 //! # fn main() -> Result<(), cli_stream::StreamError> {
 //! // stdout and stderr are always streamed.
-//! let (handle, events) = Spawn::new("some-cli").args(["--verbose"]).start()?;
+//! let (handle, events) = Command::new("some-cli").args(["--verbose"]).start()?;
 //! for event in events {
 //!     match event {
 //!         Event::Stdout { line, .. } => println!("out: {line}"),
@@ -28,14 +28,14 @@
 //! as it asks — the handle is yours for the whole run:
 //!
 //! ```no_run
-//! use cli_stream::{Event, Spawn, Stdin};
+//! use cli_stream::{Command, Event, Stdin};
 //!
 //! # fn main() -> Result<(), cli_stream::StreamError> {
-//! let (handle, events) = Spawn::new("some-cli").stdin(Stdin::Piped).start()?;
+//! let (handle, events) = Command::new("some-cli").stdin(Stdin::Piped).start()?;
 //! for event in events {
 //!     if let Event::Stdout { line, .. } = event {
 //!         if line.contains("Password:") {
-//!             handle.write_stdin_line("hunter2")?;
+//!             handle.write_line("hunter2")?;
 //!         }
 //!     }
 //! }
@@ -43,7 +43,7 @@
 //! # }
 //! ```
 //!
-//! [`Spawn::stream`] takes a callback instead, for a caller forwarding onto a
+//! [`Command::stream`] takes a callback instead, for a caller forwarding onto a
 //! sink rather than looping.
 //!
 //! [`InstallEvent`] is the sibling shape for streamed install/login output.
@@ -59,4 +59,4 @@ pub mod process;
 
 pub use error::StreamError;
 pub use install::InstallEvent;
-pub use process::{hidden_command, Event, ProcessHandle, Spawn, Stdin};
+pub use process::{hidden_command, Command, Event, ProcessHandle, Stdin};

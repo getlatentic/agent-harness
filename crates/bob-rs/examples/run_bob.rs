@@ -1,4 +1,4 @@
-//! Spawn bob with a prompt and stream its raw stdout.
+//! Command bob with a prompt and stream its raw stdout.
 //!
 //! `cargo run --example run_bob`
 //! (requires `bob` on PATH + a key: `BOBSHELL_API_KEY` in the env, or one

@@ -77,7 +77,7 @@ where
             source,
         })?;
 
-    // 3. Spawn under `bash -l` so nvm / brew / asdf init in the
+    // 3. Command under `bash -l` so nvm / brew / asdf init in the
     //    user profile is loaded. The script also `source`s
     //    `nvm.sh` defensively.
     let mut child = Command::new("bash")
