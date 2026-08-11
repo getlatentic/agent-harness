@@ -28,7 +28,7 @@ fn main() {
         })),
     ];
 
-    println!("{:<10} {:<10} {:<8} {:<24} {}", "AGENT", "INSTALLED", "SIGNED", "VERSION", "MODELS");
+    println!("{:<10} {:<10} {:<8} {:<24} MODELS", "AGENT", "INSTALLED", "SIGNED", "VERSION");
     for agent in &agents {
         let info = agent.info();
         let ready = agent.readiness();
