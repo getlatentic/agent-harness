@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use crate::{
-    probe_version, spawn_cli, Command, CredentialSpec, Harness, Features, Error,
+    probe_version, Command, ResolveCli, CredentialSpec, Harness, Features, Error,
     Info, ModelChoice, Readiness, InstallCallback, InstallHint, RunCallback,
     RunHandle, RunMode, RunRequest, RunTuning,
 };
@@ -168,9 +168,12 @@ impl Harness for CodexHarness {
         // shape as bob's.
         let parser = Arc::new(Mutex::new(CodexStreamParser::new()));
         let program = tuning.binary_path.clone().unwrap_or_else(|| PathBuf::from(&self.command));
-        let handle = spawn_cli(
-            Command::new(program).cwd(cwd).run_id(run_id).args(args),
-            move |event| {
+        let handle = Command::new(program)
+            .cwd(cwd)
+            .run_id(run_id)
+            .args(args)
+            .resolve_cli()
+            .stream(move |event| {
                 // Recover a poisoned lock rather than panic on a reader
                 // thread — parsing is total, so the parser is never
                 // mid-corruption.

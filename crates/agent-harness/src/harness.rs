@@ -26,9 +26,8 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::events::RunEvent;
-use cli_stream::{InstallEvent, Event, ProcessHandle};
-use crate::node_cli::spawn_cli;
-use cli_stream::Command;
+use cli_stream::{Command, Event, InstallEvent, ProcessHandle};
+use crate::node_cli::ResolveCli;
 
 // --- Streaming callbacks --------------------------------------------
 
@@ -683,7 +682,7 @@ pub trait Harness: Send + Sync {
 
 /// Run a harness's interactive sign-in command, streaming its output as
 /// [`InstallEvent`]s and blocking until it exits. Reuses
-/// [`spawn_cli`] (CLI resolution + reader threads, so a packaged
+/// [`ResolveCli`](crate::ResolveCli) (CLI resolution + reader threads, so a packaged
 /// `.app` finds the CLI), mapping its process events onto the
 /// install-stream shape (Step / Stdout / Stderr / Done). The login CLI
 /// opens the user's browser for OAuth; we surface its output (incl. any
@@ -705,9 +704,7 @@ pub fn run_login_command(
     // signal the child); by the time we return, the process has exited.
     let spawn = Command::new(program).cwd(std::env::current_dir().unwrap_or_default()).run_id(format!("login-{program}"))
         .args(args.iter().copied());
-    let _handle = spawn_cli(
-        spawn,
-        move |event| {
+    let _handle = spawn.resolve_cli().stream(move |event| {
             let finished = matches!(event, Event::Exited { .. });
             if let Some(install) = login_event(&event) {
                 (*events_cb)(install);
@@ -1006,10 +1003,12 @@ mod tests {
         // `was_cancelled` is how a run the user stopped is told apart from one
         // that finished on its own. Forwarding either wrongly is invisible
         // until a stale agent is left running.
-        let child = spawn_cli(
-            Command::new("sleep").cwd(std::env::temp_dir()).run_id("pid-test").args(["30"]),
-            |_| {},
-        )
+        let child = Command::new("sleep")
+            .cwd(std::env::temp_dir())
+            .run_id("pid-test")
+            .args(["30"])
+            .resolve_cli()
+            .stream(|_| {})
         .expect("sleep should spawn");
         let run: RunHandle = Box::new(child);
 

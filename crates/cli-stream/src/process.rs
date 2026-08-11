@@ -64,6 +64,14 @@ pub struct ProcessHandle {
     inner: Arc<HandleInner>,
 }
 
+/// How many events `start` buffers before the reader threads wait.
+///
+/// Unbounded would mean a chatty child and a slow consumer growing memory
+/// without limit. Bounded turns that into backpressure instead: enough that a
+/// consumer doing ordinary work never feels it, small enough that a runaway
+/// child cannot exhaust memory before anyone notices.
+const EVENT_BUFFER: usize = 1024;
+
 /// What the child's stdin is connected to.
 ///
 /// Most CLIs get everything as arguments and want [`Closed`](Stdin::Closed): a
@@ -103,6 +111,10 @@ pub struct Command {
     pub run_id: String,
     pub stdin: Stdin,
     pub stderr: Stderr,
+    /// Give up after this long. `None` (the default) waits indefinitely — the
+    /// right answer for an agent run a user is watching and can stop, and the
+    /// wrong one for anything unattended.
+    pub timeout: Option<Duration>,
 }
 
 impl Command {
@@ -120,6 +132,7 @@ impl Command {
             run_id: String::new(),
             stdin: Stdin::Closed,
             stderr: Stderr::Streamed,
+            timeout: None,
         }
     }
 
@@ -178,15 +191,27 @@ impl Command {
         self
     }
 
+    /// Stop the child if it is still running after `timeout`, the same way
+    /// [`ProcessHandle::cancel`] would — so it exits `cancelled: true` rather
+    /// than hanging a caller that has nobody to press stop.
+    #[must_use]
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
     /// Run it, reading events off a channel.
     ///
     /// The channel closes on its own when the run ends: the forwarding closure
     /// is the only owner of the `Sender`, and it drops with the reader threads.
     pub fn start(self) -> Result<(ProcessHandle, std::sync::mpsc::Receiver<Event>), StreamError> {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(EVENT_BUFFER);
         let handle = self.stream(move |event| {
-            // A hung-up receiver is not an error: the run continues, and the
-            // event nobody is waiting for is dropped.
+            // Blocking here is the point: a full buffer stalls the reader
+            // thread, which stops draining the child's pipe, which slows the
+            // child. Memory stays bounded and no line is lost. A hung-up
+            // receiver returns Err immediately rather than blocking, so a
+            // caller that stopped reading does not wedge the run.
             let _ = tx.send(event);
         })?;
         Ok((handle, rx))
@@ -333,7 +358,7 @@ pub(crate) fn spawn_streaming<F>(spawn: Command, callback: F) -> Result<ProcessH
 where
     F: FnMut(Event) + Send + Sync + Clone + 'static,
 {
-    let Command { program, args, env, cwd, run_id, stdin, stderr } = spawn;
+    let Command { program, args, env, cwd, run_id, stdin, stderr, timeout } = spawn;
     let mut command = hidden_command(&program);
     command
         .args(&args)
@@ -402,9 +427,11 @@ where
     // Instead poll `try_wait()`, locking only for each non-blocking check and
     // releasing between polls so `cancel()` can acquire the lock mid-run.
     let exit_inner = Arc::clone(&inner);
+    let timeout_handle = handle.clone();
     let mut exit_cb = callback;
     let exit_run_id = run_id;
     thread::spawn(move || {
+        let started = std::time::Instant::now();
         let wait_result = loop {
             {
                 let mut guard = match exit_inner.child.lock() {
@@ -420,6 +447,13 @@ where
                     None => return, // already reaped
                 }
             } // lock released before sleeping, so cancel() can acquire it
+            // A run nobody is watching still has to end. Cancelling rather than
+            // killing gives the child the same SIGTERM grace a user's stop
+            // would, and the exit reports `cancelled` so the caller can tell
+            // this apart from a child that finished on its own.
+            if timeout.is_some_and(|limit| started.elapsed() >= limit) {
+                let _ = timeout_handle.cancel();
+            }
             thread::sleep(Duration::from_millis(50));
         };
         let _ = stdout_handle.join();
@@ -744,6 +778,47 @@ mod tests {
         for ordinary in ["npm WARN deprecated foo@1.0.0", "compiling 12 files", "", "tty"] {
             assert!(!needs_terminal(ordinary), "false positive: {ordinary}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_timeout_stops_a_child_that_would_otherwise_run_forever() {
+        // Unattended runs have nobody to press stop. The child must end, and
+        // the exit has to say it was stopped rather than that it finished.
+        let started = Instant::now();
+        let (_handle, events) = Command::new("sleep")
+            .run_id("hung")
+            .args(["30"])
+            .timeout(Duration::from_millis(200))
+            .start()
+            .expect("spawn");
+
+        let exit = events
+            .into_iter()
+            .find_map(|e| match e {
+                Event::Exited { cancelled, .. } => Some(cancelled),
+                _ => None,
+            })
+            .expect("the run ends");
+        assert!(exit, "a timed-out run reports as cancelled, not as a clean finish");
+        assert!(started.elapsed() < Duration::from_secs(10), "and does not wait out the sleep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_run_inside_its_timeout_is_untouched() {
+        let (_handle, events) = Command::new("echo")
+            .run_id("quick")
+            .args(["done"])
+            .timeout(Duration::from_secs(30))
+            .start()
+            .expect("spawn");
+        let seen: Vec<Event> = events.into_iter().collect();
+        assert!(seen.iter().any(|e| matches!(e, Event::Stdout { line, .. } if line == "done")));
+        assert!(
+            seen.iter().any(|e| matches!(e, Event::Exited { cancelled: false, .. })),
+            "finished on its own: {seen:?}"
+        );
     }
 
     #[cfg(unix)]

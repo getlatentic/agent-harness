@@ -14,6 +14,17 @@
 //!
 //! Verifying any of this needs a real double-click: `open <app>` leaks the
 //! launching shell's PATH and passes when the packaged app would fail.
+//!
+//! # Platforms
+//!
+//! Resolution is portable — `PATH` is split with [`std::env::split_paths`] and
+//! Windows names are tried with each `PATHEXT` suffix. The **fallback list is
+//! not**: [`hardcoded_node_dirs`] names Homebrew, `~/.local/bin` and
+//! `~/.nvm/versions/node/*/bin`, which are macOS and Linux locations, and
+//! [`login_shell_path`] asks a POSIX login shell. On Windows both come back
+//! empty or unhelpful, so a CLI outside the inherited `PATH` will not be found
+//! — nvm-windows keeps its versions under `%APPDATA%\nvm`, which nothing here
+//! looks for yet.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -70,12 +81,43 @@ pub fn resolve_program(program: PathBuf) -> PathBuf {
 
 /// Walk `path_env`'s entries for the first executable file named `name`.
 /// Pure with respect to env/spawn (filesystem only) so it's unit-testable.
+/// The first runnable file called `name` on `path_env`.
+///
+/// Entries are split with [`std::env::split_paths`] rather than on `:`, because
+/// Windows separates with `;` — and on Windows a bare name is not the file
+/// name: `claude` is `claude.exe` or `claude.cmd`, so each `PATHEXT` suffix is
+/// tried in turn.
 fn resolve_on_path(name: &Path, path_env: &str) -> Option<PathBuf> {
-    path_env
-        .split(':')
-        .filter(|dir| !dir.is_empty())
-        .map(|dir| Path::new(dir).join(name))
+    std::env::split_paths(path_env)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .flat_map(|dir| {
+            let base = dir.join(name);
+            let mut candidates = vec![base.clone()];
+            for extension in executable_extensions() {
+                let mut with_extension = base.clone().into_os_string();
+                with_extension.push(extension);
+                candidates.push(PathBuf::from(with_extension));
+            }
+            candidates
+        })
         .find(|candidate| is_executable_file(candidate))
+}
+
+/// Suffixes to try after the bare name. Empty on unix, where a program's name
+/// is its file name.
+#[cfg(unix)]
+fn executable_extensions() -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(not(unix))]
+fn executable_extensions() -> Vec<String> {
+    std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".to_owned())
+        .split(';')
+        .filter(|e| !e.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 #[cfg(unix)]
@@ -269,25 +311,43 @@ fn hardcoded_node_dirs() -> String {
 }
 
 
-/// Command an agent CLI and stream it: resolve a bare name to its absolute path,
-/// put that program's own directory at the front of `PATH`, then hand off to
-/// [`cli_stream::Command::stream`].
+/// Resolving an agent's CLI before running it.
 ///
-/// Every adapter driving a CLI goes through here rather than calling
-/// `spawn_streaming` directly. The engine takes the environment it is given —
-/// spawning is its job, knowing where a user's nvm lives is not — so this is
-/// the one place that knowledge is applied, and the one place to look when a
-/// packaged app cannot find a CLI a terminal finds fine.
+/// An extension on [`cli_stream::Command`], so resolution reads as a step in
+/// the same builder rather than a function wrapping it:
 ///
-/// A `PATH` the caller supplies still wins: it is applied after this one.
-pub fn spawn_cli<F>(spawn: cli_stream::Command, callback: F) -> Result<cli_stream::ProcessHandle, cli_stream::StreamError>
-where
-    F: FnMut(cli_stream::Event) + Send + Sync + Clone + 'static,
-{
-    let program = resolve_program(spawn.program);
-    let mut env = vec![("PATH".to_owned(), augment_path_for_node(&program))];
-    env.extend(spawn.env);
-    cli_stream::Command { program, env, ..spawn }.stream(callback)
+/// ```no_run
+/// use cli_stream::Command;
+/// use harness::ResolveCli;
+///
+/// # fn main() -> Result<(), cli_stream::StreamError> {
+/// let handle = Command::new("claude").args(["-p", "hi"]).resolve_cli().stream(|_| {})?;
+/// # let _ = handle;
+/// # Ok(())
+/// # }
+/// ```
+pub trait ResolveCli {
+    /// Resolve a bare program name to its absolute path, and put that program's
+    /// own directory at the front of `PATH`.
+    ///
+    /// Every adapter driving a CLI goes through here. The engine takes the
+    /// environment it is given — spawning is its job, knowing where a user's
+    /// nvm lives is not — so this is the one place that knowledge is applied,
+    /// and the first place to look when a packaged app cannot find a CLI that a
+    /// terminal finds fine.
+    ///
+    /// A `PATH` the caller set still wins: it is applied after this one.
+    #[must_use]
+    fn resolve_cli(self) -> Self;
+}
+
+impl ResolveCli for cli_stream::Command {
+    fn resolve_cli(self) -> Self {
+        let program = resolve_program(self.program);
+        let mut env = vec![("PATH".to_owned(), augment_path_for_node(&program))];
+        env.extend(self.env);
+        cli_stream::Command { program, env, ..self }
+    }
 }
 
 #[cfg(test)]
@@ -532,7 +592,7 @@ mod spawned {
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = Arc::clone(&done);
         let spawn = cli_stream::Command::new(program).cwd(std::env::temp_dir()).run_id("t").env(env);
-        let _handle = spawn_cli(spawn, move |event| {
+        let _handle = spawn.resolve_cli().stream(move |event| {
             match event {
                 cli_stream::Event::Stdout { line, .. } => sink.lock().unwrap().push(line),
                 cli_stream::Event::Exited { .. } => flag.store(true, std::sync::atomic::Ordering::SeqCst),

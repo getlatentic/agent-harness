@@ -44,7 +44,7 @@ pub use harness::{
 // through the framework (e.g. `use harness::spawn_streaming`). `StreamError`
 // is re-exported too so a consumer can `downcast_ref` a `Error`'s
 // source back to the typed spawn/cancel error.
-pub use node_cli::{augmented_node_path, probe_version, resolve_program, spawn_cli};
+pub use node_cli::{augmented_node_path, probe_version, resolve_program, ResolveCli};
 pub use cli_stream::{
     hidden_command, InstallEvent, Event, Command,
     ProcessHandle, StreamError,

@@ -18,6 +18,8 @@ use serde_json::{json, Value};
 
 use cli_stream::{Command, Event, ProcessHandle, Stderr, Stdin};
 
+use crate::node_cli::ResolveCli;
+
 use super::client::McpConnection;
 
 /// How long to wait for one request's response before giving up — a hung server
@@ -37,7 +39,7 @@ pub(super) struct StdioConnection {
 }
 
 impl StdioConnection {
-    /// Command `command` and start reading it. Does not handshake — that's the
+    /// Launch `command` and start reading it. Does not handshake — that's the
     /// [`McpClient`](super::client::McpClient)'s job.
     pub(super) fn spawn(
         server: &str,
@@ -52,7 +54,7 @@ impl StdioConnection {
             .env(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdin(Stdin::Piped)
             .stderr(Stderr::Discarded);
-        let handle = crate::node_cli::spawn_cli(spawn, move |event| {
+        let handle = spawn.resolve_cli().stream(move |event| {
             // Only stdout carries protocol, and stderr is dropped by the OS,
             // so the one thing left to filter is a non-JSON line — a server
             // logging to stdout.
