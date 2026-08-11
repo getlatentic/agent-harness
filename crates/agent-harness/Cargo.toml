@@ -82,6 +82,7 @@ schemars = { workspace = true, optional = true }
 # Dev-only: the `playground` example's tiny web server (never a lib dependency).
 [dev-dependencies]
 tiny_http = "0.12"
+proptest.workspace = true
 # The program/PATH resolver tests create throwaway executable files in a temp
 # dir to exercise the executable-bit filter.
 tempfile = "3"

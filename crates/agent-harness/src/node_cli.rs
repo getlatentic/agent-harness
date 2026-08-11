@@ -79,9 +79,8 @@ pub fn resolve_program(program: PathBuf) -> PathBuf {
     resolve_on_path(&program, &augmented_node_path()).unwrap_or(program)
 }
 
-/// Walk `path_env`'s entries for the first executable file named `name`.
-/// Pure with respect to env/spawn (filesystem only) so it's unit-testable.
-/// The first runnable file called `name` on `path_env`.
+/// The first runnable file called `name` on `path_env`. Pure with respect to
+/// env and spawn (filesystem only), so it is unit-testable.
 ///
 /// Entries are split with [`std::env::split_paths`] rather than on `:`, because
 /// Windows separates with `;` — and on Windows a bare name is not the file
@@ -136,15 +135,28 @@ fn is_executable_file(path: &Path) -> bool {
 /// Prepend the directory containing `program` (where `node` also lives in an
 /// nvm install) to `base_path`, so the resolved binary's own dir is searched
 /// first. Pure (no env / no spawn) so it's unit-tested directly.
+/// `base_path` with the program's own directory in front, so the `node` it was
+/// installed beside is the one its shebang finds.
+///
+/// Only an **absolute** directory is prepended. This runs after
+/// [`keep_absolute_entries`] and lands at the front, so a relative one would
+/// outrank every filtered entry and reopen exactly the hole that filter
+/// closes: we spawn with `current_dir` set to the user's workspace, which the
+/// agent itself can write to, so `node_modules/.bin/claude` would put a
+/// workspace-relative directory first on PATH.
+///
+/// Joined with [`std::env::join_paths`] rather than `:` — Windows separates
+/// with `;`, where a hardcoded colon builds a PATH the OS reads as one
+/// nonexistent directory. A directory that cannot be expressed in a PATH at
+/// all (it contains the separator) yields `base_path` unchanged: without the
+/// prepend we lose the node pairing, but a corrupt PATH loses everything.
 fn prepend_program_dir(program: &Path, base_path: &str) -> String {
-    match program
-        .parent()
-        .map(|p| p.display().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        Some(dir) => format!("{dir}:{base_path}"),
-        None => base_path.to_owned(),
-    }
+    let Some(dir) = program.parent().filter(|dir| dir.is_absolute()) else {
+        return base_path.to_owned();
+    };
+    let entries = std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(base_path));
+    std::env::join_paths(entries)
+        .map_or_else(|_| base_path.to_owned(), |joined| joined.to_string_lossy().into_owned())
 }
 
 /// A PATH that resolves Node-based CLIs (bob, claude, codex) even from a
@@ -353,6 +365,84 @@ impl ResolveCli for cli_stream::Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    /// PATH-ish entries: absolute dirs, plus every shape the filter exists to
+    /// reject — relative, bare, dot, and empty.
+    fn path_entry() -> impl Strategy<Value = String> {
+        prop_oneof![
+            4 => "/(usr|opt|home)(/[a-z]{1,6}){0,3}",
+            1 => "[a-z]{1,6}(/[a-z]{1,6}){0,2}",
+            1 => Just(".".to_owned()),
+            1 => Just(String::new()),
+        ]
+    }
+
+    fn path_string() -> impl Strategy<Value = String> {
+        prop::collection::vec(path_entry(), 0..8).prop_map(|entries| entries.join(":"))
+    }
+
+    fn entries(path: &str) -> Vec<&str> {
+        path.split(':').collect()
+    }
+
+    proptest! {
+        /// The security invariant, stated once for every input rather than for
+        /// three examples: nothing that could resolve against the spawn cwd —
+        /// the user's workspace, where the agent itself writes files — survives.
+        #[test]
+        fn no_entry_that_resolves_against_the_cwd_survives(path in path_string()) {
+            let kept = keep_absolute_entries(&path);
+            if kept.is_empty() {
+                return Ok(());
+            }
+            for entry in entries(&kept) {
+                prop_assert!(entry.starts_with('/'), "{entry:?} is not absolute");
+            }
+        }
+
+        /// And it only ever removes: no entry is invented or rewritten.
+        #[test]
+        fn filtering_never_invents_an_entry(path in path_string()) {
+            let kept = keep_absolute_entries(&path);
+            if kept.is_empty() {
+                return Ok(());
+            }
+            let original = entries(&path);
+            for entry in entries(&kept) {
+                prop_assert!(original.contains(&entry), "{entry:?} was not in the input");
+            }
+        }
+
+        /// Prepending the program's own directory must not undo the filter.
+        /// It runs *after* `keep_absolute_entries` and lands at the front, so a
+        /// relative directory here outranks every real one.
+        #[test]
+        fn prepending_cannot_reintroduce_a_cwd_relative_entry(
+            program in "([a-z]{1,6}/){0,3}[a-z]{1,6}",
+            base in path_string(),
+        ) {
+            let base = keep_absolute_entries(&base);
+            let combined = prepend_program_dir(Path::new(&program), &base);
+            if combined.is_empty() {
+                return Ok(());
+            }
+            for entry in entries(&combined) {
+                prop_assert!(entry.starts_with('/'), "{entry:?} is not absolute");
+            }
+        }
+
+        /// Prepending is additive: every directory already on the path is still
+        /// on it. Losing one silently makes a CLI "not installed".
+        #[test]
+        fn prepending_keeps_every_directory_it_was_given(base in path_string()) {
+            let base = keep_absolute_entries(&base);
+            let combined = prepend_program_dir(Path::new("/opt/tool/bin/claude"), &base);
+            for entry in entries(&base).into_iter().filter(|entry| !entry.is_empty()) {
+                prop_assert!(entries(&combined).contains(&entry), "lost {entry:?}");
+            }
+        }
+    }
 
     /// A throwaway CLI that answers however the test needs.
     #[cfg(unix)]

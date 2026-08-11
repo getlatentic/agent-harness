@@ -67,6 +67,7 @@ dependencies = [
  "globset",
  "htmd",
  "ignore",
+ "proptest",
  "regex",
  "schemars 1.2.1",
  "serde",
