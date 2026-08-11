@@ -879,10 +879,25 @@ mod tests {
         let (handle, events) =
             Command::new("cat").run_id("echoing").stdin(Stdin::Piped).start().expect("spawn");
         handle.write_line("hello").expect("a live child takes input");
-        assert!(
-            events.iter().any(|e| matches!(e, Event::Stdout { line, .. } if line == "hello")),
-            "and reads it back"
-        );
+
+        // Waited for with a deadline, not `events.iter()`. `cat` holds the
+        // channel open for as long as it lives, so iterating blocks once the
+        // queue drains — a version of this test that scanned for the line only
+        // ever terminated *because* it was there, and hung on the failure it
+        // exists to report.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let echoed = loop {
+            let left = deadline
+                .checked_duration_since(Instant::now())
+                .expect("the child never echoed the line back");
+            match events.recv_timeout(left) {
+                Ok(Event::Stdout { line, .. }) => break line,
+                Ok(_) => continue,
+                Err(err) => panic!("nothing came back: {err}"),
+            }
+        };
+        assert_eq!(echoed, "hello", "and reads it back");
+        let _ = handle.cancel();
     }
 
     #[cfg(unix)]
