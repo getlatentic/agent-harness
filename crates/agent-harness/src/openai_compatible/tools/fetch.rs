@@ -86,12 +86,25 @@ fn timeout_secs(requested: Option<u64>) -> u64 {
 }
 
 fn fetch(url: &str, format: &str, timeout: Option<u64>) -> ToolOutcome {
-    let url = match resolve_url(url) {
-        Ok(url) => url,
-        Err(message) => return ToolOutcome::err(message),
-    };
+    match resolve_url(url) {
+        Ok(url) => transfer(&url, format, timeout),
+        Err(message) => ToolOutcome::err(message),
+    }
+}
+
+/// Fetch, cap, and render a URL that has **already passed [`resolve_url`]`.
+///
+/// Split from [`fetch`] because which URLs are allowed is a policy question
+/// and moving the bytes is a mechanism, and composing them left the mechanism
+/// — including the response-size cap, which is a real guard — unreachable from
+/// any test: `resolve_url` upgrades `http` to `https`, so a local stand-in
+/// server could never be the thing fetched.
+///
+/// Private, and it is the caller's job to have resolved first: this does not
+/// re-check the scheme.
+fn transfer(url: &str, format: &str, timeout: Option<u64>) -> ToolOutcome {
     let secs = timeout_secs(timeout);
-    let resp = match ureq::get(&url).timeout(Duration::from_secs(secs)).call() {
+    let resp = match ureq::get(url).timeout(Duration::from_secs(secs)).call() {
         Ok(r) => r,
         Err(e) => return ToolOutcome::err(format!("webfetch: request to {url} failed: {e}")),
     };
@@ -197,6 +210,136 @@ fn strip_span(s: &str, open: &str, close: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server answering once with the given status, headers and body.
+    fn serving(body: Vec<u8>, content_type: &str, declared_len: Option<u64>) -> String {
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port");
+        let url = format!("http://{}", server.server_addr());
+        let content_type = content_type.to_owned();
+        std::thread::spawn(move || {
+            while let Ok(request) = server.recv() {
+                let mut response = tiny_http::Response::from_data(body.clone()).with_header(
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], content_type.as_bytes())
+                        .expect("header"),
+                );
+                if let Some(len) = declared_len {
+                    response = response.with_header(
+                        tiny_http::Header::from_bytes(
+                            &b"Content-Length"[..],
+                            len.to_string().as_bytes(),
+                        )
+                        .expect("header"),
+                    );
+                }
+                let _ = request.respond(response);
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn an_oversized_body_is_refused_even_when_the_server_never_said_how_big_it_was() {
+        // The cheap check reads Content-Length, and a server is free to omit it
+        // or lie. If that were the only check, the cap would hold exactly when
+        // it was not needed — so the read is capped at the limit plus one byte
+        // and the overflow is caught after the fact.
+        let body = vec![b'a'; (MAX_RESPONSE_BYTES + 1) as usize];
+        let url = serving(body, "text/plain", None);
+
+        let outcome = transfer(&url, "text", None);
+        assert!(!outcome.ok);
+        assert!(outcome.output.contains("too large"), "got {:?}", outcome.output);
+    }
+
+    /// A raw listener, because the point of the next test is a response whose
+    /// declared length does not match its body — and a real HTTP server
+    /// helpfully corrects that for you.
+    fn serving_raw(response: &'static str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                use std::io::{BufRead, BufReader, Write};
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                // Drain the request head so the client is not writing into a
+                // closed socket before it reads.
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    if line.ends_with("\r\n\r\n") || line == "\r\n" {
+                        break;
+                    }
+                    line.clear();
+                }
+                let mut stream = &stream;
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn a_declared_oversize_is_refused_on_the_header_alone() {
+        // The early exit: a `Content-Length` over the cap is refused before the
+        // body is pulled, so we never move 5MB we are about to discard. The
+        // body here is four bytes, so only the header can be what refused it.
+        let url = serving_raw(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: text/plain\r\n\
+             Content-Length: 6000000\r\n\
+             \r\n\
+             tiny",
+        );
+        let outcome = transfer(&url, "text", Some(5));
+        assert!(!outcome.ok, "got {:?}", outcome.output);
+        assert!(outcome.output.contains("too large"), "got {:?}", outcome.output);
+    }
+
+    #[test]
+    fn a_body_at_the_limit_is_still_delivered() {
+        // The boundary the two checks share — off by one here rejects a page
+        // that is exactly allowed.
+        let body = vec![b'a'; MAX_RESPONSE_BYTES as usize];
+        let url = serving(body, "text/plain", None);
+        let outcome = transfer(&url, "text", None);
+        assert!(outcome.ok, "got {:?}", outcome.output);
+        assert_eq!(outcome.output.len(), MAX_RESPONSE_BYTES as usize);
+    }
+
+    #[test]
+    fn html_is_converted_whether_or_not_the_header_admits_it() {
+        // Plenty of servers send HTML as text/plain or with no type at all.
+        // Handing raw markup to the model wastes the context the conversion
+        // exists to save.
+        let markup = b"<html><body><h1>Title</h1><p>Words here.</p></body></html>".to_vec();
+
+        let declared = serving(markup.clone(), "text/html; charset=utf-8", None);
+        let outcome = transfer(&declared, "markdown", None);
+        assert!(outcome.ok);
+        assert!(outcome.output.contains("Title"), "got {:?}", outcome.output);
+        assert!(!outcome.output.contains("<h1>"), "markup should be gone: {:?}", outcome.output);
+
+        let lying = serving(markup, "text/plain", None);
+        let outcome = transfer(&lying, "markdown", None);
+        assert!(!outcome.output.contains("<h1>"), "sniffed, not trusted: {:?}", outcome.output);
+    }
+
+    #[test]
+    fn asking_for_html_returns_it_verbatim() {
+        // The escape hatch: a caller that wants the markup gets the markup.
+        let markup = b"<html><body><h1>Title</h1></body></html>".to_vec();
+        let url = serving(markup, "text/html", None);
+        let outcome = transfer(&url, "html", None);
+        assert!(outcome.output.contains("<h1>Title</h1>"), "got {:?}", outcome.output);
+    }
+
+    #[test]
+    fn an_unreachable_url_is_an_error_naming_it() {
+        // A dead endpoint must not read as a page with nothing on it.
+        let outcome = transfer("http://127.0.0.1:1/nothing-here", "text", Some(1));
+        assert!(!outcome.ok);
+        assert!(outcome.output.contains("127.0.0.1:1"), "got {:?}", outcome.output);
+    }
 
     #[test]
     fn only_the_web_is_fetchable_and_plain_http_is_upgraded() {
