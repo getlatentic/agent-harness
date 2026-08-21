@@ -179,6 +179,7 @@ fn percent_encode(s: &str) -> String {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+    use crate::RunMode;
 
     /// What the endpoint was asked: the `Authorization` header and the
     /// JSON-RPC body, per request in order.
@@ -291,6 +292,92 @@ mod tests {
         let (url, asked) = fake_endpoint(vec![listing(&["search"])]);
         let _ = search(&url, None, "q", 1);
         assert_eq!(asked.lock().unwrap()[0].0, None);
+    }
+
+    /// The provider keys are process-global, so these cannot run beside each
+    /// other or beside anything else reading them.
+    static PROVIDER_ENV: Mutex<()> = Mutex::new(());
+
+    fn with_keys<T>(exa: Option<&str>, parallel: Option<&str>, body: impl FnOnce() -> T) -> T {
+        let _guard = PROVIDER_ENV.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let restore: Vec<(&str, Option<std::ffi::OsString>)> = ["EXA_API_KEY", "PARALLEL_API_KEY"]
+            .iter()
+            .map(|name| (*name, std::env::var_os(name)))
+            .collect();
+
+        for (name, value) in [("EXA_API_KEY", exa), ("PARALLEL_API_KEY", parallel)] {
+            match value {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        }
+        let out = body();
+        for (name, value) in restore {
+            match value {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_tool_is_offered_only_when_a_provider_is_configured() {
+        // Both directions are failures a user sees. Offered with no key, the
+        // model spends a turn calling it and gets told it is unavailable;
+        // withheld with a key, the feature they configured silently does not
+        // exist.
+        with_keys(None, None, || {
+            assert!(!WebSearch.offered(RunMode::Edit, "any-model"), "no key, no tool");
+        });
+        with_keys(Some("k"), None, || {
+            assert!(WebSearch.offered(RunMode::Edit, "any-model"), "a configured key offers it");
+        });
+    }
+
+    #[test]
+    fn a_blank_key_is_not_a_configured_provider() {
+        // An exported-but-empty `EXA_API_KEY` is how a shell profile leaves a
+        // variable it never set. Treated as configured, every search builds a
+        // URL with no key and fails as "unauthorized" rather than as "you have
+        // not set this up".
+        with_keys(Some(""), None, || assert!(provider().is_none(), "empty is unset"));
+        with_keys(Some("   "), None, || assert!(provider().is_none(), "blank is unset"));
+        with_keys(Some(" k "), None, || {
+            let (url, _) = provider().expect("a real key configures it");
+            assert!(url.contains("exaApiKey=k"), "surrounding space is trimmed, got {url}");
+        });
+    }
+
+    #[test]
+    fn each_provider_carries_its_key_the_way_that_provider_wants() {
+        // Exa takes the key as a query parameter and Parallel as a bearer —
+        // sending either the other way authenticates against neither.
+        with_keys(Some("a&b"), None, || {
+            let (url, bearer) = provider().expect("exa");
+            assert!(url.starts_with("https://mcp.exa.ai/mcp?exaApiKey="));
+            assert!(url.contains("a%26b"), "the key is encoded into the URL: {url}");
+            assert_eq!(bearer, None, "exa takes no bearer");
+        });
+        with_keys(None, Some("p-key"), || {
+            let (url, bearer) = provider().expect("parallel");
+            assert_eq!(url, "https://search.parallel.ai/mcp", "the key is not in the URL");
+            assert_eq!(bearer.as_deref(), Some("p-key"));
+        });
+        // Both set: one has to win, and it must be the same one every time.
+        with_keys(Some("e"), Some("p"), || {
+            let (url, _) = provider().expect("either");
+            assert!(url.contains("exa.ai"), "exa is preferred, got {url}");
+        });
+    }
+
+    #[test]
+    fn searching_the_web_is_not_a_mutation() {
+        // `mutating` decides what a read-only run withholds. Reading the web is
+        // not writing to the machine, so marking it mutating would remove
+        // search from exactly the runs that most need to look something up.
+        assert!(!WebSearch.mutating());
+        assert_eq!(WebSearch.id(), "websearch", "the id is how a tool call routes");
     }
 
     #[test]
