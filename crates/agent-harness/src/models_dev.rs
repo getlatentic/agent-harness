@@ -129,20 +129,31 @@ mod imp {
     /// callers fall back without retrying every call.
     fn catalog() -> Option<&'static Catalog> {
         static CACHE: OnceLock<Option<Catalog>> = OnceLock::new();
-        CACHE
-            .get_or_init(|| {
-                if let Some(cached) = load_cached() {
-                    // The catalog changes slowly — refresh at most once a day.
-                    if cache_is_stale() {
-                        std::thread::spawn(refresh_cache);
-                    }
-                    return Some(cached);
-                }
-                let body = fetch_remote()?;
-                write_cache(&body);
-                serde_json::from_str(&body).ok()
-            })
-            .as_ref()
+        CACHE.get_or_init(|| load_or_fetch(fetch_remote)).as_ref()
+    }
+
+    /// Prefer the on-disk cache — instant, and works offline — refreshing it in
+    /// the background once it is a day old; on a cold run with no cache, fetch
+    /// once and persist.
+    ///
+    /// `fetch` is a parameter so this can be exercised without the network, and
+    /// without the process-wide `OnceLock` in [`catalog`] fixing the outcome
+    /// for every later test in the binary.
+    ///
+    /// A body is parsed before it is written: caching one we could not read
+    /// would spend the disk on something the next launch has to discard.
+    fn load_or_fetch(fetch: impl FnOnce() -> Option<String>) -> Option<Catalog> {
+        if let Some(cached) = load_cached() {
+            // The catalog changes slowly — refresh at most once a day.
+            if cache_is_stale() {
+                std::thread::spawn(refresh_cache);
+            }
+            return Some(cached);
+        }
+        let body = fetch()?;
+        let parsed = serde_json::from_str(&body).ok()?;
+        write_cache(&body);
+        Some(parsed)
     }
 
     /// Where the catalog is cached, when the host app names a cache dir via
@@ -291,6 +302,54 @@ mod imp {
             let openai = select(&catalog, "openai");
             assert_eq!(openai.len(), 1, "the readable sibling survives");
             assert_eq!(openai[0].value, "fine");
+        }
+
+        #[test]
+        fn a_cold_start_fetches_once_and_keeps_what_it_got() {
+            // The whole point of the disk cache: pay ~4 MB once, not per
+            // launch. If the fetched body were not persisted, every start would
+            // pay it again and nothing would fail.
+            with_cache_dir("cold", |dir| {
+                let catalog = load_or_fetch(|| Some(SAMPLE.to_owned()))
+                    .expect("a cold start uses what it fetched");
+                assert_eq!(select(&catalog, "anthropic").len(), 1);
+                assert!(dir.join("models_dev.json").is_file(), "and writes it down");
+            });
+        }
+
+        #[test]
+        fn a_warm_start_does_not_reach_the_network_at_all() {
+            // Reading the cache is what makes an offline launch work. A cold
+            // path that ran anyway would still *look* right — it returns a
+            // catalog either way — so the assertion has to be that the fetch
+            // was never called.
+            with_cache_dir("warm", |_| {
+                write_cache(SAMPLE);
+                let catalog = load_or_fetch(|| panic!("the disk cache must be preferred"))
+                    .expect("the cached catalog");
+                assert_eq!(select(&catalog, "anthropic").len(), 1);
+            });
+        }
+
+        #[test]
+        fn a_body_we_cannot_read_is_not_cached() {
+            // Writing first and parsing second would spend the disk on
+            // something the next launch has to discard, and turn one bad
+            // response into a file someone has to delete by hand.
+            with_cache_dir("garbage", |dir| {
+                assert!(load_or_fetch(|| Some("<html>not json</html>".to_owned())).is_none());
+                assert!(!dir.join("models_dev.json").exists(), "nothing was kept");
+            });
+        }
+
+        #[test]
+        fn an_unreachable_catalog_is_absent_rather_than_empty() {
+            // No cache and no network is "we do not know", which lets a caller
+            // fall back. An empty catalog would instead read as "this provider
+            // has no models" — a wrong answer rather than a missing one.
+            with_cache_dir("offline", |_| {
+                assert!(load_or_fetch(|| None).is_none());
+            });
         }
 
         #[test]
