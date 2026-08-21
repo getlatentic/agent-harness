@@ -71,8 +71,27 @@ mod imp {
 
     #[derive(Deserialize)]
     struct Provider {
-        #[serde(default)]
+        #[serde(default, deserialize_with = "models_skipping_unreadable")]
         models: HashMap<String, Model>,
+    }
+
+    /// Deserialize the model map one entry at a time, dropping any that does
+    /// not parse.
+    ///
+    /// This is a ~4 MB file published by someone else, and `serde` fails a
+    /// whole document on one bad field. Derived normally, a single model
+    /// missing its `id` would cost **every provider** its entire list — and
+    /// refetching returns the same bytes, so it stays broken until upstream
+    /// fixes it. One unreadable model should cost that model.
+    fn models_skipping_unreadable<'de, D>(de: D) -> Result<HashMap<String, Model>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = HashMap::<String, serde_json::Value>::deserialize(de)?;
+        Ok(raw
+            .into_iter()
+            .filter_map(|(key, value)| Some((key, serde_json::from_value(value).ok()?)))
+            .collect())
     }
 
     #[derive(Deserialize)]
@@ -227,6 +246,104 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// `AGENT_HARNESS_CACHE_DIR` is process-global, so these cannot run
+        /// beside each other.
+        static CACHE_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        fn with_cache_dir<T>(tag: &str, body: impl FnOnce(&Path) -> T) -> T {
+            let _guard = CACHE_ENV.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let restore = std::env::var_os("AGENT_HARNESS_CACHE_DIR");
+            let dir = std::env::temp_dir().join(format!("hl-cache-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::env::set_var("AGENT_HARNESS_CACHE_DIR", &dir);
+
+            let out = body(&dir);
+
+            match restore {
+                Some(value) => std::env::set_var("AGENT_HARNESS_CACHE_DIR", value),
+                None => std::env::remove_var("AGENT_HARNESS_CACHE_DIR"),
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+            out
+        }
+
+        const SAMPLE: &str = r#"{"anthropic":{"models":{"claude-x":{"id":"claude-x","name":"Claude X","tool_call":true,"limit":{"context":200000}}}}}"#;
+
+        #[test]
+        fn one_unreadable_model_costs_that_model_and_nothing_else() {
+            // models.dev is a ~4 MB file published by someone else, and serde
+            // fails a whole document on one bad field. Derived normally, a
+            // single model missing its `id` dropped every provider's list —
+            // and a refetch returns the same bytes, so "no models anywhere"
+            // persisted until upstream fixed it.
+            let mixed = r#"{
+                "anthropic":{"models":{"good":{"id":"good","tool_call":true}}},
+                "openai":{"models":{
+                    "bad":{"tool_call":true},
+                    "fine":{"id":"fine","tool_call":true}
+                }}
+            }"#;
+            let catalog: Catalog =
+                serde_json::from_str(mixed).expect("one bad model must not fail the document");
+
+            assert_eq!(select(&catalog, "anthropic").len(), 1, "an unrelated provider is untouched");
+            let openai = select(&catalog, "openai");
+            assert_eq!(openai.len(), 1, "the readable sibling survives");
+            assert_eq!(openai[0].value, "fine");
+        }
+
+        #[test]
+        fn what_is_written_to_the_cache_is_what_comes_back() {
+            // The catalog is ~4 MB over the network. A cache that writes but
+            // cannot read itself back is silent and costs that on every launch,
+            // so the round trip is the property, not either half alone.
+            with_cache_dir("roundtrip", |dir| {
+                assert!(load_cached().is_none(), "nothing cached yet");
+
+                write_cache(SAMPLE);
+                assert!(dir.join("models_dev.json").is_file(), "the parent dir is created");
+
+                let loaded = load_cached().expect("what was just written must load");
+                let models = select(&loaded, "anthropic");
+                assert_eq!(models.len(), 1);
+                assert_eq!(models[0].value, "claude-x");
+            });
+        }
+
+        #[test]
+        fn a_damaged_cache_is_ignored_rather_than_believed() {
+            // A half-written file (a crash mid-write, a full disk) must send us
+            // back to the network, not surface as an empty model list — an
+            // empty catalog reads to the caller as "this provider has no
+            // models", which is a wrong answer rather than a missing one.
+            with_cache_dir("damaged", |_| {
+                write_cache(&SAMPLE[..SAMPLE.len() / 2]);
+                assert!(load_cached().is_none(), "a truncated cache is not a catalog");
+
+                write_cache("");
+                assert!(load_cached().is_none(), "nor is an empty one");
+            });
+        }
+
+        #[test]
+        fn a_host_that_named_no_cache_dir_writes_nothing_anywhere() {
+            // `cache_path` returning None means fetch-only. Writing to some
+            // default location instead would put a 4 MB file somewhere the host
+            // never agreed to.
+            let _guard = CACHE_ENV.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let restore = std::env::var_os("AGENT_HARNESS_CACHE_DIR");
+            std::env::remove_var("AGENT_HARNESS_CACHE_DIR");
+
+            assert!(cache_path().is_none());
+            write_cache(SAMPLE); // must not panic, must not write
+            assert!(load_cached().is_none());
+            assert!(!cache_is_stale(), "nothing to refresh is not a stale cache");
+
+            if let Some(value) = restore {
+                std::env::set_var("AGENT_HARNESS_CACHE_DIR", value);
+            }
+        }
 
         #[test]
         fn a_cache_is_refetched_daily_and_a_missing_one_immediately() {
