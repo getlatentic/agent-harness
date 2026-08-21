@@ -192,16 +192,26 @@ pub fn augmented_node_path() -> String {
 }
 
 fn compute_augmented_node_path() -> String {
-    let mut parts: Vec<String> = Vec::new();
-    // The process's own PATH first — anything explicitly set still wins.
-    if let Ok(existing) = std::env::var("PATH") {
-        if !existing.is_empty() {
-            parts.push(existing);
-        }
-    }
     // The user's real PATH (nvm/pnpm/volta/asdf/Homebrew) via their login
     // shell; a hardcoded best-effort list if that's unavailable.
-    parts.push(login_shell_path().unwrap_or_else(hardcoded_node_dirs));
+    let discovered = login_shell_path().unwrap_or_else(hardcoded_node_dirs);
+    compose_augmented_path(std::env::var("PATH").ok(), discovered)
+}
+
+/// The process's own PATH first — anything explicitly set still wins — then
+/// whatever discovery turned up.
+///
+/// Takes both as arguments rather than reading the environment, so the
+/// "already set" case can be tested with a PATH this process does not have.
+/// Reading it directly, the only assertion available was that some entry of
+/// the real PATH survived — and the discovered PATH contains those same
+/// entries, so the test passed whether the guard worked or not.
+fn compose_augmented_path(process_path: Option<String>, discovered: String) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(existing) = process_path.filter(|path| !path.is_empty()) {
+        parts.push(existing);
+    }
+    parts.push(discovered);
     keep_absolute_entries(&parts.join(":"))
 }
 
@@ -651,6 +661,25 @@ mod tests {
         let augmented = compute_augmented_node_path();
         let first = existing.split(':').find(|e| e.starts_with('/')).expect("an absolute entry");
         assert!(augmented.contains(first), "{first} must survive into {augmented}");
+    }
+
+    #[test]
+    fn the_process_path_leads_and_an_absent_one_contributes_nothing() {
+        // Order is the whole point: a PATH the host deliberately set has to be
+        // searched before anything we discovered, or we override a deliberate
+        // choice. Asserted against directories this process does not have, so
+        // it cannot pass because the real PATH happened to contain them.
+        assert_eq!(
+            compose_augmented_path(Some("/host/bin".to_owned()), "/found/bin".to_owned()),
+            "/host/bin:/found/bin",
+        );
+        // Unset and empty both mean "nothing to keep" — and must not leave an
+        // empty entry behind, which is the implicit-cwd vector.
+        assert_eq!(compose_augmented_path(None, "/found/bin".to_owned()), "/found/bin");
+        assert_eq!(
+            compose_augmented_path(Some(String::new()), "/found/bin".to_owned()),
+            "/found/bin",
+        );
     }
 
     #[test]
