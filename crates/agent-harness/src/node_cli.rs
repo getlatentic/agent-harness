@@ -83,12 +83,15 @@ pub fn resolve_program(program: PathBuf) -> PathBuf {
 /// name: `claude` is `claude.exe` or `claude.cmd`, so each `PATHEXT` suffix is
 /// tried in turn.
 fn resolve_on_path(name: &Path, path_env: &str) -> Option<PathBuf> {
+    // Once, not once per directory: on Windows this reads an environment
+    // variable, and a PATH routinely has dozens of entries.
+    let extensions = split_extensions(&pathext());
     std::env::split_paths(path_env)
         .filter(|dir| !dir.as_os_str().is_empty())
         .flat_map(|dir| {
             let base = dir.join(name);
             let mut candidates = vec![base.clone()];
-            for extension in executable_extensions() {
+            for extension in &extensions {
                 let mut with_extension = base.clone().into_os_string();
                 with_extension.push(extension);
                 candidates.push(PathBuf::from(with_extension));
@@ -96,11 +99,6 @@ fn resolve_on_path(name: &Path, path_env: &str) -> Option<PathBuf> {
             candidates
         })
         .find(|candidate| is_executable_file(candidate))
-}
-
-/// Suffixes to try after the bare name, from the platform's own convention.
-fn executable_extensions() -> Vec<String> {
-    split_extensions(&pathext())
 }
 
 /// Unix has no extension convention for programs — a program's name is its
