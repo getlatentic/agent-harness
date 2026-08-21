@@ -169,6 +169,128 @@ fn collect_inner(harness: &dyn Harness, prompt: &str, resume: Option<String>) ->
     out
 }
 
+/// A stand-in serving only what the model *manager* uses: `/api/tags` for the
+/// installed list, and `/api/pull` streaming the given NDJSON lines. Separate
+/// from [`fake_ollama_responding`] so the chat helpers keep their signatures.
+fn fake_ollama_manager(tags: Value, pull_lines: Vec<String>) -> (String, Seen) {
+    let server = tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port");
+    let base = format!("http://{}", server.server_addr());
+    let seen: Seen = Arc::default();
+    let log = Arc::clone(&seen);
+
+    thread::spawn(move || {
+        while let Ok(mut request) = server.recv() {
+            let url = request.url().to_owned();
+            let mut raw = String::new();
+            let _ = std::io::Read::read_to_string(request.as_reader(), &mut raw);
+            log.lock().unwrap().push((url.clone(), serde_json::from_str(&raw).unwrap_or(Value::Null)));
+
+            let body = if url.starts_with("/api/tags") {
+                tags.to_string()
+            } else if url.starts_with("/api/pull") {
+                pull_lines.join("\n")
+            } else {
+                String::new()
+            };
+            let _ = request.respond(tiny_http::Response::new(
+                tiny_http::StatusCode(200),
+                Vec::new(),
+                Cursor::new(body.into_bytes()),
+                None,
+                None,
+            ));
+        }
+    });
+    (base, seen)
+}
+
+#[test]
+fn the_installed_list_carries_what_a_model_manager_shows() {
+    // `list_models` (above) is the picker's name-only shape. This is the
+    // manager's: without size, parameters and quantization it cannot tell a
+    // 400 MB Q4 from a 40 GB f16, which is the decision the screen exists for.
+    let tags = json!({ "models": [
+        {
+            "name": "qwen2.5:0.5b",
+            "size": 397_821_319u64,
+            "details": { "parameter_size": "494.03M", "quantization_level": "Q4_K_M" }
+        },
+        // A tag with no `details` still lists — just without the labels.
+        { "name": "bare:latest", "size": 12u64 }
+    ] });
+    let (base, _) = fake_ollama_manager(tags, Vec::new());
+
+    let installed = OpenHarness::ollama_at(&base).list_installed_models().expect("list");
+
+    assert_eq!(installed.len(), 2);
+    assert_eq!(installed[0].name, "qwen2.5:0.5b");
+    assert_eq!(installed[0].size, 397_821_319);
+    assert_eq!(installed[0].parameter_size.as_deref(), Some("494.03M"));
+    assert_eq!(installed[0].quantization_level.as_deref(), Some("Q4_K_M"));
+
+    assert_eq!(installed[1].name, "bare:latest");
+    assert_eq!(installed[1].parameter_size, None, "absent details are absent, not empty strings");
+}
+
+#[test]
+fn a_pull_reports_progress_per_layer_and_succeeds_on_the_success_line() {
+    // The manager renders a bar from these, so a pull that reported nothing
+    // until it finished would look hung for the length of a multi-GB download.
+    let lines = vec![
+        json!({ "status": "pulling manifest" }).to_string(),
+        json!({ "status": "pulling", "digest": "sha256:aa", "completed": 50u64, "total": 200u64 })
+            .to_string(),
+        json!({ "status": "pulling", "digest": "sha256:aa", "completed": 200u64, "total": 200u64 })
+            .to_string(),
+        json!({ "status": "success" }).to_string(),
+    ];
+    let (base, seen) = fake_ollama_manager(json!({ "models": [] }), lines);
+
+    let mut updates: Vec<harness::PullProgress> = Vec::new();
+    let cancel = AtomicBool::new(false);
+
+    OpenHarness::ollama_at(&base)
+        .pull_model("qwen2.5:0.5b", &cancel, &mut |p| updates.push(p))
+        .expect("a stream ending in success is a completed pull");
+
+    assert!(updates.len() >= 2, "one update per line, got {updates:?}");
+    assert!(
+        updates.iter().any(|u| u.completed == Some(50) && u.total == Some(200)),
+        "a partly-downloaded layer must report its counters: {updates:?}",
+    );
+    assert_eq!(updates.last().map(|u| u.status.as_str()), Some("success"));
+
+    // What a host actually renders: one bar across layers.
+    let mut bar = harness::PullProgressAggregator::default();
+    let percent = updates.iter().filter_map(|u| bar.update(u)).last();
+    assert_eq!(percent, Some(100.0), "a finished pull ends at 100%");
+
+    let (url, body) = seen.lock().unwrap().iter().find(|(u, _)| u.starts_with("/api/pull")).cloned().expect("pull call");
+    assert_eq!(url, "/api/pull");
+    assert_eq!(body["model"], "qwen2.5:0.5b", "the model asked for is the model requested");
+    assert_eq!(body["stream"], true, "a non-streaming pull reports nothing until it ends");
+}
+
+#[test]
+fn a_pull_that_errors_mid_stream_is_a_failure_not_a_quiet_success() {
+    // `pull_stream_surfaces_error_line` already pins the stream parser. What
+    // this adds is the trip back out: Ollama reports a failed pull as an
+    // `error` line on a *200* response, so the failure has to survive being
+    // mapped through `pull_model` — a boundary that turned the Err into an Ok
+    // would look like a download that finished.
+    let lines = vec![
+        json!({ "status": "pulling manifest" }).to_string(),
+        json!({ "error": "model \"nope\" not found" }).to_string(),
+    ];
+    let (base, _) = fake_ollama_manager(json!({ "models": [] }), lines);
+    let cancel = AtomicBool::new(false);
+
+    let result = OpenHarness::ollama_at(&base).pull_model("nope", &cancel, &mut |_| {});
+
+    let message = result.expect_err("an error line must fail the pull");
+    assert!(format!("{message}").contains("not found"), "got {message}");
+}
+
 #[test]
 fn readiness_and_model_list_come_from_api_tags() {
     let tags = json!({ "models": [ { "name": "qwen2.5:0.5b" }, { "name": "llama3.2:1b" } ] });
