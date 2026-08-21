@@ -23,6 +23,12 @@ serde.workspace = true
 # proc-macro only; no runtime weight added to the leaf.
 thiserror.workspace = true
 
+# Tagged with its own prefix: agent-harness owns the bare `v{version}` scheme,
+# and these crates version independently, so a shared scheme collides the first
+# time cli-stream reaches a version agent-harness already released.
+[package.metadata.release]
+tag-name = "cli-stream-v{{version}}"
+
 [dev-dependencies]
 proptest.workspace = true
 

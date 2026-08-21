@@ -7,7 +7,25 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
-### Migration
+`agent-harness` 0.5.0 and `cli-stream` 0.4.0.
+
+Two releases' worth of work, because 0.5.0 was prepared in August and never
+published — everything below ships together.
+
+A release about what a run actually sends, and about surviving what comes back.
+The direct-model runtime was putting roughly 6,400 tokens on the wire before the
+user's prompt, over half of it read out of the host machine's home directory,
+and no local server started on the common 4096-token context could run the agent
+loop at all. It now sends ~1,200 on the same request, fits a 4k window with every
+tool offered, marks its prefix so providers that charge for re-reading it do not,
+and adapts what it offers to the model it is talking to.
+
+The naming is also settled: the `Harness` prefix is gone from every type, and
+the picker's three questions are three types.
+
+Read **Migration from 0.4** before upgrading.
+
+### Migration from 0.4
 
 **The `Harness` prefix is gone, and the picker's three questions are three
 types.** The library is `harness`, so `harness::HarnessInfo` said it twice —
@@ -61,45 +79,6 @@ both be imported bare. Reach for the trait's methods without binding the name:
 use harness::Error;
 use std::error::Error as _; // for `.source()`
 ```
-
-### Fixed
-
-- A compacted session no longer loses its summary and replays a duplicate turn.
-  Saving appended the transcript's tail, which is correct only while it grows at
-  the end; compaction inserts a summary in the middle, so the tail re-appended a
-  turn already on disk and the summary was never written at all. Resuming such a
-  session replayed the duplicate and had lost what replaced the rest of its
-  history. No API change.
-
-- Structured output and image attachments applied to streamed requests but not
-  to the non-streaming path used for compaction summaries and subagent turns.
-  There is now one request builder, so the two cannot disagree ([#41]).
-
-### Changed
-
-- Internal: the OpenAI `/v1` and native Ollama `/api/chat` request builders are
-  one function parameterised by a `Dialect`, rather than two near-identical
-  eight-argument twins kept in step by hand. The non-streaming `post_chat` is
-  gone — the same streamed builder serves callers that ignore the fragments.
-  Nothing public changed ([#41]).
-
-[#41]: https://github.com/getlatentic/agent-harness/issues/41
-
-## [0.5.0] - 2026-08-09
-
-`agent-harness` 0.5.0.
-
-A release about what a run actually sends. The direct-model runtime was putting
-roughly 6,400 tokens on the wire before the user's prompt, over half of it read
-out of the host machine's home directory, and no local server started on the
-common 4096-token context could run the agent loop at all. It now sends ~1,200
-on the same request, fits a 4k window with every tool offered, marks its prefix
-so providers that charge for re-reading it do not, and adapts what it offers to
-the model it is talking to.
-
-Read **Migration from 0.4** before upgrading: six changes need an edit.
-
-### Migration from 0.4
 
 **1. `Harness::run` is now `Harness::start`.** If you *implement* `Harness`,
 rename your method. The signature is unchanged:
@@ -176,27 +155,6 @@ became a single `sessions/<id>.jsonl` — a header line, then one message per
 line. Nothing to do: the old layout is still read, so existing sessions resume.
 Only relevant if you read the files yourself.
 
-### Changed
-
-- **BREAKING — `Harness::run` renamed to `start`; `run_channel` renamed to
-  `run`.** The common call is the channel one, so it should have the short name.
-  `run_channel` described its plumbing rather than what a caller wanted, and
-  left `run` — the obvious first thing to reach for — as the callback form.
-- **BREAKING — `api_key`, `api_key_env` and `requires_api_key` collapsed into
-  `ApiKey`.** Four meaningful states as a sum type, where three booleans and
-  options could express eight and contradict each other.
-- **BREAKING — instruction files and skills are opt-in outside the working
-  tree.** See migration 4.
-- **Sessions are one append-only JSONL file each.** Recording a turn was
-  O(n) — the whole conversation re-serialised to add one exchange — and a
-  whole-array file is only meaningful complete, so a process killed mid-write
-  lost the conversation rather than the turn. Appending costs the final line.
-  Metadata moved into the same file, where it cannot fall out of step with the
-  transcript the way two separate writes could.
-- **`RunRequest` and `RunMode` derive `Default`.** Name the fields you mean and
-  let the rest default. `RunMode` defaults to `Ask`, the read-only mode —
-  defaulting to `Edit` would hand write access to anyone who forgot the field.
-
 ### Added
 
 - **`PromptProfile`** — the tool surface and base prompt now fit the model.
@@ -235,7 +193,47 @@ Only relevant if you read the files yourself.
   `/props`; a hosted endpoint publishes one in a shape of its own or not at all,
   so the catalog is the only cross-provider source.
 
+### Changed
+
+- Internal: the OpenAI `/v1` and native Ollama `/api/chat` request builders are
+  one function parameterised by a `Dialect`, rather than two near-identical
+  eight-argument twins kept in step by hand. The non-streaming `post_chat` is
+  gone — the same streamed builder serves callers that ignore the fragments.
+  Nothing public changed ([#41]).
+
+[#41]: https://github.com/getlatentic/agent-harness/issues/41
+
+- **BREAKING — `Harness::run` renamed to `start`; `run_channel` renamed to
+  `run`.** The common call is the channel one, so it should have the short name.
+  `run_channel` described its plumbing rather than what a caller wanted, and
+  left `run` — the obvious first thing to reach for — as the callback form.
+- **BREAKING — `api_key`, `api_key_env` and `requires_api_key` collapsed into
+  `ApiKey`.** Four meaningful states as a sum type, where three booleans and
+  options could express eight and contradict each other.
+- **BREAKING — instruction files and skills are opt-in outside the working
+  tree.** See migration 4.
+- **Sessions are one append-only JSONL file each.** Recording a turn was
+  O(n) — the whole conversation re-serialised to add one exchange — and a
+  whole-array file is only meaningful complete, so a process killed mid-write
+  lost the conversation rather than the turn. Appending costs the final line.
+  Metadata moved into the same file, where it cannot fall out of step with the
+  transcript the way two separate writes could.
+- **`RunRequest` and `RunMode` derive `Default`.** Name the fields you mean and
+  let the rest default. `RunMode` defaults to `Ask`, the read-only mode —
+  defaulting to `Edit` would hand write access to anyone who forgot the field.
+
 ### Fixed
+
+- A compacted session no longer loses its summary and replays a duplicate turn.
+  Saving appended the transcript's tail, which is correct only while it grows at
+  the end; compaction inserts a summary in the middle, so the tail re-appended a
+  turn already on disk and the summary was never written at all. Resuming such a
+  session replayed the duplicate and had lost what replaced the rest of its
+  history. No API change.
+
+- Structured output and image attachments applied to streamed requests but not
+  to the non-streaming path used for compaction summaries and subagent turns.
+  There is now one request builder, so the two cannot disagree ([#41]).
 
 - **The shell tool no longer inherits the whole environment.** A command the
   model ran could read any variable the host process held, including the API key
@@ -273,6 +271,36 @@ Only relevant if you read the files yourself.
 - **docs.rs shows the whole crate.** It builds default features, which here are
   the two CLI adapters — so every type in `openai_compatible`, most of the
   crate, was absent from the published documentation.
+
+- **A single undecodable byte no longer ends a run.** The line pump decoded
+  strictly, and treated a decode failure as end of stream — so one stray byte
+  from an agent CLI (a progress bar, an ANSI sequence, a path in whatever
+  encoding the filesystem gave it) silently dropped every line after it, the
+  final result included, and the run simply appeared to stop. Output is framed
+  on bytes and decoded lossily: an unreadable line is one damaged line.
+
+- **A relative program directory no longer outranks the whole `PATH`.**
+  Relative and empty `PATH` entries are dropped because a run spawns with its
+  working directory set to the user's workspace — somewhere the agent itself
+  writes — so anything resolving against the cwd can be planted. The program's
+  own directory was then prepended to that filtered path without being checked,
+  which is the same hole at the highest-priority position: a CLI configured as
+  `node_modules/.bin/claude` put a workspace-relative directory ahead of every
+  real one. Only an absolute directory is prepended now.
+
+- **`cli-stream` builds on Windows again**, and `PATH` is composed with
+  `std::env::join_paths` rather than a hardcoded `:`, which on Windows built a
+  path the OS reads as one nonexistent directory. A bare program name is
+  resolved against each `PATHEXT` suffix, so `claude` finds `claude.cmd`.
+
+- **One unreadable model no longer costs every provider its list.** models.dev
+  is a ~4 MB catalog published by someone else, and a single entry missing its
+  `id` failed the whole document — every provider, not just the one at fault.
+  Since a refetch returns the same bytes, "no models anywhere" persisted until
+  upstream fixed it. Models parse per entry now, and a body that cannot be read
+  is not written to the cache.
+
+- **A failed background catalog refresh no longer empties a working cache.**
 
 ## [0.4.0] - 2026-08-08
 
