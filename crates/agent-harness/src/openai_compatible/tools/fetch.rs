@@ -342,6 +342,94 @@ mod tests {
     }
 
     #[test]
+    fn each_way_a_page_can_look_like_markup_is_enough_on_its_own() {
+        // Four independent signals, and the sniffer needs *any* of them. Testing
+        // one document that trips several says only that the chain works —
+        // every `||` could be an `&&` and a page announcing itself with just a
+        // doctype, or just a `<div>`, would be handed to the model as raw tags.
+        assert!(looks_like_html("<!doctype html>hello"), "doctype alone");
+        assert!(looks_like_html("<html>hello</html>"), "an html element alone");
+        assert!(looks_like_html("<p>x</p><body>y</body>"), "a body tag alone");
+        assert!(looks_like_html("<span><div>x</div></span>"), "a div alone");
+
+        assert!(!looks_like_html("cost < 5 and x -> y"), "prose is not markup");
+        assert!(!looks_like_html(""), "nor is nothing");
+    }
+
+    #[test]
+    fn text_and_markdown_are_different_renderings_of_the_same_page() {
+        // They share the is_html decision but not the renderer, and the whole
+        // point of asking for one is not getting the other.
+        let markup = "<h1>Title</h1><p>Body.</p>";
+        let as_text = render("text", markup.to_owned(), true);
+        let as_markdown = render("markdown", markup.to_owned(), true);
+
+        assert!(as_text.contains("Title") && !as_text.contains('#'), "text is plain: {as_text:?}");
+        assert!(as_markdown.contains("# Title"), "markdown keeps structure: {as_markdown:?}");
+    }
+
+    #[test]
+    fn a_page_that_is_not_markup_is_never_run_through_a_markup_renderer() {
+        // Entities are the tell: a converter decodes them, passthrough does
+        // not. Prose alone cannot show this — `htmd` leaves prose unchanged
+        // either way — so the case has to be something only a renderer touches.
+        let body = "a &amp; b";
+        assert_eq!(render("markdown", body.to_owned(), false), body, "verbatim when not markup");
+        assert_ne!(
+            render("markdown", body.to_owned(), true),
+            body,
+            "and this is the difference that proves the flag is consulted",
+        );
+    }
+
+    #[test]
+    fn the_model_is_told_which_argument_is_the_url() {
+        // The schema is the only description of the call the model gets; empty,
+        // it guesses argument names and every fetch fails as a parse error.
+        let schema = WebFetch.parameters().to_string();
+        assert!(schema.contains("url"), "got {schema}");
+    }
+
+    /// A raw listener declaring `len` and actually sending that many bytes —
+    /// `tiny_http` chunks a body this size, which skips the `Content-Length`
+    /// check entirely.
+    fn serving_declared(len: u64) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                use std::io::{BufRead, BufReader, Write};
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    if line == "\r\n" {
+                        break;
+                    }
+                    line.clear();
+                }
+                let mut stream = &stream;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {len}\r\n\r\n"
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&vec![b'a'; len as usize]);
+                let _ = stream.flush();
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn a_declared_length_exactly_at_the_cap_is_allowed() {
+        // The boundary the header check shares with the body check: `>` not
+        // `>=`, or a page of exactly the limit is refused before it is read.
+        let url = serving_declared(MAX_RESPONSE_BYTES);
+        let outcome = transfer(&url, "text", Some(10));
+        assert!(outcome.ok, "exactly at the cap is within it: {:?}", outcome.output);
+        assert_eq!(outcome.output.len(), MAX_RESPONSE_BYTES as usize);
+    }
+
+    #[test]
     fn the_cap_is_five_megabytes_and_says_so_as_a_number() {
         // Every other test here writes `MAX_RESPONSE_BYTES`, so all of them
         // scale with the constant and none of them can pin it: `5 * 1024 *
