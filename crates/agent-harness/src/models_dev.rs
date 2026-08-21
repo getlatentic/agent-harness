@@ -189,7 +189,16 @@ mod imp {
 
     /// Refetch and rewrite the disk cache so the next launch is current.
     fn refresh_cache() {
-        if let Some(body) = fetch_remote() {
+        refresh_from(fetch_remote);
+    }
+
+    /// The rewrite itself, with the fetch as a parameter.
+    ///
+    /// A failed fetch leaves the existing cache untouched — this runs in the
+    /// background on a launch that already has a working catalog, so a network
+    /// blip must not trade it for nothing.
+    fn refresh_from(fetch: impl FnOnce() -> Option<String>) {
+        if let Some(body) = fetch() {
             write_cache(&body);
         }
     }
@@ -302,6 +311,30 @@ mod imp {
             let openai = select(&catalog, "openai");
             assert_eq!(openai.len(), 1, "the readable sibling survives");
             assert_eq!(openai[0].value, "fine");
+        }
+
+        #[test]
+        fn a_failed_refresh_leaves_the_working_cache_alone() {
+            // This runs in the background on a launch that already loaded a
+            // catalog. Rewriting unconditionally would trade a working cache
+            // for whatever a network blip returned, and the next launch would
+            // start from nothing.
+            with_cache_dir("refresh", |dir| {
+                write_cache(SAMPLE);
+                refresh_from(|| None);
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("models_dev.json")).unwrap(),
+                    SAMPLE,
+                    "a failed refresh is a no-op",
+                );
+
+                refresh_from(|| Some("{}".to_owned()));
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("models_dev.json")).unwrap(),
+                    "{}",
+                    "and a successful one replaces it",
+                );
+            });
         }
 
         #[test]
