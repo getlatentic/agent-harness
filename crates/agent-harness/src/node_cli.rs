@@ -760,6 +760,24 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn unix_does_not_invent_a_suffix_the_os_would_not_run() {
+        // The other half of the test below, and the same lesson as
+        // `keep_absolute_entries`: asserting that Windows *does* probe suffixes
+        // says nothing about unix not doing it. Here a program's name is its
+        // file name, so `tool` must not be answered by `tool.EXE` — the OS
+        // would never run it for that name.
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("tempdir");
+        let decoy = root.path().join("tool.EXE");
+        std::fs::write(&decoy, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&decoy, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let path_env = root.path().display().to_string();
+        assert_eq!(resolve_on_path(Path::new("tool"), &path_env), None);
+    }
+
     #[test]
     fn a_bare_name_resolves_however_the_platform_spells_the_file() {
         // The unix cases above are gated, which left everything about
