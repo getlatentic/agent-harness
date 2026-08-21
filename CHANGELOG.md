@@ -9,8 +9,8 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 `agent-harness` 0.5.0 and `cli-stream` 0.4.0.
 
-Two releases' worth of work, because 0.5.0 was prepared in August and never
-published — everything below ships together.
+Everything below ships together: a 0.5.0 was prepared in August but never
+published, so its notes and everything accumulated since are one release.
 
 A release about what a run actually sends, and about surviving what comes back.
 The direct-model runtime was putting roughly 6,400 tokens on the wire before the
