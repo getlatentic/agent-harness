@@ -388,6 +388,14 @@ mod tests {
         // it guesses argument names and every fetch fails as a parse error.
         let schema = WebFetch.parameters().to_string();
         assert!(schema.contains("url"), "got {schema}");
+
+        // And the prose beside it — with no description the model cannot tell
+        // this tool from any other and reaches for it at the wrong times.
+        assert!(
+            WebFetch.description().to_lowercase().contains("fetch"),
+            "got {:?}",
+            WebFetch.description(),
+        );
     }
 
     /// A raw listener declaring `len` and actually sending that many bytes —

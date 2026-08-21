@@ -378,6 +378,12 @@ mod tests {
         // search from exactly the runs that most need to look something up.
         assert!(!WebSearch.mutating());
         assert_eq!(WebSearch.id(), "websearch", "the id is how a tool call routes");
+
+        // The description and schema are the entire brief the model gets. With
+        // no schema it guesses argument names; with no description it cannot
+        // tell this tool from any other, and reaches for it at the wrong times.
+        assert!(WebSearch.description().contains("Search the web"), "got {:?}", WebSearch.description());
+        assert!(WebSearch.parameters().to_string().contains("query"), "the schema names the query");
     }
 
     #[test]
