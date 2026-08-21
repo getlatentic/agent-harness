@@ -379,15 +379,17 @@ mod imp {
             std::fs::write(&path, "{}").unwrap();
             assert!(!stale(&path), "just written is not a day old");
 
-            // An hour old is the case that pins the interval to a *day*. A
-            // just-written file and a 25-hour-old one read the same either
-            // side of almost any threshold, so on their own they say only
-            // "some rule exists" — `24 * 60 * 60` could become `24 + 60 + 60`,
-            // refetching 4 MB every 144 seconds, and both would still pass.
-            let hour_ago = std::time::SystemTime::now() - Duration::from_secs(60 * 60);
+            // Six hours is the case that pins the interval to a *day*. A
+            // just-written file and a 25-hour-old one read the same either side
+            // of almost any threshold, so on their own they say only that some
+            // rule exists: `24 * 60 * 60` could become `24 + 60 + 60` (144
+            // seconds) and both would still pass. Six hours rather than one
+            // because `24 + 60 * 60` is 3,624 seconds — just over an hour, and
+            // an hour-old file cannot tell that from a day either.
+            let earlier = std::time::SystemTime::now() - Duration::from_secs(6 * 60 * 60);
             let file = std::fs::File::options().write(true).open(&path).unwrap();
-            file.set_times(std::fs::FileTimes::new().set_modified(hour_ago)).unwrap();
-            assert!(!stale(&path), "an hour is not a day");
+            file.set_times(std::fs::FileTimes::new().set_modified(earlier)).unwrap();
+            assert!(!stale(&path), "six hours is not a day");
 
             // Backdate it past the threshold.
             let file = std::fs::File::options().write(true).open(&path).unwrap();

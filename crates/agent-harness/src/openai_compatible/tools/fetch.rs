@@ -342,6 +342,32 @@ mod tests {
     }
 
     #[test]
+    fn the_cap_is_five_megabytes_and_says_so_as_a_number() {
+        // Every other test here writes `MAX_RESPONSE_BYTES`, so all of them
+        // scale with the constant and none of them can pin it: `5 * 1024 *
+        // 1024` becoming `5 + 1024 + 1024` is a 2 KB ceiling that truncates
+        // almost every page, and the suite would stay green. A literal is the
+        // only thing that holds it.
+        assert_eq!(MAX_RESPONSE_BYTES, 5_242_880);
+    }
+
+    #[test]
+    fn plain_text_is_delivered_as_written() {
+        // The conversion has to be conditional on the content actually being
+        // markup. Run over prose it eats anything angle-bracketed — a diff, a
+        // shell redirect, a generic type — and the model reads a mangled page.
+        // Asked for `text`, which routes to the naive stripper — everything
+        // from `<` to the next `>` goes. Prose with no angle brackets cannot
+        // tell the two paths apart, and neither can the `markdown` path:
+        // `htmd` is a real html5ever parser, so it leaves prose alone whether
+        // or not we hand it over.
+        const PROSE: &str = "cost < 5 and x -> y, so budget accordingly";
+        let url = serving(PROSE.as_bytes().to_vec(), "text/plain", None);
+        let outcome = transfer(&url, "text", None);
+        assert_eq!(outcome.output, PROSE, "plain text must not be read as markup");
+    }
+
+    #[test]
     fn a_stripped_script_takes_its_closing_tag_with_it() {
         // The offset that resumes after `</script>` is what decides whether the
         // tag itself is removed or leaks into the text. Content *after* the
