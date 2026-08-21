@@ -342,6 +342,43 @@ mod tests {
     }
 
     #[test]
+    fn a_stripped_script_takes_its_closing_tag_with_it() {
+        // The offset that resumes after `</script>` is what decides whether the
+        // tag itself is removed or leaks into the text. Content *after* the
+        // span is what shows the difference — a page ending at the closing tag
+        // reads the same either way.
+        let text = html_to_text("<p>before</p><script>var x = 1;</script><p>after</p>");
+        assert!(text.contains("before") && text.contains("after"), "got {text:?}");
+        assert!(!text.contains("var x"), "the script body is gone: {text:?}");
+        assert!(!text.contains('/'), "and so is the closing tag: {text:?}");
+
+        // Two spans in a row: the resume point has to be right each time, not
+        // just the first.
+        let text = html_to_text("a<style>p{color:red}</style>b<style>i{}</style>c");
+        assert_eq!(text, "abc", "got {text:?}");
+    }
+
+    #[test]
+    fn an_unterminated_script_does_not_leak_the_rest_of_the_page() {
+        // Real pages are truncated mid-download. Without a closing tag there is
+        // no safe resume point, so everything after the opener is dropped
+        // rather than emitted as script source.
+        let text = html_to_text("<p>keep</p><script>var x = 1; // and then nothing");
+        assert!(text.contains("keep"));
+        assert!(!text.contains("var x"), "got {text:?}");
+    }
+
+    #[test]
+    fn runs_of_blank_lines_collapse_to_one() {
+        // Whitespace is the cheapest thing to waste a context window on, and
+        // generated markup is full of it. One blank line survives a run so
+        // paragraphs still read apart.
+        let text = html_to_text("<p>one</p>\n\n\n\n\n<p>two</p>");
+        assert!(!text.contains("\n\n\n"), "no run longer than one blank: {text:?}");
+        assert!(text.contains("one") && text.contains("two"));
+    }
+
+    #[test]
     fn only_the_web_is_fetchable_and_plain_http_is_upgraded() {
         // `webfetch` is offered in read-only runs on the grounds that reading
         // the web is not reading the machine. A scheme that reaches the disk or
