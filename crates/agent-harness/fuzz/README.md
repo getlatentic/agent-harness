@@ -33,8 +33,12 @@ tests use. They are committed; the working corpus under `corpus/` is not.
 Starting from them saves the fuzzer rediscovering the message envelope:
 
 ```bash
-cargo +nightly fuzz run claude_line seeds/claude_line -- -max_total_time=90
+cargo +nightly fuzz run claude_line corpus/claude_line seeds/claude_line -- -max_total_time=90
 ```
+
+Name the writable corpus first: libFuzzer writes finds into the first directory
+and treats the rest as read-only input, which is what keeps `seeds/` a fixed
+set rather than a growing one. Both directories have to exist already.
 
 ## In CI
 
