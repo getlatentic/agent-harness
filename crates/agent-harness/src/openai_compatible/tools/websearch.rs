@@ -178,6 +178,120 @@ fn percent_encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// What the endpoint was asked: the `Authorization` header and the
+    /// JSON-RPC body, per request in order.
+    type Asked = Arc<Mutex<Vec<(Option<String>, Value)>>>;
+
+    /// An MCP endpoint answering with the queued replies in turn. Anything past
+    /// the end gets an empty result, so an unexpected extra call ends the test
+    /// rather than hanging it.
+    fn fake_endpoint(replies: Vec<String>) -> (String, Asked) {
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port");
+        let url = format!("http://{}", server.server_addr());
+        let asked: Asked = Arc::default();
+        let log = Arc::clone(&asked);
+        let mut queued = replies.into_iter();
+
+        std::thread::spawn(move || {
+            while let Ok(mut request) = server.recv() {
+                let authorization = request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Authorization"))
+                    .map(|h| h.value.as_str().to_owned());
+                let mut body = String::new();
+                let _ = std::io::Read::read_to_string(request.as_reader(), &mut body);
+                let body: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                log.lock().unwrap().push((authorization, body));
+
+                let reply = queued.next().unwrap_or_else(|| r#"{"result":{}}"#.to_owned());
+                let _ = request.respond(
+                    tiny_http::Response::from_string(reply).with_header(
+                        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                            .expect("header"),
+                    ),
+                );
+            }
+        });
+        (url, asked)
+    }
+
+    fn listing(names: &[&str]) -> String {
+        json!({ "result": { "tools": names.iter().map(|n| json!({ "name": n })).collect::<Vec<_>>() } })
+            .to_string()
+    }
+
+    #[test]
+    fn the_discovered_tool_is_the_one_called_with_our_query() {
+        // The two calls are only useful if the first decides the second: the
+        // helpers below prove the name is *chosen* correctly, nothing proved it
+        // is then *used*. A run that calls some other tool reports its output
+        // as search results.
+        let hits = json!({
+            "result": { "content": [{ "type": "text", "text": "a result line" }] }
+        })
+        .to_string();
+        let (url, asked) = fake_endpoint(vec![listing(&["fetch", "web_search_exa"]), hits]);
+
+        let outcome = search(&url, Some("sk-tok"), "rust mutation testing", 3);
+
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.len(), 2, "tools/list then tools/call");
+        assert_eq!(asked[0].1["method"], "tools/list");
+        assert_eq!(asked[1].1["method"], "tools/call");
+        assert_eq!(
+            asked[1].1["params"]["name"], "web_search_exa",
+            "the tool discovered by tools/list is the one called",
+        );
+        assert_eq!(asked[1].1["params"]["arguments"]["query"], "rust mutation testing");
+        assert_eq!(asked[1].1["params"]["arguments"]["numResults"], 3);
+        for (authorization, _) in asked.iter() {
+            assert_eq!(
+                authorization.as_deref(),
+                Some("Bearer sk-tok"),
+                "every call carries the token, not just the first",
+            );
+        }
+
+        assert!(outcome.ok);
+        assert!(outcome.output.contains("a result line"), "got {:?}", outcome.output);
+    }
+
+    #[test]
+    fn an_endpoint_with_nothing_to_search_says_so_before_calling_anything() {
+        // Falling through to "call whatever is first" against an endpoint with
+        // no tools would send a `tools/call` naming nothing.
+        let (url, asked) = fake_endpoint(vec![listing(&[])]);
+        let outcome = search(&url, None, "anything", 5);
+
+        assert!(!outcome.ok);
+        assert!(outcome.output.contains("no search tool"), "got {:?}", outcome.output);
+        assert_eq!(asked.lock().unwrap().len(), 1, "it must not call a tool it did not find");
+    }
+
+    #[test]
+    fn a_search_that_matched_nothing_is_a_result_not_a_failure() {
+        // An empty answer is the endpoint working. Reporting it as an error
+        // makes the model retry a search that will keep succeeding-with-nothing.
+        let (url, _) = fake_endpoint(vec![
+            listing(&["search"]),
+            json!({ "result": { "content": [] } }).to_string(),
+        ]);
+        let outcome = search(&url, None, "no such thing", 8);
+        assert!(outcome.ok, "empty is not an error");
+        assert_eq!(outcome.output, "(no results)");
+    }
+
+    #[test]
+    fn an_unauthenticated_endpoint_is_asked_without_a_bearer() {
+        // Exa carries its key in the URL instead, so sending an empty
+        // `Authorization` would be a header the endpoint has to ignore.
+        let (url, asked) = fake_endpoint(vec![listing(&["search"])]);
+        let _ = search(&url, None, "q", 1);
+        assert_eq!(asked.lock().unwrap()[0].0, None);
+    }
 
     #[test]
     fn an_api_key_is_encoded_before_it_goes_in_a_url() {
