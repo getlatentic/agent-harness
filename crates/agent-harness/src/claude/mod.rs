@@ -316,7 +316,132 @@ fn extra_args_sets(extra_args: &[String], flag: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::RunEvent;
     use crate::ReasoningEffort;
+
+    /// A stand-in `claude` answering the three ways the adapter invokes it:
+    /// `--version`, `auth status` (JSON with `loggedIn`), and a `-p` run that
+    /// records the argv it was handed.
+    #[cfg(unix)]
+    fn fake_claude(tag: &str, signed_in: bool, emits: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("claude-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let argv = dir.join("argv");
+        let cli = dir.join("claude");
+        std::fs::write(
+            &cli,
+            format!(
+                "#!/bin/sh\n\
+                 case \"$1\" in\n\
+                 --version) echo '1.2.3 (Claude Code)'; exit 0 ;;\n\
+                 auth) echo '{{\"loggedIn\":{signed_in}}}'; exit 0 ;;\n\
+                 -p) : > '{argv}'; for a in \"$@\"; do printf '%s\\n' \"$a\" >> '{argv}'; done\n\
+                 {emits}\n\
+                 exit 0 ;;\n\
+                 esac\n\
+                 exit 1\n",
+                argv = argv.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (cli, argv)
+    }
+
+    #[cfg(unix)]
+    fn drive(cli: &std::path::Path, request: RunRequest) -> Vec<RunEvent> {
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Vec<RunEvent>>> = Arc::default();
+        let sink = Arc::clone(&seen);
+        let harness = ClaudeHarness::custom(ClaudeHarnessConfig {
+            command: cli.display().to_string(),
+        });
+        let handle = harness
+            .start(request, Arc::new(move |event| sink.lock().unwrap().push(event)))
+            .expect("the stand-in should spawn");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let done = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, RunEvent::Exited { .. }));
+            if done {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the run never exited");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = handle.cancel();
+        let events = seen.lock().unwrap().clone();
+        events
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_run_reaches_the_cli_as_stream_json_and_comes_back_as_events() {
+        // The argv tests elsewhere check `build_claude_args` in isolation; this
+        // is the only one proving the process receives that argv, and that its
+        // NDJSON comes back through the parser as normalized events.
+        let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi there"}}}"#;
+        let (cli, argv) = fake_claude("run", true, &format!("printf '%s\\n' '{delta}'"));
+
+        let events = drive(
+            &cli,
+            RunRequest {
+                run_id: "r1".to_owned(),
+                prompt: "greet me".to_owned(),
+                cwd: Some(std::env::temp_dir()),
+                tuning: RunTuning { model: Some("opus".to_owned()), ..RunTuning::default() },
+                ..RunRequest::default()
+            },
+        );
+
+        let passed: Vec<String> =
+            std::fs::read_to_string(&argv).unwrap().lines().map(str::to_owned).collect();
+        assert_eq!(passed.first().map(String::as_str), Some("-p"));
+        assert_eq!(
+            passed.get(1).map(String::as_str),
+            Some("greet me"),
+            "the prompt follows -p: {passed:?}",
+        );
+        assert!(passed.windows(2).any(|w| w[0] == "--output-format" && w[1] == "stream-json"));
+        assert!(passed.iter().any(|a| a == "--include-partial-messages"), "{passed:?}");
+        assert!(passed.windows(2).any(|w| w[0] == "--model" && w[1] == "opus"));
+
+        assert!(
+            events.iter().any(|e| matches!(e, RunEvent::Text { delta, .. } if delta == "hi there")),
+            "the CLI's delta should arrive as text: {events:?}",
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            RunEvent::Exited { exit_code: Some(0), cancelled: false, .. }
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_reads_logged_in_from_the_auth_probe() {
+        // `auth status` answers JSON, so this covers the parse as well as the
+        // spawn. Signed-out still reads as installed: the UI offers "Sign in"
+        // only once it knows the binary is there.
+        let (yes, _) = fake_claude("in", true, ":");
+        let ready =
+            ClaudeHarness::custom(ClaudeHarnessConfig { command: yes.display().to_string() })
+                .readiness();
+        assert!(ready.installed && ready.ready && ready.auth_configured);
+        assert_eq!(ready.version.as_deref(), Some("1.2.3 (Claude Code)"));
+
+        let (no, _) = fake_claude("out", false, ":");
+        let ready =
+            ClaudeHarness::custom(ClaudeHarnessConfig { command: no.display().to_string() })
+                .readiness();
+        assert!(ready.installed, "the binary is present either way");
+        assert!(!ready.ready && !ready.auth_configured);
+        assert!(ready.error.is_some(), "a signed-out CLI must say what to do");
+    }
 
     #[test]
     fn claude_info_and_credential() {

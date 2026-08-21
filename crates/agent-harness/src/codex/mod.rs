@@ -301,6 +301,146 @@ fn build_codex_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::RunEvent;
+
+    /// A stand-in `codex` that answers the three ways the adapter invokes it:
+    /// `--version`, `login status`, and a real `exec` run. The `exec` case
+    /// records the argv it was handed, so a test can assert what the CLI
+    /// actually received rather than what the pure builder returned.
+    #[cfg(unix)]
+    fn fake_codex(tag: &str, signed_in: bool, emits: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("codex-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let argv = dir.join("argv");
+        let cli = dir.join("codex");
+        let login_exit = i32::from(!signed_in);
+        std::fs::write(
+            &cli,
+            format!(
+                "#!/bin/sh\n\
+                 case \"$1\" in\n\
+                 --version) echo 'codex-cli 9.9.9'; exit 0 ;;\n\
+                 login) exit {login_exit} ;;\n\
+                 exec) : > '{argv}'; for a in \"$@\"; do printf '%s\\n' \"$a\" >> '{argv}'; done\n\
+                 {emits}\n\
+                 exit 0 ;;\n\
+                 esac\n\
+                 exit 1\n",
+                argv = argv.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (cli, argv)
+    }
+
+    #[cfg(unix)]
+    fn drive(cli: &std::path::Path, request: RunRequest) -> Vec<RunEvent> {
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Vec<RunEvent>>> = Arc::default();
+        let sink = Arc::clone(&seen);
+        let harness = CodexHarness::custom(CodexHarnessConfig {
+            command: cli.display().to_string(),
+        });
+        let handle = harness
+            .start(request, Arc::new(move |event| sink.lock().unwrap().push(event)))
+            .expect("the stand-in should spawn");
+
+        // Bounded: a fixture that never exits must fail the test, not hang it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let done = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, RunEvent::Exited { .. }));
+            if done {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the run never exited");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = handle.cancel();
+        let events = seen.lock().unwrap().clone();
+        events
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_run_reaches_the_cli_as_codex_exec_and_comes_back_as_events() {
+        // The argv assertions elsewhere test `build_codex_args` in isolation.
+        // This is the only test that proves the argv the *process* receives is
+        // that one — spawn, stream, parse and normalize included.
+        let message = r#"{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"done"}}"#;
+        let (cli, argv) = fake_codex("run", true, &format!("printf '%s\\n' '{message}'"));
+
+        let events = drive(
+            &cli,
+            RunRequest {
+                run_id: "r1".to_owned(),
+                prompt: "say something".to_owned(),
+                cwd: Some(std::env::temp_dir()),
+                tuning: RunTuning { model: Some("o4-mini".to_owned()), ..RunTuning::default() },
+                ..RunRequest::default()
+            },
+        );
+
+        let passed: Vec<String> =
+            std::fs::read_to_string(&argv).unwrap().lines().map(str::to_owned).collect();
+        assert_eq!(passed.first().map(String::as_str), Some("exec"));
+        assert!(passed.iter().any(|a| a == "--json"), "argv was {passed:?}");
+        assert!(passed.iter().any(|a| a == "--skip-git-repo-check"), "argv was {passed:?}");
+        assert!(passed.windows(2).any(|w| w[0] == "--model" && w[1] == "o4-mini"));
+        assert_eq!(
+            passed.last().map(String::as_str),
+            Some("say something"),
+            "the prompt is the trailing positional",
+        );
+
+        assert!(
+            events.iter().any(|e| matches!(e, RunEvent::Text { delta, .. } if delta == "done")),
+            "the CLI's message should arrive as text: {events:?}",
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            RunEvent::Exited { exit_code: Some(0), cancelled: false, .. }
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_nonzero_exit_is_reported_rather_than_read_as_a_finished_run() {
+        // `codex exec` failing (bad flag, refused sandbox) must not look like a
+        // run that simply produced nothing.
+        let (cli, _) = fake_codex("fail", true, "exit 3; :");
+        let events = drive(&cli, RunRequest { prompt: "hi".to_owned(), ..RunRequest::default() });
+        assert!(
+            events.iter().any(|e| matches!(e, RunEvent::Exited { exit_code: Some(3), .. })),
+            "{events:?}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_reports_the_version_and_whether_login_status_succeeded() {
+        // Both halves come from spawning the CLI, so neither is covered by the
+        // pure argv tests. Signed-out must still read as installed — the UI
+        // offers "Sign in" only when it knows the binary is there.
+        let (yes, _) = fake_codex("in", true, ":");
+        let ready = CodexHarness::custom(CodexHarnessConfig { command: yes.display().to_string() })
+            .readiness();
+        assert!(ready.installed && ready.ready && ready.auth_configured);
+        assert_eq!(ready.version.as_deref(), Some("codex-cli 9.9.9"));
+        assert!(ready.error.is_none());
+
+        let (no, _) = fake_codex("out", false, ":");
+        let ready = CodexHarness::custom(CodexHarnessConfig { command: no.display().to_string() })
+            .readiness();
+        assert!(ready.installed, "the binary is present either way");
+        assert!(!ready.ready && !ready.auth_configured);
+        assert!(ready.error.is_some(), "a signed-out CLI must say what to do");
+    }
 
     #[test]
     fn a_renamed_binary_is_what_gets_probed() {
