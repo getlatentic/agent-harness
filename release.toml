@@ -26,6 +26,21 @@
 shared-version = true
 tag-name = "v{{version}}"
 
+# The default branch requires a pull request — an active ruleset with no bypass
+# actors — so cargo-release's `git push origin main` is rejected. That push is
+# the LAST step, after both crates are already on crates.io, and a publish
+# cannot be undone: the run would end with the versions live, the release commit
+# and tags local, and main behind.
+#
+# So the release stops at "committed, tagged, published". The branch goes up as
+# a PR and the tags by hand:
+#
+#   git push origin cli-stream-v0.4.0 v0.5.0
+#
+# Only `v*` triggers .github/workflows/release.yml, so the project version makes
+# the GitHub release and cli-stream's tag stays a plain marker.
+push = false
+
 # Single shared workspace CHANGELOG. Scoped to the agent-harness crate (in its
 # [package.metadata.release]) so it stamps exactly once — a workspace-level
 # replacement here would run once per crate and duplicate the version header.
