@@ -36,6 +36,18 @@ Starting from them saves the fuzzer rediscovering the message envelope:
 cargo +nightly fuzz run claude_line seeds/claude_line -- -max_total_time=90
 ```
 
+## In CI
+
+A PR replays the committed seeds and exits (`-runs=0`) — deterministic, a few
+seconds, and it fails only on an input already known to matter. A PR must never
+go red because a fuzzer wandered somewhere new, which is what any time-boxed
+run would eventually do.
+
+Discovery is the weekly scheduled run (and `workflow_dispatch`), where each
+target gets real time. libFuzzer writes finds into the **first** corpus
+directory named and reads the rest, so `corpus/<target> seeds/<target>` keeps
+the committed seeds as they are.
+
 ## When one finds something
 
 libFuzzer writes the input to `artifacts/<target>/`. **Commit that file** and

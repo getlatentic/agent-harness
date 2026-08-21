@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The deep fuzz run below is worth wall-clock nobody wants on a PR.
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -90,6 +94,59 @@ jobs:
         run: cargo fmt --all --check || true
       - name: Clippy
         run: cargo clippy --workspace --all-features --all-targets
+
+  # The parsers eat NDJSON an agent CLI wrote, so "never panics" is a promise
+  # someone has to keep checking. A target nobody re-runs is not a regression
+  # test.
+  #
+  # On a PR this replays the committed seeds and exits (`-runs=0`): fast,
+  # deterministic, and it fails only on an input already known to matter — a
+  # PR must never redden because a fuzzer wandered somewhere new. Discovery is
+  # the weekly run, where each target gets real time.
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    env:
+      # cargo-fuzz supplies its own sanitizer RUSTFLAGS; the workspace-wide
+      # `-D warnings` would replace them and silently drop the coverage
+      # instrumentation that makes fuzzing fuzzing.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz
+      - name: Linux system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Fuzz
+        working-directory: crates/agent-harness/fuzz
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            limit="-runs=0"          # replay the seeds, then stop
+          else
+            limit="-max_total_time=300"
+          fi
+          for target in claude_line codex_line raw_line normalize_event; do
+            echo "::group::$target"
+            # libFuzzer writes finds into the FIRST corpus directory and reads
+            # the rest, so the committed seeds stay as they are. It requires
+            # both to exist.
+            mkdir -p corpus/"$target"
+            cargo fuzz run "$target" corpus/"$target" seeds/"$target" -- $limit
+            echo "::endgroup::"
+          done
+      # A crash leaves the input behind; keep it, because it is the
+      # reproduction and the next unit test.
+      - name: Keep any crashing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: crates/agent-harness/fuzz/artifacts/
+          if-no-files-found: ignore
 
   deny:
     name: cargo-deny
