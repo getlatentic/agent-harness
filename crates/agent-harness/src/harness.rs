@@ -45,8 +45,8 @@ pub type InstallCallback = Arc<dyn Fn(InstallEvent) + Send + Sync>;
 /// A boxed, type-erased error source. The [`Error`] variants carry one
 /// of these instead of `#[from]`-ing a single concrete type, because each
 /// *category* can be produced by more than one underlying error: a `Spawn`
-/// failure is a [`cli_stream::StreamError`] for the claude/codex adapters but a
-/// `bob_rs::BobError` for bob. The real error stays reachable through
+/// failure is a [`cli_stream::StreamError`] for a CLI adapter and an I/O or
+/// protocol error for an ACP one. The real error stays reachable through
 /// [`std::error::Error::source`] (and `downcast_ref`); the category is the
 /// variant.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -58,8 +58,8 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 ///
 /// Each category carries the real underlying error as a [`source`] (via the
 /// [`BoxError`] field), so a consumer that wants more than the category can
-/// walk `.source()` or `downcast_ref::<cli_stream::StreamError>()` /
-/// `::<bob_rs::BobError>()`. The `Display` still flattens the source into the
+/// walk `.source()` or `downcast_ref::<cli_stream::StreamError>()`. The
+/// `Display` still flattens the source into the
 /// message (`"failed to start the agent: <source>"`), so a consumer that just
 /// stringifies at a boundary (e.g. a Tauri command's `.to_string()`) gets the
 /// same full message as before. `#[non_exhaustive]` so adding a variant later
@@ -759,9 +759,9 @@ fn login_event(event: &Event) -> Option<InstallEvent> {
 /// which can't complete where there's no browser. Pure (the env read stays at
 /// the call site) so it's unit-tested directly.
 ///
-/// Only the claude/codex adapters OR this into readiness — bob reports auth via
-/// `bob-rs`'s own keychain source — so it's gated to those features. Without
-/// them (`--no-default-features`) it would be dead code, hence the `cfg`.
+/// Only the claude/codex adapters OR this into readiness, so it is gated to
+/// those features: without them (`--no-default-features`) it would be dead
+/// code, hence the `cfg`.
 #[cfg(any(feature = "claude", feature = "codex"))]
 pub(crate) fn api_key_value_usable(value: Option<String>) -> bool {
     matches!(value, Some(v) if !v.trim().is_empty())

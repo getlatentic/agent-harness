@@ -37,3 +37,19 @@ proptest.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Job Objects, so cancelling ends a process *tree* rather than one process.
+# Windows has no signals and no process groups to kill; a job is the only
+# handle the OS gives you on "this program and everything it started".
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_JobObjects",
+  # `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` — the limits struct carrying
+  # KILL_ON_JOB_CLOSE — lives behind this one.
+  "Win32_System_Threading",
+  # `CreateJobObjectW` takes a `SECURITY_ATTRIBUTES`, so the whole function is
+  # behind this feature — without it the import fails to resolve rather than
+  # failing to link, which is easy to misread as the symbol not existing.
+  "Win32_Security",
+] }
+

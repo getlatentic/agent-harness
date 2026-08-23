@@ -758,6 +758,16 @@ fn live_ollama_streams_a_real_completion() {
         "pull {model} first (`ollama pull {model}`)"
     );
 
+    // A dedicated empty directory, not the shared temp dir. `/tmp` on a CI
+    // runner is full of interesting-looking things, and a 0.5b model given a
+    // trivial prompt and a populated workspace goes exploring instead of
+    // answering: it asked to read `/tmp` — absolute, which the tools refuse by
+    // design, since a tool path is relative to the workspace — then retried the
+    // same call until it hit the turn limit, producing no text at all. Nothing
+    // to look at means nothing to be distracted by.
+    let workspace = std::env::temp_dir().join("agent-harness-live-ollama");
+    let _ = std::fs::create_dir_all(&workspace);
+
     let events: Arc<Mutex<Vec<RunEvent>>> = Arc::default();
     let sink = Arc::clone(&events);
     let done = Arc::new(AtomicBool::new(false));
@@ -766,8 +776,11 @@ fn live_ollama_streams_a_real_completion() {
         .start(
             RunRequest {
                 run_id: "live".to_owned(),
-                prompt: "Reply with the single word: pong".to_owned(),
-                cwd: Some(std::env::temp_dir()),
+                // Says not to use tools, because the smallest tool-capable
+                // models will otherwise reach for one on any prompt at all.
+                prompt: "Reply with the single word: pong. Do not use any tools."
+                    .to_owned(),
+                cwd: Some(workspace.clone()),
                 mode: RunMode::Ask,
                 tuning: RunTuning { model: Some(model.clone()), ..Default::default() },
                 resume: None,
@@ -807,6 +820,17 @@ fn live_ollama_streams_a_real_completion() {
             _ => None,
         })
         .collect();
-    assert!(!text.trim().is_empty(), "a live run must produce text, got {events:?}");
+    if text.trim().is_empty() {
+        // Name the likely cause rather than printing every event: a model that
+        // spent the run calling tools never got to an answer, and forty
+        // ToolStart/ToolEnd pairs bury that.
+        let tools = events.iter().filter(|e| matches!(e, RunEvent::ToolStart { .. })).count();
+        panic!(
+            "a live run must produce text; got none after {tools} tool call(s) \
+             across {} events — if that count is high the model looped instead \
+             of answering",
+            events.len()
+        );
+    }
     assert!(events.iter().any(|e| matches!(e, RunEvent::Exited { .. })), "must terminate");
 }

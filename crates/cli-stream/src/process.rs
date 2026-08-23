@@ -9,8 +9,11 @@
 //!
 //! Cancellation is the wrinkle: a run needs to be stoppable mid-stream
 //! when the user closes the tab or hits "stop". `ProcessHandle::cancel()`
-//! sends SIGTERM (with a SIGKILL fallback) and flips an atomic
-//! `cancelled` flag the reader threads use to short-circuit.
+//! sends SIGTERM to the child's process group (SIGKILL fallback) on unix and
+//! terminates its Job Object on Windows, then flips an atomic `cancelled` flag
+//! the reader threads use to short-circuit. The tree, not just the process:
+//! anything the child started inherited the pipe, so leaving it alive leaves
+//! the stream open.
 
 use crate::error::StreamError;
 use serde::Serialize;
@@ -227,9 +230,106 @@ impl Command {
 }
 
 
+/// Windows has no signals and no process groups, so `TerminateProcess` on the
+/// child leaves everything the child started running — holding the stdout
+/// handle it inherited, which keeps the stream open and means no `Exited` ever
+/// arrives. A Job Object is the OS's handle on "this program and everything it
+/// starts": a process created by a process already in a job joins that job, so
+/// assigning the direct child covers the tree beneath it.
+///
+/// Best-effort throughout. Every step can fail on a locked-down system, and a
+/// cancel that ends only the direct child is what this crate did before — worse
+/// than a tree kill, better than refusing to spawn.
+#[cfg(windows)]
+pub(crate) mod job {
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Child;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject, TerminateJobObject,
+        JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    /// An owned job handle. Closing it kills whatever is still inside, which is
+    /// the backstop for a child that outlives the handle without being
+    /// cancelled — the same orphan a crash would otherwise leave behind.
+    ///
+    /// `Debug` prints nothing useful about a raw handle, but `HandleInner`
+    /// derives it, so the field needs one.
+    pub(crate) struct Job(HANDLE);
+
+    impl std::fmt::Debug for Job {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Job(<handle>)")
+        }
+    }
+
+    // SAFETY: a job handle is just a kernel handle; the Win32 calls that take
+    // it are thread-safe, and nothing here holds interior state.
+    unsafe impl Send for Job {}
+    unsafe impl Sync for Job {}
+
+    impl Job {
+        /// Create a job whose members die when the last handle to it closes,
+        /// and put `child` in it. `None` if the OS refuses any step, in which
+        /// case cancelling falls back to ending the child alone.
+        pub(crate) fn containing(child: &Child) -> Option<Self> {
+            // SAFETY: a null name and null attributes are the documented way to
+            // create an unnamed job; the return is checked for null.
+            let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if handle.is_null() {
+                return None;
+            }
+            let job = Self(handle);
+
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION =
+                unsafe { std::mem::zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // SAFETY: `limits` is a correctly-sized, fully-initialised struct of
+            // the class named, and lives for the duration of the call.
+            let set = unsafe {
+                SetInformationJobObject(
+                    job.0,
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::addr_of!(limits).cast(),
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            };
+            if set == 0 {
+                return None;
+            }
+
+            // SAFETY: the handle comes from a live `Child` this call does not
+            // outlive, and the job handle is owned by `job`.
+            let assigned =
+                unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle() as HANDLE) };
+            (assigned != 0).then_some(job)
+        }
+
+        /// Kill every process in the job.
+        pub(crate) fn terminate(&self) {
+            // SAFETY: `self.0` is a live job handle owned by `self`.
+            unsafe { TerminateJobObject(self.0, 1) };
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            // SAFETY: owned handle, closed exactly once.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+}
+
 #[derive(Debug)]
 struct HandleInner {
     child: Mutex<Option<Child>>,
+    /// The job the child was put in, so cancelling can end the tree. `None`
+    /// when the OS refused, which degrades to ending the child alone.
+    #[cfg(windows)]
+    job: Option<job::Job>,
     /// The child's stdin, when it was piped. Taken from the `Child` at spawn so
     /// writing never has to lock the same mutex `cancel` uses.
     stdin: Mutex<Option<std::process::ChildStdin>>,
@@ -241,16 +341,16 @@ impl ProcessHandle {
     /// The CLI is supposed to flush a final result on SIGTERM but we
     /// don't trust it to do so forever.
     ///
-    /// # Platform behaviour
+    /// Ends the **whole tree**, not just the process named. A child that
+    /// starts its own children and exits would otherwise leave them holding
+    /// the stdout they inherited: the pipe never closes, so no
+    /// [`Event::Exited`] arrives and a caller waiting on the stream waits
+    /// forever.
     ///
-    /// This ends **the process it spawned**, not that process's descendants.
-    /// On unix the distinction rarely bites: signalling a shell that `exec`ed
-    /// its payload reaches the payload, because they are the same process. On
-    /// Windows cancelling is `TerminateProcess`, which has no notion of a
-    /// process tree — so a child that spawned its own children leaves them
-    /// running, and because they inherited the stdout handle, the stream stays
-    /// open and no [`Event::Exited`] arrives. Killing a tree there needs a Job
-    /// Object, which this does not yet create.
+    /// The child leads its own process group on unix (set at spawn) and is put
+    /// in a Job Object on Windows, so the signal or the terminate reaches
+    /// everything it started. Both are best-effort — if the OS refuses, this
+    /// falls back to ending the named process alone.
     pub fn cancel(&self) -> Result<(), StreamError> {
         self.inner.cancelled.store(true, Ordering::SeqCst);
         let mut guard = self
@@ -269,9 +369,14 @@ impl ProcessHandle {
         #[cfg(unix)]
         {
             let pid = child.id() as i32;
-            // SAFETY: pid is the child's PID owned by this Child; sending
-            // SIGTERM is well-defined.
-            unsafe { libc::kill(pid, libc::SIGTERM) };
+            // The *group*, not the process: the child leads its own group (set
+            // at spawn), so a negative pid reaches everything it started. A
+            // shell that backgrounds its work would otherwise survive as an
+            // orphan holding the pipe, and the stream would never close.
+            // SAFETY: `-pid` names the group this child leads; SIGTERM to a
+            // group is well-defined, and a group that has already exited is a
+            // harmless ESRCH.
+            unsafe { libc::kill(-pid, libc::SIGTERM) };
             // Command the SIGKILL fallback inline to avoid holding the mutex
             // while sleeping.
             let inner = Arc::clone(&self.inner);
@@ -279,12 +384,26 @@ impl ProcessHandle {
                 thread::sleep(Duration::from_millis(1500));
                 if let Ok(mut guard) = inner.child.lock() {
                     if let Some(child) = guard.as_mut() {
-                        let _ = child.kill();
+                        // The group again, for the same reason.
+                        // SAFETY: as above.
+                        unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
                     }
                 }
             });
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            // The job ends the whole tree at once. Without one — the OS refused
+            // to create or assign it — this is the old behaviour: the child
+            // dies and anything it started does not.
+            match &self.inner.job {
+                Some(job) => job.terminate(),
+                None => {
+                    let _ = child.kill();
+                }
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = child.kill();
         }
@@ -385,6 +504,15 @@ where
     for (key, value) in &env {
         command.env(key, value);
     }
+    // Its own process group, so cancelling can signal the group and reach
+    // whatever the child started. Without it a shell that backgrounds its work
+    // leaves that work running, holding the stdout it inherited — and the
+    // stream never closes.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child = command.spawn().map_err(|source| StreamError::Spawn {
         program: program.display().to_string(),
         source,
@@ -400,10 +528,19 @@ where
 
     // Taken now so `write_line` never contends with `cancel` for the child.
     let child_stdin = child.stdin.take();
+    // Before anything else runs: a process the child starts joins its parent's
+    // job automatically, so this covers the tree beneath it. The gap between
+    // `spawn` returning and this line is the one moment a grandchild could
+    // escape, which is why it is the next statement.
+    #[cfg(windows)]
+    let job = job::Job::containing(&child);
+
     let inner = Arc::new(HandleInner {
         child: Mutex::new(Some(child)),
         stdin: Mutex::new(child_stdin),
         cancelled: AtomicBool::new(false),
+        #[cfg(windows)]
+        job,
     });
     let handle = ProcessHandle {
         inner: Arc::clone(&inner),
@@ -780,6 +917,42 @@ mod tests {
         } else {
             ("sh", vec!["-c", "exec sleep 10"])
         }
+    }
+
+    /// The case that was silently broken: a child that starts its own child
+    /// and exits, leaving the grandchild holding the stdout it inherited. Kill
+    /// only the named process and that pipe stays open, so `Exited` never
+    /// arrives and a caller waiting on the stream waits forever.
+    ///
+    /// Unix needs the signal to reach the process *group*; Windows needs a Job
+    /// Object. Both are set up at spawn, so this asserts the same promise on
+    /// either platform.
+    #[cfg(unix)]
+    #[test]
+    fn cancel_reaches_a_child_the_child_started() {
+        let (cb, events, done) = collector();
+        // `sh` exits immediately; `sleep` inherits stdout and outlives it.
+        let handle = spawn_streaming(
+            Command::new("sh").run_id("t").args(["-c", "sleep 30 &"]),
+            cb,
+        )
+        .expect("spawn");
+
+        let canceller = handle.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let _ = canceller.cancel();
+        });
+
+        // Without the group signal the grandchild holds the pipe and this
+        // times out — which is exactly what it did before.
+        wait_done(&done, 6);
+        let events = events.lock().unwrap();
+        assert!(
+            matches!(events.last(), Some(Event::Exited { .. })),
+            "the stream must close once the tree is gone, got {:?}",
+            events.last()
+        );
     }
 
     #[test]

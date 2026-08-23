@@ -29,11 +29,18 @@ on all three platforms.
   git checked out and there was no `.gitattributes`, so the bytes differed by
   platform — a different token count, and a different key for providers that
   cache on the prefix. Line endings are normalised at the repo level.
-- **`cli-stream` cancellation on Windows** is documented rather than implied:
-  it ends the process it named, not that process's descendants, so a child that
-  spawned its own children leaves them holding the stdout handle and no
-  `Exited` arrives. Killing a tree there needs a Job Object, which is not yet
-  created.
+- **Cancelling now ends the process *tree*, on both platforms.** A child that
+  started its own children and exited left them holding the stdout they
+  inherited: the pipe never closed, so no `Exited` arrived and a caller waiting
+  on the stream waited forever. The child leads its own process group on unix
+  and is placed in a Job Object on Windows, so the signal or the terminate
+  reaches everything it started. Both best-effort — if the OS refuses, this is
+  the old behaviour rather than a failed spawn. This was never Windows-only:
+  the regression test hangs without the fix on unix too.
+- **`crates/bob-rs` removed.** It stopped being a workspace member when the bob
+  adapter was dropped, so it has not compiled or been tested since; the doc
+  comments in live code that still referred to `bob_rs::BobError` now describe
+  what actually produces those errors.
 - `CDLA-Permissive-2.0` is allowed — `webpki-roots`, Mozilla's CA bundle, which
   is data rather than code and only appears under `--all-features`.
 - `crossbeam-epoch` updated for RUSTSEC-2026-0204.
