@@ -205,12 +205,15 @@ fn compute_augmented_node_path() -> String {
 /// the real PATH survived — and the discovered PATH contains those same
 /// entries, so the test passed whether the guard worked or not.
 fn compose_augmented_path(process_path: Option<String>, discovered: String) -> String {
-    let mut parts: Vec<String> = Vec::new();
+    let mut entries: Vec<PathBuf> = Vec::new();
     if let Some(existing) = process_path.filter(|path| !path.is_empty()) {
-        parts.push(existing);
+        entries.extend(std::env::split_paths(&existing));
     }
-    parts.push(discovered);
-    keep_absolute_entries(&parts.join(":"))
+    entries.extend(std::env::split_paths(&discovered));
+    let joined = std::env::join_paths(entries)
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    keep_absolute_entries(&joined)
 }
 
 /// Keep only **absolute** PATH entries, dropping relative or empty ones (`.`,
@@ -220,10 +223,16 @@ fn compose_augmented_path(process_path: Option<String>, discovered: String) -> S
 /// (which resolves against that cwd) could run a planted `node`/`claude`. An
 /// empty entry is the classic implicit-cwd vector. Absolute dirs only.
 fn keep_absolute_entries(path: &str) -> String {
-    path.split(':')
-        .filter(|entry| entry.starts_with('/'))
-        .collect::<Vec<_>>()
-        .join(":")
+    // `split_paths` / `join_paths` and `Path::is_absolute`, not `:` and
+    // `starts_with('/')`: Windows separates with `;` and its entries begin
+    // `C:\`, so the unix forms shredded a real PATH into fragments, dropped
+    // every one as "not absolute", and left only the fallback — an augmented
+    // PATH made entirely of unix directories that machine does not have.
+    let absolute: Vec<PathBuf> =
+        std::env::split_paths(path).filter(|entry| entry.is_absolute()).collect();
+    std::env::join_paths(absolute)
+        .map(|joined| joined.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// Resolve PATH by asking the user's login + interactive shell — it sources
@@ -338,6 +347,13 @@ fn login_shell_path() -> Option<String> {
 /// Linuxbrew, snap, …) is what the login-shell query is for — and a missing
 /// dir is just skipped, so this is never worse than the bare launchd PATH.
 fn hardcoded_node_dirs() -> String {
+    // Every directory below is a unix convention, and the login-shell query
+    // this backs up is unix-only too. On Windows the process PATH is already
+    // the whole answer — there is no rc file a spawn misses — so guessing adds
+    // nothing, and once cost the real PATH entirely.
+    if cfg!(windows) {
+        return String::new();
+    }
     let mut parts: Vec<String> =
         vec!["/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_owned()];
     if let Ok(home) = std::env::var("HOME") {
@@ -420,8 +436,38 @@ mod tests {
         prop::collection::vec(path_entry(), 0..8).prop_map(|entries| entries.join(":"))
     }
 
-    fn entries(path: &str) -> Vec<&str> {
-        path.split(':').collect()
+    /// Split the way the platform joins — a literal `:` cuts a Windows
+    /// `C:\...` entry in half and asserts on the fragment.
+    fn entries(path: &str) -> Vec<String> {
+        std::env::split_paths(path).map(|e| e.to_string_lossy().into_owned()).collect()
+    }
+
+    /// The bug CI found, pinned on whichever platform runs it: a PATH is
+    /// composed with the platform's own separator, so a real one survives
+    /// instead of being shredded into fragments that all look relative.
+    #[test]
+    fn a_real_path_survives_composition() {
+        let (process_dir, discovered_dir) = if cfg!(windows) {
+            (r"C:\Windows\System32", r"C:\tools\bin")
+        } else {
+            ("/usr/bin", "/opt/tools/bin")
+        };
+        let join = |dir: &str| {
+            std::env::join_paths([dir]).expect("joinable").into_string().expect("utf-8")
+        };
+
+        let composed = compose_augmented_path(Some(join(process_dir)), join(discovered_dir));
+        let kept: Vec<PathBuf> = std::env::split_paths(&composed).collect();
+
+        assert_eq!(
+            kept.first(),
+            Some(&PathBuf::from(process_dir)),
+            "the process PATH must lead: {composed}"
+        );
+        assert!(
+            kept.contains(&PathBuf::from(discovered_dir)),
+            "the discovered PATH must survive: {composed}"
+        );
     }
 
     proptest! {
@@ -435,7 +481,7 @@ mod tests {
                 return Ok(());
             }
             for entry in entries(&kept) {
-                prop_assert!(entry.starts_with('/'), "{entry:?} is not absolute");
+                prop_assert!(Path::new(&entry).is_absolute(), "{entry:?} is not absolute");
             }
         }
 
@@ -447,7 +493,7 @@ mod tests {
         fn every_absolute_directory_survives(path in path_string()) {
             let kept = keep_absolute_entries(&path);
             let survivors = entries(&kept);
-            for entry in entries(&path).into_iter().filter(|entry| entry.starts_with('/')) {
+            for entry in entries(&path).into_iter().filter(|e| Path::new(e).is_absolute()) {
                 prop_assert!(survivors.contains(&entry), "dropped {entry:?}");
             }
         }
@@ -479,7 +525,7 @@ mod tests {
                 return Ok(());
             }
             for entry in entries(&combined) {
-                prop_assert!(entry.starts_with('/'), "{entry:?} is not absolute");
+                prop_assert!(Path::new(&entry).is_absolute(), "{entry:?} is not absolute");
             }
         }
 
