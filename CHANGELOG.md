@@ -7,6 +7,8 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-08-23
+
 Documentation only — no code changed.
 
 ### Fixed
