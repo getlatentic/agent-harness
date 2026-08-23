@@ -219,7 +219,7 @@ impl Harness for AcpHarness {
         };
         let output = crate::hidden_command(&self.command)
             .args(&mc.list_subcommand)
-            .env("PATH", crate::augmented_node_path())
+            .env("PATH", crate::augmented_path())
             .output()
             .map_err(|e| {
                 Error::spawn(format!(
@@ -257,7 +257,7 @@ fn models_from_listing(succeeded: bool, stdout: &str) -> Vec<ModelChoice> {
 fn probe_command(command: &str) -> bool {
     crate::hidden_command(command)
         .arg("--version")
-        .env("PATH", crate::augmented_node_path())
+        .env("PATH", crate::augmented_path())
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)

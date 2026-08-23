@@ -40,6 +40,15 @@ the redundancy `std::io::IoError` was renamed away from.
 | `HarnessCapabilities` | `Features`, via `Harness::features()` |
 | `HarnessReadiness` | `Readiness` |
 | `HarnessModel` | `ModelChoice` |
+| `augmented_node_path()` | `augmented_path()` |
+
+**`augmented_node_path` is `augmented_path`.** Nothing about it was ever
+node-specific: it resolves whatever program the caller is about to spawn and
+gives the child a `PATH` that finds the user's tooling. An MCP server launched
+over stdio goes through the same code to find `npx`, `uvx` or a container
+command — and the old name kept implying MCP had a node dependency it does not
+have. The module behind it is `program_path` rather than `node_cli` for the same
+reason.
 
 **Capabilities moved off `Info` onto their own method.**
 `.info().capabilities` was 14 of 27 uses, each building an id, a display name

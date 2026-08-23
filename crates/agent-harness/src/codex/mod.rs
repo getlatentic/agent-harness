@@ -207,7 +207,7 @@ impl Harness for CodexHarness {
 /// "npm — can go stale / Update to native" instead of a bare, ambiguous
 /// "Update". Reuses the shared resolve/classify in `crate::claude::resolve`.
 fn codex_resolved_details(command: &str) -> Value {
-    let path = crate::augmented_node_path();
+    let path = crate::augmented_path();
     let Some(resolved) = crate::claude::resolve::resolve_on_path(command, &path) else {
         return Value::Null;
     };
@@ -232,7 +232,7 @@ fn codex_resolved_details(command: &str) -> Value {
 fn probe_codex_signed_in(command: &str) -> bool {
     crate::hidden_command(command)
         .args(["login", "status"])
-        .env("PATH", crate::augmented_node_path())
+        .env("PATH", crate::augmented_path())
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)

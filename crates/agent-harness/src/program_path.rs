@@ -1,8 +1,12 @@
 //! Finding an agent's CLI, and the PATH it needs to run.
 //!
 //! None of this is about spawning or streaming — [`cli_stream`] does that, and
-//! takes the environment it is given. This is the part that only matters
-//! because the CLIs we drive are Node programs a user installed themselves.
+//! takes the environment it is given. This is the part that matters because
+//! everything we run is a program *the user* installed, wherever their tooling
+//! put it: an agent CLI, or the `npx` / `uvx` / container command behind an MCP
+//! server. Node is where it bites hardest, not the limit of what it serves —
+//! this module was called `node_cli` for that reason and the name kept
+//! suggesting MCP had a node dependency it does not have.
 //!
 //! A desktop app launched from Finder inherits the minimal launchd PATH
 //! (`/usr/bin:/bin:/usr/sbin:/sbin`), so an nvm-installed `node` is invisible
@@ -37,10 +41,10 @@ use cli_stream::hidden_command;
 ///
 /// Every adapter wrapping a CLI needs exactly this, and it is the probe that
 /// decides whether a harness reads as installed at all — so it lives once,
-/// beside [`hidden_command`] and [`augmented_node_path`], rather than being
+/// beside [`hidden_command`] and [`augmented_path`], rather than being
 /// copied per adapter and drifting.
 pub fn probe_version(program: &str) -> Option<String> {
-    let output = hidden_command(program).arg("--version").env("PATH", augmented_node_path()).output().ok()?;
+    let output = hidden_command(program).arg("--version").env("PATH", augmented_path()).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -48,8 +52,8 @@ pub fn probe_version(program: &str) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-fn augment_path_for_node(program: &Path) -> String {
-    prepend_program_dir(program, &augmented_node_path())
+fn augment_path_for_program(program: &Path) -> String {
+    prepend_program_dir(program, &augmented_path())
 }
 
 /// Resolve a bare program name (`bob`, `claude`) to its absolute path on the
@@ -72,7 +76,7 @@ pub fn resolve_program(program: PathBuf) -> PathBuf {
     if program.parent().is_some_and(|p| !p.as_os_str().is_empty()) {
         return program; // explicit path — caller's choice wins
     }
-    resolve_on_path(&program, &augmented_node_path()).unwrap_or(program)
+    resolve_on_path(&program, &augmented_path()).unwrap_or(program)
 }
 
 /// The first runnable file called `name` on `path_env`. Pure with respect to
@@ -184,12 +188,12 @@ fn prepend_program_dir(program: &Path, base_path: &str) -> String {
 /// `Command::new(name)`. Computed once and cached for the process — the
 /// (bounded) shell spawn happens at most once per launch, lazily on the first
 /// readiness/run/login, never at construction.
-pub fn augmented_node_path() -> String {
+pub fn augmented_path() -> String {
     static CACHED: OnceLock<String> = OnceLock::new();
-    CACHED.get_or_init(compute_augmented_node_path).clone()
+    CACHED.get_or_init(compute_augmented_path).clone()
 }
 
-fn compute_augmented_node_path() -> String {
+fn compute_augmented_path() -> String {
     // The user's real PATH (nvm/pnpm/volta/asdf/Homebrew) via their login
     // shell; a hardcoded best-effort list if that's unavailable.
     let discovered = login_shell_path().unwrap_or_else(hardcoded_node_dirs);
@@ -410,7 +414,7 @@ pub trait ResolveCli {
 impl ResolveCli for cli_stream::Command {
     fn resolve_cli(self) -> Self {
         let program = resolve_program(self.program);
-        let mut env = vec![("PATH".to_owned(), augment_path_for_node(&program))];
+        let mut env = vec![("PATH".to_owned(), augment_path_for_program(&program))];
         env.extend(self.env);
         cli_stream::Command { program, env, ..self }
     }
@@ -724,7 +728,7 @@ mod tests {
         // Augmenting must add, never replace: a PATH the host deliberately set
         // has to keep working, or a run that was fine becomes "not installed".
         let existing = std::env::var("PATH").expect("a test process has a PATH");
-        let augmented = compute_augmented_node_path();
+        let augmented = compute_augmented_path();
         // `split_paths` knows the platform's separator; `:` would split a
         // Windows `C:\...` entry in half and assert on the fragment.
         let first = std::env::split_paths(&existing)
@@ -783,11 +787,11 @@ mod tests {
     }
 
     #[test]
-    fn augmented_node_path_is_nonempty_and_resolves_system_bin() {
+    fn augmented_path_is_nonempty_and_usable() {
         // Exercises the cached public path once. `/usr/bin` is present whether
         // the shell query succeeds (real PATH) or falls back (hardcoded), and
         // is on the bare launchd PATH too — so this holds in any environment.
-        let path = augmented_node_path();
+        let path = augmented_path();
         assert!(!path.is_empty(), "an empty PATH finds nothing at all");
         // "A real directory to search", not "/usr/bin" — the claim is that the
         // augmented PATH is usable, and naming a unix directory asserted the

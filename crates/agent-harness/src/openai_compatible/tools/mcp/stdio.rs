@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 
 use cli_stream::{Command, Event, ProcessHandle, Stderr, Stdin};
 
-use crate::node_cli::ResolveCli;
+use crate::program_path::ResolveCli;
 
 use super::client::McpConnection;
 

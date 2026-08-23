@@ -220,7 +220,7 @@ impl Harness for ClaudeHarness {
 fn probe_claude_signed_in(command: &str) -> bool {
     let Ok(output) = crate::hidden_command(command)
         .args(["auth", "status"])
-        .env("PATH", crate::augmented_node_path())
+        .env("PATH", crate::augmented_path())
         .output()
     else {
         return false;
@@ -243,7 +243,7 @@ fn probe_claude_signed_in(command: &str) -> bool {
 /// `--version` (e.g. a PATH entry the resolver can't read) — the host renders
 /// version + status regardless.
 fn resolved_details(command: &str) -> Value {
-    let path = crate::augmented_node_path();
+    let path = crate::augmented_path();
     let Some(resolved) = resolve::resolve_on_path(command, &path) else {
         return Value::Null;
     };

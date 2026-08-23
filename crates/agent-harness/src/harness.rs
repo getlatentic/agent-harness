@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::events::RunEvent;
 use cli_stream::{Command, Event, InstallEvent, ProcessHandle};
-use crate::node_cli::ResolveCli;
+use crate::program_path::ResolveCli;
 
 // --- Streaming callbacks --------------------------------------------
 

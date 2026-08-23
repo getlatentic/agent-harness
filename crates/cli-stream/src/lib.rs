@@ -57,7 +57,7 @@
 //! A deliberate *leaf*: it depends on nothing of ours, so anything driving a
 //! CLI can use it. Finding a CLI a user installed — resolving a bare name,
 //! locating the `node` it was installed beside — is a different question, and
-//! lives with the caller that needs it (`agent_harness::node_cli`).
+//! lives with the caller that needs it (`agent_harness::program_path`).
 
 pub mod error;
 pub mod install;
