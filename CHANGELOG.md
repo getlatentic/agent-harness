@@ -7,7 +7,49 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+Documentation only — no code changed.
+
+### Fixed
+
+- **The install snippets pinned `0.4`.** Following the README gave the version
+  before every type was renamed.
+- **The OpenRouter example named `api_key_env`**, a field that was deliberately
+  removed: `api_key`, `api_key_env` and `requires_api_key` collapsed into one
+  `ApiKey`, because three fields could represent eight states and only four
+  were real. Copying that block would not compile. The same phantom survived in
+  two example headers and a test's prose.
+- **`cli-stream`'s README claimed `augmented_node_path()` as its own.** That
+  function belongs to `agent-harness`, under a name that no longer exists — and
+  the crate's module docs say the opposite, that the environment is the
+  caller's. `spawn_streaming` carried the same claim in its own docs. Its
+  cancel bullet now describes ending the tree rather than one process.
+- **The llama.cpp example said `readiness()` cannot probe a generic endpoint**
+  and that the first run is what tells you the server is down. `OpenAiModels`
+  changed that in 0.5.2; the example now uses `with_openai_models()`, which is
+  the case it was always about — a local server whose loaded model a config
+  file cannot know.
+
+### Added
+
+- `features()` in the trait summary, and why identity and ability are asked
+  separately; `Listing` from `catalog()`; and `with_openai_models()`.
+
 ## [0.5.2] - 2026-08-23
+
+### Fixed
+
+- **Cancelling now ends the process *tree*, on both platforms.** A child that
+  started its own children and exited left them holding the stdout they
+  inherited: the pipe never closed, so no `Exited` arrived and a caller waiting
+  on the stream waited forever. The child leads its own process group on unix
+  and is placed in a Job Object on Windows, so the signal or the terminate
+  reaches everything it started. Both best-effort — if the OS refuses, this is
+  the old behaviour rather than a failed spawn. This was never Windows-only:
+  the regression test hangs without the fix on unix too.
+- **`crates/bob-rs` removed.** It stopped being a workspace member when the bob
+  adapter was dropped, so it has not compiled or been tested since; the doc
+  comments in live code that still referred to `bob_rs::BobError` now describe
+  what actually produces those errors.
 
 ## [0.5.1] - 2026-08-23
 
@@ -31,18 +73,6 @@ on all three platforms.
   git checked out and there was no `.gitattributes`, so the bytes differed by
   platform — a different token count, and a different key for providers that
   cache on the prefix. Line endings are normalised at the repo level.
-- **Cancelling now ends the process *tree*, on both platforms.** A child that
-  started its own children and exited left them holding the stdout they
-  inherited: the pipe never closed, so no `Exited` arrived and a caller waiting
-  on the stream waited forever. The child leads its own process group on unix
-  and is placed in a Job Object on Windows, so the signal or the terminate
-  reaches everything it started. Both best-effort — if the OS refuses, this is
-  the old behaviour rather than a failed spawn. This was never Windows-only:
-  the regression test hangs without the fix on unix too.
-- **`crates/bob-rs` removed.** It stopped being a workspace member when the bob
-  adapter was dropped, so it has not compiled or been tested since; the doc
-  comments in live code that still referred to `bob_rs::BobError` now describe
-  what actually produces those errors.
 - `CDLA-Permissive-2.0` is allowed — `webpki-roots`, Mozilla's CA bundle, which
   is data rather than code and only appears under `--all-features`.
 - `crossbeam-epoch` updated for RUSTSEC-2026-0204.
