@@ -7,6 +7,8 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-23
+
 `agent-harness` 0.5.1 and `cli-stream` 0.4.1 — **use these, not 0.5.0**, which
 is yanked. It was published before its own CI finished and never passed on
 Windows; nothing below changes what the release is about, only whether it works
