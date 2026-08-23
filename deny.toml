@@ -21,6 +21,12 @@ allow = [
 ]
 # Don't fail the whole check over a confidence threshold on an odd license file.
 confidence-threshold = 0.8
+# The allow-list is the set of licences this project accepts, not a description
+# of the current tree — a dependency dropping the only ISC crate must not fail
+# the build. Stated explicitly because the default severity for this has moved
+# between cargo-deny releases, and CI pins a different version to the one a
+# developer has installed: the check passed locally and failed on the runner.
+unused-allowed-license = "allow"
 
 [bans]
 # Duplicate versions of one crate are a smell worth seeing, not a hard fail.

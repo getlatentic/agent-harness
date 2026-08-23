@@ -316,6 +316,7 @@ fn extra_args_sets(extra_args: &[String], flag: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::events::RunEvent;
     use crate::ReasoningEffort;
 

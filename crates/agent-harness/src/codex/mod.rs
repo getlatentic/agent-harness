@@ -301,6 +301,7 @@ fn build_codex_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::events::RunEvent;
 
     /// A stand-in `codex` that answers the three ways the adapter invokes it:
