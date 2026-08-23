@@ -7,6 +7,8 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-23
+
 `agent-harness` 0.5.0 and `cli-stream` 0.4.0.
 
 Everything below ships together: a 0.5.0 was prepared in August but never
