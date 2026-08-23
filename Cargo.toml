@@ -20,7 +20,7 @@ members = ["crates/cli-stream", "crates/agent-harness"]
 # `version` here (via `version.workspace = true`); cli-stream versions
 # independently, pinning its own `version` in its manifest rather than this line.
 [workspace.package]
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 rust-version = "1.74"
 license = "MIT OR Apache-2.0"
@@ -30,7 +30,7 @@ repository = "https://github.com/getlatentic/agent-harness"
 # agent-harness depends on the cli-stream `0.3` line — it versions independently
 # of agent-harness's 0.4.x and bumps only when it actually changes.
 [workspace.dependencies]
-cli-stream = { path = "crates/cli-stream", version = "0.4.1" }
+cli-stream = { path = "crates/cli-stream", version = "0.4.2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Typed tool-parameter schemas for `openai-compatible`: derive `JsonSchema` on a
