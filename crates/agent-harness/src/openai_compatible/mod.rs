@@ -39,6 +39,7 @@ mod chat;
 mod instructions;
 pub use instructions::InstructionSources;
 mod ollama;
+mod openai_models;
 mod profile;
 pub use profile::{ModelFacts, PromptProfile, COMPACT_AT_OR_BELOW_PARAMS_B, COMPACT_AT_OR_BELOW_TOKENS};
 mod run;
@@ -85,6 +86,11 @@ enum Discovery {
     /// The models.dev catalog filtered to a provider id — a cloud endpoint that
     /// proxies a known provider (`"anthropic"`, `"openai"`, …).
     ModelsDev(String),
+    /// Query the endpoint's own `/v1/models` — the OpenAI-standard list, which
+    /// is the right default for a server nobody has written an adapter for.
+    /// `fallback` is offered when the endpoint does not serve it, so a picker
+    /// still shows the model the host was configured with.
+    OpenAiModels { fallback: Vec<ModelChoice> },
 }
 
 /// A named subagent the `task` tool can spawn (its own role prompt + optional
@@ -453,6 +459,23 @@ impl OpenHarness {
         self
     }
 
+    /// List models by asking the endpoint, via the OpenAI-standard
+    /// `/v1/models`. The right mode for an endpoint configured at runtime — a
+    /// local LM Studio, a llama.cpp server, a gateway — where no adapter knows
+    /// the catalog up front.
+    ///
+    /// Any models already declared become the fallback: a server that does not
+    /// serve `/v1/models` still offers what it was configured with, so the
+    /// picker degrades to today's behaviour instead of to nothing.
+    pub fn with_openai_models(mut self) -> Self {
+        let fallback = match std::mem::replace(&mut self.discovery, Discovery::Static(Vec::new())) {
+            Discovery::Static(models) => models,
+            _ => Vec::new(),
+        };
+        self.discovery = Discovery::OpenAiModels { fallback };
+        self
+    }
+
     /// Guard the model-management operations: only the Ollama discovery mode
     /// manages models locally. Returns the same "unsupported" error the trait
     /// defaults give, so a non-Ollama instance reports cleanly instead of
@@ -460,7 +483,9 @@ impl OpenHarness {
     fn require_ollama_management(&self) -> Result<(), Error> {
         match &self.discovery {
             Discovery::OllamaTags => Ok(()),
-            Discovery::Static(_) | Discovery::ModelsDev(_) => Err(Error::Other(format!(
+            Discovery::Static(_)
+            | Discovery::ModelsDev(_)
+            | Discovery::OpenAiModels { .. } => Err(Error::Other(format!(
                 "{} does not support managing models.",
                 self.display_name
             ))),
@@ -496,7 +521,7 @@ impl OpenHarness {
             // worse — so it is worth one cheap call. A hosted endpoint is not
             // probed: nothing there answers quickly, and models.dev already
             // carries the limits for those.
-            Discovery::Static(_) | Discovery::ModelsDev(_) => {
+            Discovery::Static(_) | Discovery::ModelsDev(_) | Discovery::OpenAiModels { .. } => {
                 let window = self.context_tokens.or_else(|| {
                     if profile::is_local_endpoint(&self.base_url) {
                         local_server_context(&self.base_url)
@@ -641,7 +666,11 @@ impl Harness for OpenHarness {
             // endpoint needs nothing. Readiness reports reachability either way.
             install_hint: match self.discovery {
                 Discovery::OllamaTags => Some(InstallHint::url("https://ollama.com/download")),
-                Discovery::Static(_) | Discovery::ModelsDev(_) => None,
+                // Configured at runtime by whoever added it — there is nowhere
+                // to send them to get it.
+                Discovery::Static(_)
+                | Discovery::ModelsDev(_)
+                | Discovery::OpenAiModels { .. } => None,
             },
         }
     }
@@ -654,7 +683,9 @@ impl Harness for OpenHarness {
             models: match &self.discovery {
                 Discovery::Static(m) => m.clone(),
                 // Dynamic — surfaced live via list_models().
-                Discovery::OllamaTags | Discovery::ModelsDev(_) => Vec::new(),
+                Discovery::OllamaTags
+                | Discovery::ModelsDev(_)
+                | Discovery::OpenAiModels { .. } => Vec::new(),
             },
             custom_model: true,
             max_turns: true,
@@ -687,6 +718,32 @@ impl Harness for OpenHarness {
                     )),
                 ),
             },
+            // An endpoint configured at runtime. A key it needs and lacks is
+            // the first answer; after that, a *local* server is judged by
+            // whether it answers, exactly as Ollama is — "ready" for a
+            // llama.cpp that is not running would fail at the first message,
+            // which is the one place the user cannot act on it. A hosted one is
+            // not probed: nothing there answers quickly enough to sit in a
+            // readiness call.
+            Discovery::OpenAiModels { .. } => {
+                if self.api_key.is_needed() && self.api_key.resolve().is_none() {
+                    base(false, Some(format!("Add an API key for {}.", self.display_name)))
+                } else if !profile::is_local_endpoint(&self.base_url) {
+                    base(true, None)
+                } else {
+                    match openai_models::list_models(&self.base_url, self.api_key.resolve().as_deref())
+                    {
+                        Ok(_) => base(true, None),
+                        Err(e) => base(
+                            false,
+                            Some(format!(
+                                "{} is not reachable at {} — is it running? ({e})",
+                                self.display_name, self.base_url
+                            )),
+                        ),
+                    }
+                }
+            }
             // A cloud endpoint (static list or models.dev catalog) is ready once
             // its API key (if any) is present.
             Discovery::Static(_) | Discovery::ModelsDev(_) => {
@@ -788,6 +845,14 @@ impl Harness for OpenHarness {
             Discovery::OllamaTags => ollama::list_tags(&self.base_url).map_err(Error::Other),
             Discovery::Static(_) => Ok(self.features().models),
             Discovery::ModelsDev(provider) => Ok(crate::models_dev::provider_models(provider)),
+            // A picker is better served by the configured model than by an
+            // error: the endpoint being unreachable is what `readiness` is for,
+            // and reporting it twice would make an offline server look broken
+            // in a place the user cannot act on.
+            Discovery::OpenAiModels { fallback } => {
+                Ok(openai_models::list_models(&self.base_url, self.api_key.resolve().as_deref())
+                    .unwrap_or_else(|_| fallback.clone()))
+            }
         }
     }
 
@@ -798,7 +863,11 @@ impl Harness for OpenHarness {
     fn model_management(&self) -> Option<ModelManagement> {
         match &self.discovery {
             Discovery::OllamaTags => Some(ModelManagement { base_url: self.base_url.clone() }),
-            Discovery::Static(_) | Discovery::ModelsDev(_) => None,
+            // `/v1/models` lists; it does not install or delete. Pulling a model
+            // is Ollama's own API, so a generic endpoint gets no manager.
+            Discovery::Static(_)
+            | Discovery::ModelsDev(_)
+            | Discovery::OpenAiModels { .. } => None,
         }
     }
 
@@ -825,6 +894,44 @@ impl Harness for OpenHarness {
 
 #[cfg(test)]
 mod tests {
+
+    /// The builder promotes any declared models to the fallback, so an endpoint
+    /// that does not serve `/v1/models` still offers what it was configured
+    /// with rather than an empty picker.
+    #[test]
+    fn declared_models_become_the_discovery_fallback() {
+        let harness = OpenHarness::custom(OpenHarnessConfig {
+            id: "custom:x".to_owned(),
+            display_name: "LM Studio".to_owned(),
+            // Unroutable: discovery must fail so the fallback is what shows.
+            base_url: "http://127.0.0.1:9".to_owned(),
+            models: vec![ModelChoice { value: "qwen3:8b".into(), label: "qwen3:8b".into() }],
+            ..Default::default()
+        })
+        .with_openai_models();
+
+        let models = harness.list_models().expect("a failed probe must not be an error");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].value, "qwen3:8b");
+    }
+
+    /// A local endpoint that answers nothing is not ready — reporting it ready
+    /// would move the failure to the user's first message.
+    #[test]
+    fn an_unreachable_local_endpoint_is_not_ready() {
+        let harness = OpenHarness::custom(OpenHarnessConfig {
+            id: "custom:x".to_owned(),
+            display_name: "LM Studio".to_owned(),
+            base_url: "http://127.0.0.1:9".to_owned(),
+            ..Default::default()
+        })
+        .with_openai_models();
+
+        let readiness = harness.readiness();
+        assert!(!readiness.ready);
+        assert!(readiness.error.is_some_and(|e| e.contains("not reachable")));
+    }
+
     use super::*;
 
     #[test]
