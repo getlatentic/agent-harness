@@ -38,8 +38,13 @@ jobs:
       # openai-compatible), not just the default CLI adapters.
       - name: Build
         run: cargo build --workspace --all-features --verbose
+      # `--no-fail-fast`: without it cargo stops at the first test binary that
+      # fails, so a broken crate hides every crate behind it. Fixing five
+      # failures in one crate then revealed two in the next, which had been
+      # sitting there unrun the whole time — each round costing a full CI cycle
+      # to learn one layer. One run should report everything that is wrong.
       - name: Test
-        run: cargo test --workspace --all-features --verbose
+        run: cargo test --workspace --all-features --verbose --no-fail-fast
 
   # The fake-Ollama tests in `tests/ollama_route.rs` run on all three platforms
   # in the matrix above and pin our side of the contract. This job covers what a

@@ -240,6 +240,17 @@ impl ProcessHandle {
     /// SIGTERM the process, then SIGKILL after 1.5s if it's still alive.
     /// The CLI is supposed to flush a final result on SIGTERM but we
     /// don't trust it to do so forever.
+    ///
+    /// # Platform behaviour
+    ///
+    /// This ends **the process it spawned**, not that process's descendants.
+    /// On unix the distinction rarely bites: signalling a shell that `exec`ed
+    /// its payload reaches the payload, because they are the same process. On
+    /// Windows cancelling is `TerminateProcess`, which has no notion of a
+    /// process tree — so a child that spawned its own children leaves them
+    /// running, and because they inherited the stdout handle, the stream stays
+    /// open and no [`Event::Exited`] arrives. Killing a tree there needs a Job
+    /// Object, which this does not yet create.
     pub fn cancel(&self) -> Result<(), StreamError> {
         self.inner.cancelled.store(true, Ordering::SeqCst);
         let mut guard = self
@@ -664,9 +675,22 @@ mod tests {
         events.clone()
     }
 
+    /// Emit `alpha` and `beta` on separate lines. `printf` is not a program on
+    /// Windows, and the shell there does not read `%s\n` as a format — the
+    /// child printed `alphabeta` and the engine faithfully reported the one
+    /// line it was given.
+    fn two_lines() -> (&'static str, Vec<&'static str>) {
+        if cfg!(windows) {
+            ("cmd", vec!["/C", "echo alpha&echo beta"])
+        } else {
+            ("printf", vec!["%s\n", "alpha", "beta"])
+        }
+    }
+
     #[test]
     fn streams_stdout_lines_then_exits_zero() {
-        let events = run("printf", &["%s\n", "alpha", "beta"]);
+        let (program, args) = two_lines();
+        let events = run(program, &args);
         // Started leads, Exited(0, not cancelled) closes.
         assert!(matches!(events.first(), Some(Event::Started { .. })));
         assert!(matches!(
@@ -742,16 +766,30 @@ mod tests {
         )));
     }
 
+    /// A single process that runs for ~10s and holds no children.
+    ///
+    /// The distinction matters to what cancelling can promise. On unix `exec`
+    /// makes the shell *become* `sleep`, so there is one process and SIGTERM
+    /// reaches it. Windows has no `exec` and cancelling is `TerminateProcess`,
+    /// which ends the process it names and not its descendants — so a shell
+    /// wrapper there would leave the sleeper running, holding the pipe open,
+    /// and no `Exited` would ever arrive. `ping` is the sleeper itself.
+    fn long_sleeper() -> (&'static str, Vec<&'static str>) {
+        if cfg!(windows) {
+            ("ping", vec!["-n", "11", "127.0.0.1"])
+        } else {
+            ("sh", vec!["-c", "exec sleep 10"])
+        }
+    }
+
     #[test]
     fn cancel_promptly_terminates_the_run_and_flags_it() {
         // A 10s sleeper we cancel ~immediately; a working engine must kill it
-        // far sooner than 10s. `exec` so the process *is* sleep (no orphan).
+        // far sooner than 10s.
         let (cb, events, done) = collector();
-        let handle = spawn_streaming(
-            Command::new("sh").run_id("t").args(["-c", "exec sleep 10"]),
-            cb,
-        )
-        .expect("spawn");
+        let (program, args) = long_sleeper();
+        let handle =
+            spawn_streaming(Command::new(program).run_id("t").args(args), cb).expect("spawn");
 
         // cancel() may block until the child is reaped, so fire it off-thread.
         let canceller = handle.clone();
