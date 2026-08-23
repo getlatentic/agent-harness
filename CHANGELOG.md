@@ -157,6 +157,20 @@ Only relevant if you read the files yourself.
 
 ### Added
 
+- **`Discovery::OpenAiModels`** — list models by asking the endpoint, via the
+  `/v1/models` every OpenAI-compatible server is expected to serve. The three
+  existing strategies all needed the catalog known up front (Ollama's native
+  `/api/tags`, a models.dev provider id, or a static list), so a host pointing
+  at an endpoint configured at runtime — an LM Studio, a llama.cpp server, a
+  gateway — had to declare the models itself, which in practice means a person
+  typing one model name from memory. Select it with
+  `OpenHarnessConfig::with_openai_models()`; any models already declared become
+  the fallback, so a server that does not serve the route still offers what it
+  was configured with. A failed probe returns that fallback rather than an
+  error — whether the endpoint is up is `readiness`'s question, and answering it
+  twice puts the failure somewhere the caller cannot act on it. Readiness for
+  this mode judges a *local* endpoint by whether it answers, as Ollama already
+  is; a hosted one is still judged by its key.
 - **`PromptProfile`** — the tool surface and base prompt now fit the model.
   `Auto` reads `ModelFacts` (context window and parameter count) and picks
   `Compact` for a small window *or* a small model: core tools only, and a
