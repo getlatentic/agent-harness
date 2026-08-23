@@ -7,7 +7,41 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
-## [0.5.0] - 2026-08-23
+`agent-harness` 0.5.1 and `cli-stream` 0.4.1 — **use these, not 0.5.0**, which
+is yanked. It was published before its own CI finished and never passed on
+Windows; nothing below changes what the release is about, only whether it works
+on all three platforms.
+
+### Fixed
+
+- **The augmented `PATH` was unix-only, and Windows lost its real one.** It was
+  built by joining with `":"` and keeping entries that start with `"/"`. On
+  Windows that takes a real `C:\Windows\System32;...`, cuts it at every drive
+  letter, and discards each fragment as relative — leaving only the unix
+  fallback list, so every spawn and readiness probe searched directories that
+  machine does not have. Now `std::env::split_paths` / `join_paths` and
+  `Path::is_absolute`. The fallback returns nothing on Windows rather than unix
+  directories: its contents are Homebrew, `~/.local/bin` and nvm's layout, and
+  the login-shell query it backs up is POSIX-only.
+- **The system prompt arrived CRLF on Windows.** `include_str!` embeds whatever
+  git checked out and there was no `.gitattributes`, so the bytes differed by
+  platform — a different token count, and a different key for providers that
+  cache on the prefix. Line endings are normalised at the repo level.
+- **`cli-stream` cancellation on Windows** is documented rather than implied:
+  it ends the process it named, not that process's descendants, so a child that
+  spawned its own children leaves them holding the stdout handle and no
+  `Exited` arrives. Killing a tree there needs a Job Object, which is not yet
+  created.
+- `CDLA-Permissive-2.0` is allowed — `webpki-roots`, Mozilla's CA bundle, which
+  is data rather than code and only appears under `--all-features`.
+- `crossbeam-epoch` updated for RUSTSEC-2026-0204.
+
+### Changed
+
+- **`node_cli` is `program_path`, and `augmented_node_path()` is
+  `augmented_path()`** — see the migration note below.
+
+## [0.5.0] - 2026-08-23 [YANKED]
 
 `agent-harness` 0.5.0 and `cli-stream` 0.4.0.
 
