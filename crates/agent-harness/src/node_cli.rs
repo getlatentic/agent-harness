@@ -570,6 +570,10 @@ mod tests {
         assert_eq!(probe_version("definitely-not-a-real-binary-xyz"), None, "and neither is an absent one");
     }
 
+    // The fallback's contents are unix conventions — Homebrew, `~/.local/bin`,
+    // nvm's layout — and it is empty on Windows by design, so these assert
+    // about a platform rather than about behaviour.
+    #[cfg(unix)]
     #[test]
     fn hardcoded_fallback_includes_macos_defaults() {
         // The fallback (used when the login-shell query is unavailable) must
@@ -620,13 +624,22 @@ mod tests {
         // Relative (`node_modules/.bin`, `.`) and empty entries — which resolve
         // against the spawn cwd (the user's workspace) — are dropped; absolute
         // dirs survive in order.
-        assert_eq!(
-            keep_absolute_entries("/opt/homebrew/bin:node_modules/.bin:/usr/bin:.::/bin"),
-            "/opt/homebrew/bin:/usr/bin:/bin"
-        );
-        assert_eq!(keep_absolute_entries("/usr/bin"), "/usr/bin");
+        // Built with the platform's own separator: the filter is the security
+        // boundary, so it has to be asserted on Windows too, and a literal `:`
+        // there splits `C:\...` into a fragment that fails for the wrong
+        // reason.
+        let (a, b, c) = if cfg!(windows) {
+            (r"C:\tools\bin", r"C:\Windows\System32", r"C:\Windows")
+        } else {
+            ("/opt/homebrew/bin", "/usr/bin", "/bin")
+        };
+        let mixed = [a, "node_modules/.bin", b, ".", "", c].join(&sep().to_string());
+        let expected = [a, b, c].join(&sep().to_string());
+        assert_eq!(keep_absolute_entries(&mixed), expected);
+        assert_eq!(keep_absolute_entries(b), b);
         // All-relative → empty (caller still has the process PATH ahead of it).
-        assert_eq!(keep_absolute_entries(".:rel:"), "");
+        let relative_only = [".", "rel", ""].join(&sep().to_string());
+        assert_eq!(keep_absolute_entries(&relative_only), "");
     }
 
     #[test]
@@ -727,19 +740,32 @@ mod tests {
         // searched before anything we discovered, or we override a deliberate
         // choice. Asserted against directories this process does not have, so
         // it cannot pass because the real PATH happened to contain them.
+        let (host, found) = if cfg!(windows) {
+            (r"C:\host\bin", r"C:\found\bin")
+        } else {
+            ("/host/bin", "/found/bin")
+        };
         assert_eq!(
-            compose_augmented_path(Some("/host/bin".to_owned()), "/found/bin".to_owned()),
-            "/host/bin:/found/bin",
+            compose_augmented_path(Some(host.to_owned()), found.to_owned()),
+            [host, found].join(&sep().to_string()),
         );
         // Unset and empty both mean "nothing to keep" — and must not leave an
         // empty entry behind, which is the implicit-cwd vector.
-        assert_eq!(compose_augmented_path(None, "/found/bin".to_owned()), "/found/bin");
-        assert_eq!(
-            compose_augmented_path(Some(String::new()), "/found/bin".to_owned()),
-            "/found/bin",
-        );
+        assert_eq!(compose_augmented_path(None, found.to_owned()), found);
+        assert_eq!(compose_augmented_path(Some(String::new()), found.to_owned()), found);
     }
 
+    /// The PATH *list* separator, which `std::path::MAIN_SEPARATOR` is not —
+    /// that one separates components within a single path.
+    fn sep() -> char {
+        if cfg!(windows) {
+            ';'
+        } else {
+            ':'
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn the_fallback_looks_where_agent_clis_are_actually_installed() {
         // Used when the login shell cannot be asked. Missing the home-relative
@@ -762,8 +788,13 @@ mod tests {
         // the shell query succeeds (real PATH) or falls back (hardcoded), and
         // is on the bare launchd PATH too — so this holds in any environment.
         let path = augmented_node_path();
-        assert!(!path.is_empty());
-        assert!(path.contains("/usr/bin"), "system bin must always resolve");
+        assert!(!path.is_empty(), "an empty PATH finds nothing at all");
+        // "A real directory to search", not "/usr/bin" — the claim is that the
+        // augmented PATH is usable, and naming a unix directory asserted the
+        // platform instead. On Windows the process PATH is the whole answer,
+        // and it must survive composition rather than being shredded.
+        let usable = std::env::split_paths(&path).any(|entry| entry.is_dir());
+        assert!(usable, "no entry of the augmented PATH is a real directory: {path}");
     }
 
     #[test]
