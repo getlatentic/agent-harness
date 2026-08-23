@@ -43,13 +43,19 @@ let handle = spawn_streaming(
 - **`ProcessHandle::cancel()`** — SIGTERM, then SIGKILL after a grace period.
   Polls `try_wait` (no blocking `wait` under a lock), so it terminates a
   *running* child promptly, not just on its next line of output.
-- **`augmented_node_path()`** — resolves the user's real `PATH` from their login
-  shell (cached once, with a hardcoded fallback), so a Finder-launched `.app`
-  finds `node` and other CLIs instead of mis-reporting them as "not installed".
-- **`InstallEvent`** — a sibling event shape for streamed install/setup output.
+- **Cancelling ends the tree.** A child that starts its own children and exits
+  would otherwise leave them holding the stdout they inherited: the pipe never
+  closes, so no `Exited` arrives and a caller waiting on the stream waits
+  forever. The child leads its own process group on unix and is placed in a Job
+  Object on Windows, so the signal or the terminate reaches everything it
+  started.
+- **`InstallEvent`** — a sibling event shape for streamed install/setup output,
+  for hosts that run their own setup steps.
 
-Cross-platform: cancel uses SIGTERM/SIGKILL on Unix and `TerminateProcess` on
-Windows.
+The environment is the caller's: this spawns what it is told to spawn, with the
+`PATH` it is given. Finding a CLI a user installed — resolving a bare name,
+locating the runtime it was installed under — is a different question, and
+`agent-harness` answers it.
 
 ## License
 

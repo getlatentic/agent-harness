@@ -458,10 +458,10 @@ impl ProcessHandle {
 ///
 /// Pipes stdout/stderr line-by-line through `callback` using the raw
 /// [`Event`] vocabulary (Started / Stdout / Stderr / Error /
-/// Exited). `env` supplies per-harness secrets (each harness's API-key
-/// var, or none for self-authenticating CLIs). PATH is augmented so
-/// Node-based CLIs find `node`. Returns a [`ProcessHandle`] for
-/// cancellation.
+/// Exited). `env` is applied over the inherited environment — secrets, or a
+/// `PATH` the caller resolved. This crate does not augment `PATH` itself;
+/// knowing where a user's toolchain lives belongs to whoever is driving the
+/// CLI. Returns a [`ProcessHandle`] for cancellation.
 ///
 /// `callback` is invoked from three threads (stdout reader, stderr
 /// reader, exit watcher); the `Clone` bound lets us hand a copy to each.

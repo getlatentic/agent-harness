@@ -5,7 +5,7 @@
 //! provider takes: DeepSeek, OpenRouter, vLLM, LM Studio, llama-server.
 //!
 //! These providers are *configuration*, not code: each is an `OpenHarness` with
-//! a different `base_url` + `api_key_env`. So one parameterised test covers all
+//! a different `base_url` + `api_key`. So one parameterised test covers all
 //! of them, and adding a provider means adding a row — not an adapter.
 //!
 //! Ignored by default: each run costs real tokens and needs a key in the

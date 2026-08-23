@@ -22,7 +22,7 @@ fn main() -> Result<(), Error> {
     //   OpenHarness::custom(OpenHarnessConfig {
     //       id: "openrouter".into(), display_name: "OpenRouter".into(),
     //       base_url: "https://openrouter.ai/api".into(),
-    //       api_key_env: Some("OPENROUTER_API_KEY".into()), ..Default::default() })
+    //       api_key: ApiKey::Env("OPENROUTER_API_KEY".into()), ..Default::default() })
     let model = OpenHarness::ollama();
 
     let readiness = model.readiness();

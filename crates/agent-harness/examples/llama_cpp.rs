@@ -6,15 +6,15 @@
 //! ```
 //!
 //! `llama-server` serves the OpenAI chat API, so it needs no adapter — only a
-//! `base_url`. It takes no API key, which is what `api_key_env: None` means.
+//! `base_url`. It takes no API key, which is what `ApiKey::NotNeeded` means.
 //!
 //! Two notes for local servers. Start `llama-server` with `--jinja` or it will
 //! not emit tool calls, and the agent loop needs them. And llama.cpp serves one
 //! model per process, so the model id is whatever that process loaded; the name
 //! below is only a label.
 
-use harness::{ApiKey, 
-    Harness, Error, OpenHarness, OpenHarnessConfig, RunEvent, RunRequest, RunTuning,
+use harness::{
+    ApiKey, Error, Harness, OpenHarness, OpenHarnessConfig, RunEvent, RunRequest, RunTuning,
 };
 
 fn main() -> Result<(), Error> {
@@ -41,14 +41,17 @@ fn main() -> Result<(), Error> {
         api_key: ApiKey::NotNeeded, // a local server needs no key
         disabled_tools,
         ..Default::default()
-    });
+    })
+    // Ask the server what it has, rather than naming a model here. llama.cpp
+    // serves whatever that process loaded, so a name in this file is a guess
+    // that goes stale the next time you start it with a different `-m`.
+    .with_openai_models();
 
-    // Note: `readiness()` does NOT probe here. Ollama has a native endpoint to
-    // ask, so `OpenHarness::ollama()` reports real reachability. A generic
-    // OpenAI-compatible endpoint has nothing cheap to probe, so readiness
-    // assumes a reachable cloud provider and reports ready. For a local server
-    // that assumption is wrong, and the first run is what tells you it is down.
-    // Watch for `RunEvent::Error` below instead.
+    // Because this endpoint is local and now has a route worth asking,
+    // `readiness()` reports whether it actually answers — a stopped
+    // `llama-server` is "not reachable" here rather than a surprise on the
+    // first run. A *hosted* endpoint is still judged by its key: nothing out
+    // there answers quickly enough to sit inside a readiness call.
     eprintln!("[endpoint] {base_url}");
 
     let (_handle, events) = llama.run(RunRequest {
