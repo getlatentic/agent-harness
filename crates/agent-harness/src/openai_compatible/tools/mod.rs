@@ -1320,6 +1320,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // The joining logic is platform-independent, but producing "stdout with no
+    // trailing newline" is not: the tool runs `sh -c` on unix and `cmd /C` on
+    // Windows, where `;` is not a separator and there is no `printf`. Asserting
+    // the seam needs a shell that can emit exactly these two streams.
+    #[cfg(unix)]
     #[test]
     fn stdout_and_stderr_are_joined_without_running_together() {
         // Three mutants lived in this one condition: `&&` to `||`, and either

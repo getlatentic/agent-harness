@@ -1,0 +1,9 @@
+# The prompts ship as bytes. `include_str!` embeds whatever git checked out, so
+# a CRLF checkout on Windows changes the prompt the model receives — its token
+# count, and the cache key providers hash it into — for no reason anyone would
+# see in review. Normalise line endings everywhere instead.
+* text=auto eol=lf
+
+# Except the files whose interpreters require CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf

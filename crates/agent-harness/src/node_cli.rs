@@ -597,17 +597,20 @@ mod tests {
 
     #[test]
     fn prepend_program_dir_puts_the_binary_dir_first() {
-        let combined = prepend_program_dir(
-            Path::new("/Users/x/.nvm/versions/node/v22/bin/bob"),
-            "/opt/homebrew/bin:/usr/bin",
-        );
-        assert!(combined.starts_with("/Users/x/.nvm/versions/node/v22/bin:"));
-        assert!(combined.contains("/opt/homebrew/bin"));
+        // Absolute paths and the PATH separator are both platform-shaped, so
+        // the expectation is built with the platform's own joiner rather than
+        // a literal `:` that only holds on unix.
+        let bin = if cfg!(windows) { r"C:\tools\bin" } else { "/opt/tools/bin" };
+        let other = if cfg!(windows) { r"C:\Windows\System32" } else { "/usr/bin" };
+        let base = std::env::join_paths([other]).expect("joinable").into_string().expect("utf-8");
+
+        let combined = prepend_program_dir(&Path::new(bin).join("bob"), &base);
+        let entries: Vec<PathBuf> = std::env::split_paths(&combined).collect();
+        assert_eq!(entries.first(), Some(&PathBuf::from(bin)), "the binary's dir leads: {combined}");
+        assert!(entries.contains(&PathBuf::from(other)), "and the base survives: {combined}");
+
         // A bare program name has no parent dir → base path unchanged.
-        assert_eq!(
-            prepend_program_dir(Path::new("bob"), "/usr/bin"),
-            "/usr/bin"
-        );
+        assert_eq!(prepend_program_dir(Path::new("bob"), &base), base);
     }
 
     #[cfg(unix)]
@@ -639,9 +642,15 @@ mod tests {
         // The point of resolving before spawning: the absolute path is what
         // pairs a CLI with the `node` beside it. Left as a bare name, the child
         // resolves it against whatever PATH it ends up with instead.
-        let resolved = resolve_program(PathBuf::from("sh"));
+        // A program every platform has. On Windows this also exercises the
+        // PATHEXT search, which is the half `sh` alone would never reach.
+        let name = if cfg!(windows) { "cmd" } else { "sh" };
+        let resolved = resolve_program(PathBuf::from(name));
         assert!(resolved.is_absolute(), "a name on PATH resolves to its real location: {resolved:?}");
-        assert!(resolved.ends_with("sh"), "and to the right binary: {resolved:?}");
+        assert!(
+            resolved.file_stem().is_some_and(|stem| stem.eq_ignore_ascii_case(name)),
+            "and to the right binary: {resolved:?}"
+        );
 
         let unknown = PathBuf::from("definitely-not-a-real-binary-xyz");
         assert_eq!(
@@ -657,8 +666,13 @@ mod tests {
         // has to keep working, or a run that was fine becomes "not installed".
         let existing = std::env::var("PATH").expect("a test process has a PATH");
         let augmented = compute_augmented_node_path();
-        let first = existing.split(':').find(|e| e.starts_with('/')).expect("an absolute entry");
-        assert!(augmented.contains(first), "{first} must survive into {augmented}");
+        // `split_paths` knows the platform's separator; `:` would split a
+        // Windows `C:\...` entry in half and assert on the fragment.
+        let first = std::env::split_paths(&existing)
+            .find(|entry| entry.is_absolute())
+            .expect("an absolute entry");
+        let kept = std::env::split_paths(&augmented).any(|entry| entry == first);
+        assert!(kept, "{first:?} must survive into {augmented}");
     }
 
     #[test]

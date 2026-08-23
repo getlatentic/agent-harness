@@ -18,6 +18,11 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Zlib",
+    # `webpki-roots` — Mozilla's CA certificate bundle, reached through the
+    # TLS client. It is data, not code, so it carries a data licence; the
+    # Community Data License Agreement is permissive and imposes nothing on a
+    # project that redistributes it.
+    "CDLA-Permissive-2.0",
 ]
 # Don't fail the whole check over a confidence threshold on an odd license file.
 confidence-threshold = 0.8
