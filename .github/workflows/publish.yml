@@ -1,0 +1,142 @@
+# Publishing to crates.io, caused by a tag.
+#
+# The point is what it refuses. A publish cannot be undone — only yanked — so
+# the two ways this went wrong both had to become impossible rather than
+# discouraged:
+#
+#   * 0.5.0 was published from a laptop on a green *local* gate, while CI was
+#     still running. It failed on Windows and was yanked within the hour. So
+#     the tests here are a job this one `needs`, in the same run, on the tagged
+#     commit — not a check someone glanced at beforehand.
+#   * Six versions shipped from a branch that was never merged, leaving `main`
+#     documenting an API three releases stale. So a tag that is not an ancestor
+#     of `main` is refused outright.
+#
+# Requires a `CARGO_REGISTRY_TOKEN` secret with publish rights.
+name: publish
+
+on:
+  push:
+    tags: ["v*", "cli-stream-v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # A tag can be pushed from anywhere, including a branch that was never
+  # reviewed. Publishing from one puts code on crates.io that the default
+  # branch does not have — which is exactly what happened, six times.
+  guard:
+    name: tag is on main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Refuse a tag that is not an ancestor of main
+        run: |
+          git fetch origin main --quiet
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME points at a commit that is not on main."
+            echo "::error::Merge the release PR first, then tag the merge commit."
+            exit 1
+          fi
+          echo "$GITHUB_REF_NAME is on main"
+
+  test:
+    name: test (${{ matrix.os }})
+    needs: guard
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: publish-${{ matrix.os }}
+      - name: Linux system deps
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      # `--no-fail-fast`: cargo otherwise stops at the first failing test
+      # binary, so one broken crate hides every crate behind it.
+      - name: Test
+        run: cargo test --workspace --all-features --no-fail-fast
+
+  publish:
+    name: crates.io
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      # In dependency order, because agent-harness depends on cli-stream by
+      # version: the index has to carry the new cli-stream before the crate
+      # that requires it can be verified. `cargo publish` waits for the index
+      # itself. Each is skipped when that version is already up, so re-running
+      # a half-finished release finishes it instead of failing on the first
+      # crate.
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          publish_if_new() {
+            local crate="$1"
+            local version
+            version=$(cargo metadata --no-deps --format-version 1 \
+              | python3 -c "import sys,json;print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='$crate'))")
+            local slug
+            slug=$(printf '%s' "$crate" | sed 's/^\(..\)\(..\).*/\1\/\2/')
+            if curl -sf "https://index.crates.io/$slug/$crate" | grep -q "\"vers\":\"$version\""; then
+              echo "$crate $version is already published — skipping"
+              return 0
+            fi
+            echo "::group::publish $crate $version"
+            cargo publish -p "$crate"
+            echo "::endgroup::"
+          }
+          publish_if_new cli-stream
+          publish_if_new agent-harness
+
+  # Only the project tag gets notes; cli-stream's is a plain marker, since the
+  # two crates share one CHANGELOG.
+  notes:
+    name: GitHub release
+    needs: publish
+    if: startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract the notes for this tag
+        id: notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { collecting = 1; next }
+            collecting && /^## \[/  { exit }
+            collecting              { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::CHANGELOG.md has no section for [$version]"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "agent-harness ${{ steps.notes.outputs.version }}" \
+            --notes-file release-notes.md \
+            --verify-tag

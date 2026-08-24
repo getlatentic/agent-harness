@@ -26,20 +26,37 @@
 shared-version = true
 tag-name = "v{{version}}"
 
-# The default branch requires a pull request — an active ruleset with no bypass
-# actors — so cargo-release's `git push origin main` is rejected. That push is
-# the LAST step, after both crates are already on crates.io, and a publish
-# cannot be undone: the run would end with the versions live, the release commit
-# and tags local, and main behind.
+# `cargo release` prepares a release here; it does not perform one.
 #
-# So the release stops at "committed, tagged, published". The branch goes up as
-# a PR and the tags by hand:
+# It used to. The default branch requires a pull request, so cargo-release's
+# `git push origin main` was rejected — which put the publish BEFORE the merge
+# and made the merge the last, optional, forgettable step. Both failure modes
+# duly happened: 0.5.0 went to crates.io before CI finished and had to be
+# yanked, and six versions shipped from a branch nobody merged, leaving `main`
+# documenting an API that three published versions had already renamed.
 #
-#   git push origin cli-stream-v0.4.0 v0.5.0
+# So the order is inverted. This bumps, stamps the CHANGELOG, rewrites the
+# README version pins, and commits — nothing more:
 #
-# Only `v*` triggers .github/workflows/release.yml, so the project version makes
-# the GitHub release and cli-stream's tag stays a plain marker.
+#   cargo release <level>            # dry run, prints the plan
+#   cargo release <level> --execute  # bump + changelog + READMEs + commit
+#   git push -u origin release/<version> && gh pr create
+#
+# CI runs on the PR. After it is merged, tagging the merge commit is what
+# publishes:
+#
+#   git switch main && git pull
+#   git tag v<version> && git push origin v<version>
+#
+# `.github/workflows/publish.yml` takes it from there: it re-runs the full test
+# matrix, refuses a tag that is not on `main`, then publishes both crates in
+# dependency order and creates the GitHub release. Publishing is therefore
+# caused by green CI on merged code, rather than merely preceded by a green run
+# someone remembered to look at.
 push = false
+tag = false
+publish = false
+
 
 # Single shared workspace CHANGELOG. Scoped to the agent-harness crate (in its
 # [package.metadata.release]) so it stamps exactly once — a workspace-level
