@@ -18,7 +18,7 @@
 
 use serde::Serialize;
 
-use cli_stream::ProcessEvent;
+use cli_stream::Event;
 
 /// A UTF-8 byte range into a document. Mirrors the persisted
 /// `ByteOffset` discipline (see `docs/editor-guide.md`): positions
@@ -122,7 +122,7 @@ pub struct ToolCallEnd {
 }
 
 /// The normalized event stream. `#[serde(tag = "kind")]` +
-/// camelCase mirrors the existing `ProcessEvent` wire contract the TS
+/// camelCase mirrors the existing `Event` wire contract the TS
 /// store already reads (`event.kind`, `event.runId`, …), so the
 /// front-end consumes one shape regardless of which harness produced it.
 // Not `Eq`: `Usage.cost_usd` is an `f64` (only `PartialEq`). `==`/`assert_eq!`
@@ -267,7 +267,7 @@ pub enum RunEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         updated_at: Option<String>,
     },
-    /// Spawn / IO / parse failure. Terminal — followed by `Exited`.
+    /// Command / IO / parse failure. Terminal — followed by `Exited`.
     Error { run_id: String, message: String },
     /// The run finished. Sent exactly once. Like every `RunEvent` variant it is
     /// constructible out-of-tree: harnesses live in their own crates (the
@@ -430,12 +430,12 @@ impl ParsedLine {
 /// parsing differs per harness — so every process-backed adapter
 /// shares this skeleton and supplies just its own line parser.
 pub fn normalize_process_event(
-    event: ProcessEvent,
+    event: Event,
     mut parse_line: impl FnMut(&str) -> ParsedLine,
 ) -> Vec<RunEvent> {
     match event {
-        ProcessEvent::Started { run_id } => vec![RunEvent::Started { run_id }],
-        ProcessEvent::Exited {
+        Event::Started { run_id } => vec![RunEvent::Started { run_id }],
+        Event::Exited {
             run_id,
             exit_code,
             cancelled,
@@ -444,19 +444,27 @@ pub fn normalize_process_event(
             exit_code,
             cancelled,
         }],
-        ProcessEvent::Error { run_id, message } => vec![RunEvent::Error { run_id, message }],
-        ProcessEvent::Stderr { run_id, line } => {
+        Event::Error { run_id, message } => vec![RunEvent::Error { run_id, message }],
+        Event::Stderr { run_id, line } => {
             // stderr is warnings/progress; surface as activity,
             // truncated like the TS store did (240 chars).
             let message = truncate(&line, 240);
             if message.is_empty() {
                 vec![]
+            } else if cli_stream::needs_terminal(&line) {
+                // Otherwise this arrives as one more line of noise, and the run
+                // looks like it failed for no reason. Agents are spawned with
+                // pipes, so a CLI wanting a terminal needs its headless mode.
+                vec![RunEvent::Activity {
+                    run_id,
+                    message: format!("this agent wants an interactive terminal, which a run cannot give it — use its non-interactive mode. It said: {message}"),
+                }]
             } else {
                 vec![RunEvent::Activity { run_id, message }]
             }
         }
-        ProcessEvent::Stdout { run_id, line } => run_events_from_parsed(&run_id, parse_line(&line)),
-        // `ProcessEvent` is #[non_exhaustive]; a future variant yields no
+        Event::Stdout { run_id, line } => run_events_from_parsed(&run_id, parse_line(&line)),
+        // `Event` is #[non_exhaustive]; a future variant yields no
         // events until an adapter learns to handle it.
         _ => Vec::new(),
     }
@@ -561,7 +569,7 @@ pub fn run_events_from_parsed(run_id: &str, parsed: ParsedLine) -> Vec<RunEvent>
     }
     // A harness reported an in-band failure on its stdout. This is the one
     // place a parsed line can become `RunEvent::Error` (the only other source
-    // is a process-level `ProcessEvent::Error`), so an in-band failure from any
+    // is a process-level `Event::Error`), so an in-band failure from any
     // harness — not just a spawn/IO failure — reaches the consumer.
     if let Some(message) = parsed.error {
         out.push(RunEvent::Error {
@@ -598,13 +606,13 @@ mod tests {
     #[test]
     fn normalize_passes_through_lifecycle_events() {
         assert!(matches!(
-            normalize_process_event(ProcessEvent::Started { run_id: "r".into() }, empty_parser)
+            normalize_process_event(Event::Started { run_id: "r".into() }, empty_parser)
                 .as_slice(),
             [RunEvent::Started { .. }]
         ));
         assert!(matches!(
             normalize_process_event(
-                ProcessEvent::Exited {
+                Event::Exited {
                     run_id: "r".into(),
                     exit_code: Some(0),
                     cancelled: false
@@ -620,7 +628,7 @@ mod tests {
     fn stderr_becomes_truncated_activity() {
         let long = "x".repeat(500);
         let events = normalize_process_event(
-            ProcessEvent::Stderr {
+            Event::Stderr {
                 run_id: "r1".into(),
                 line: long,
             },
@@ -635,7 +643,7 @@ mod tests {
         }
         // Empty stderr line → no event.
         assert!(normalize_process_event(
-            ProcessEvent::Stderr {
+            Event::Stderr {
                 run_id: "r1".into(),
                 line: String::new(),
             },
@@ -647,7 +655,7 @@ mod tests {
     #[test]
     fn thinking_normalizes_and_serializes() {
         let events = normalize_process_event(
-            ProcessEvent::Stdout {
+            Event::Stdout {
                 run_id: "r1".to_owned(),
                 line: "ignored".to_owned(),
             },
@@ -721,7 +729,7 @@ mod tests {
     #[test]
     fn session_normalizes_and_serializes() {
         let events = normalize_process_event(
-            ProcessEvent::Stdout {
+            Event::Stdout {
                 run_id: "r1".to_owned(),
                 line: "ignored".to_owned(),
             },
@@ -755,7 +763,7 @@ mod tests {
     #[test]
     fn usage_normalizes_and_serializes() {
         let events = normalize_process_event(
-            ProcessEvent::Stdout {
+            Event::Stdout {
                 run_id: "r1".to_owned(),
                 line: "ignored".to_owned(),
             },
@@ -804,7 +812,7 @@ mod tests {
     #[test]
     fn plan_normalizes_and_serializes() {
         let events = normalize_process_event(
-            ProcessEvent::Stdout {
+            Event::Stdout {
                 run_id: "r1".to_owned(),
                 line: "ignored".to_owned(),
             },
@@ -863,7 +871,7 @@ mod tests {
     fn tool_io_is_carried_and_omitted_when_absent() {
         // input on ToolStart, output on ToolEnd — distinct events, distinct moments.
         let start = normalize_process_event(
-            ProcessEvent::Stdout {
+            Event::Stdout {
                 run_id: "r1".to_owned(),
                 line: "ignored".to_owned(),
             },
@@ -918,7 +926,7 @@ mod tests {
         // RunEvent::Error — the path codex's `turn.failed` / `error` lines now
         // take, so a failed turn no longer yields neither answer nor error.
         let events = normalize_process_event(
-            ProcessEvent::Stdout {
+            Event::Stdout {
                 run_id: "r1".to_owned(),
                 line: "ignored".to_owned(),
             },

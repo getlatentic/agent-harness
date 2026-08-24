@@ -14,9 +14,12 @@
 //! Pick a model that supports tool calling. A very small model will echo the
 //! tool schemas back at you instead of calling them.
 
-use harness::{Harness, HarnessError, OpenHarness, RunEvent, RunMode, RunRequest, RunTuning};
+use harness::{Harness, Error, OpenHarness, RunEvent, RunMode, RunRequest, RunTuning};
 
-fn main() -> Result<(), HarnessError> {
+#[path = "common/mod.rs"]
+mod common;
+
+fn main() -> Result<(), Error> {
     let agent = OpenHarness::ollama();
 
     let readiness = agent.readiness();
@@ -27,8 +30,8 @@ fn main() -> Result<(), HarnessError> {
 
     let model = match std::env::var("OLLAMA_MODEL") {
         Ok(m) if !m.trim().is_empty() => m,
-        _ => match agent.list_models()?.into_iter().next() {
-            Some(first) => first.value,
+        _ => match common::largest_installed(&agent)? {
+            Some(name) => name,
             None => {
                 eprintln!("No models installed. Try `ollama pull qwen3:4b`.");
                 return Ok(());
@@ -37,22 +40,24 @@ fn main() -> Result<(), HarnessError> {
     };
     eprintln!("[model] {model}\n");
 
-    let (_handle, rx) = agent.run_channel(RunRequest {
+    let (_handle, events) = agent.run(RunRequest {
         run_id: "tools".into(),
         prompt: "List the files in the current directory, then say how many there are.".into(),
         // The tools run here. Point it anywhere you do not mind being read.
         cwd: Some(std::env::current_dir().unwrap_or_default()),
+        // Spelled out because it is the subject of this example: Ask offers
+        // the read-only tools (read, glob, grep, list); Edit adds write, edit
+        // and bash. Ask is the default, so the other examples omit it.
+        mode: RunMode::Ask,
         // Ask offers read-only tools: read, glob, grep, list.
         // Edit adds the mutating ones: write, edit, bash.
-        mode: RunMode::Ask,
         tuning: RunTuning { model: Some(model), ..Default::default() },
-        resume: None,
-        attachments: Vec::new(),
+        ..Default::default()
     })?;
 
     let mut calls = 0usize;
-    for ev in rx {
-        match ev {
+    for event in events {
+        match event {
             // A tool call starts. `locations` carries the paths it touches, so
             // a UI can show the subject rather than a bare tool name.
             RunEvent::ToolStart { title, tool_kind, locations, .. } => {

@@ -3,16 +3,16 @@
 //! `cargo run --example setup`
 //!
 //! `readiness()` reports whether the CLI is installed and authenticated. This
-//! crate never installs an agent — when one is missing, `info().install_hint`
+//! crate never installs an agent — when one is missing, `manifest().install_hint`
 //! says where to get it, and the host shows that to the user. `login()` still
 //! runs the CLI's own OAuth (`claude auth login`, which opens the browser),
 //! because that is the agent authenticating itself, not us installing it.
 
 use std::sync::Arc;
 
-use harness::{Claude, Harness, HarnessError, InstallEvent};
+use harness::{Claude, Harness, Error, InstallEvent};
 
-fn main() -> Result<(), HarnessError> {
+fn main() -> Result<(), Error> {
     let claude = Claude::new();
 
     let r = claude.readiness();
@@ -34,7 +34,7 @@ fn main() -> Result<(), HarnessError> {
             InstallEvent::Stdout { text } | InstallEvent::Stderr { text } => eprintln!("  {text}"),
             InstallEvent::Done { ok, .. } => eprintln!("done (ok={ok})"),
         });
-        // Fallible calls return the typed `HarnessError`; `?` propagates it.
+        // Fallible calls return the typed `Error`; `?` propagates it.
         claude.login(log)?; // `claude auth login` — opens the browser
     }
 

@@ -28,8 +28,8 @@ use serde_json::Value;
 use smol::Timer;
 
 use crate::{
-    CredentialSpec, Harness, HarnessCapabilities, HarnessError, HarnessInfo, HarnessModel,
-    HarnessReadiness, InstallHint, RunCallback, RunControl, RunEvent, RunHandle, RunMode,
+    CredentialSpec, Harness, Features, Error, Info, ModelChoice,
+    Readiness, InstallHint, RunCallback, RunControl, RunEvent, RunHandle, RunMode,
     RunRequest,
 };
 
@@ -127,31 +127,28 @@ impl AcpHarness {
 }
 
 impl Harness for AcpHarness {
-    fn info(&self) -> HarnessInfo {
-        HarnessInfo {
+    fn info(&self) -> Info {
+        Info {
             id: self.id.clone(),
             display_name: self.display_name.clone(),
             description: self.description.clone(),
             install_hint: self.install_hint.clone(),
-            capabilities: HarnessCapabilities {
-                credential_required: false,
-                previews_edits: false,
-                // Models are discovered live via `list_models()` (opencode lists
-                // its own; a generic ACP agent has none), so the static list is
-                // empty; a free-text model id is also accepted.
-                models: Vec::new(),
-                allows_custom_model: true,
-                supports_effort: false,
-                supports_max_turns: false,
-                supports_login: false,
-                supports_custom_instructions: false,
-            },
         }
     }
 
-    fn readiness(&self) -> HarnessReadiness {
+    fn features(&self) -> Features {
+        Features {
+            // Models are discovered live via `list_models()` (opencode lists
+            // its own; a generic ACP agent has none), so the static list is
+            // left empty by `Default`; a free-text model id is accepted.
+            custom_model: true,
+            ..Default::default()
+        }
+    }
+
+    fn readiness(&self) -> Readiness {
         let installed = probe_command(&self.command);
-        HarnessReadiness {
+        Readiness {
             harness_id: self.id.clone(),
             ready: installed,
             installed,
@@ -169,7 +166,7 @@ impl Harness for AcpHarness {
         }
     }
 
-    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
+    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
         // resume (session/load) is a follow-up; this first cut runs a fresh
         // session. `attachments` ignored: a text prompt only.
         let RunRequest { run_id, prompt, cwd, mode, tuning, resume: _, attachments: _ } = request;
@@ -180,7 +177,7 @@ impl Harness for AcpHarness {
         let (env, model_config_file) = match (&self.model_control, tuning.model) {
             (Some(mc), Some(model)) => {
                 let path = write_model_config(&run_id, &mc.config_field, &model)
-                    .map_err(HarnessError::spawn)?;
+                    .map_err(Error::spawn)?;
                 (vec![(mc.config_env.clone(), path.to_string_lossy().into_owned())], Some(path))
             }
             _ => (Vec::new(), None),
@@ -213,7 +210,7 @@ impl Harness for AcpHarness {
         }
     }
 
-    fn list_models(&self) -> Result<Vec<HarnessModel>, HarnessError> {
+    fn list_models(&self) -> Result<Vec<ModelChoice>, Error> {
         // ACP exposes no model list; a config-file vendor (opencode) lists via
         // its own CLI subcommand. A generic ACP agent has none → empty (the host
         // hides the picker). PATH is augmented so a packaged `.app` finds the CLI.
@@ -222,28 +219,36 @@ impl Harness for AcpHarness {
         };
         let output = crate::hidden_command(&self.command)
             .args(&mc.list_subcommand)
-            .env("PATH", crate::augmented_node_path())
+            .env("PATH", crate::augmented_path())
             .output()
             .map_err(|e| {
-                HarnessError::spawn(format!(
+                Error::spawn(format!(
                     "`{} {}` failed: {e}",
                     self.command,
                     mc.list_subcommand.join(" ")
                 ))
             })?;
-        // A non-zero exit (agent offline / unauthenticated) isn't fatal here —
-        // surface no list rather than failing the picker.
-        if !output.status.success() {
-            return Ok(Vec::new());
-        }
-        let models = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(|line| HarnessModel { value: line.to_owned(), label: line.to_owned() })
-            .collect();
-        Ok(models)
+        Ok(models_from_listing(output.status.success(), &String::from_utf8_lossy(&output.stdout)))
     }
+}
+
+/// The models a listing subcommand reported, one id per line.
+///
+/// A non-zero exit is deliberately not an error: an agent that is offline or
+/// signed out should leave the picker empty, not fail the harness that owns it.
+/// Separate from the spawn because both of those are decisions, and neither is
+/// reachable through a process.
+fn models_from_listing(succeeded: bool, stdout: &str) -> Vec<ModelChoice> {
+    if !succeeded {
+        return Vec::new();
+    }
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        // No prettier name is on offer, so the id is also the label.
+        .map(|line| ModelChoice { value: line.to_owned(), label: line.to_owned() })
+        .collect()
 }
 
 /// Whether `command` is runnable on the (augmented) PATH — `<command> --version`
@@ -252,7 +257,7 @@ impl Harness for AcpHarness {
 fn probe_command(command: &str) -> bool {
     crate::hidden_command(command)
         .arg("--version")
-        .env("PATH", crate::augmented_node_path())
+        .env("PATH", crate::augmented_path())
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -293,7 +298,7 @@ struct AcpRun {
 }
 
 impl RunControl for AcpRun {
-    fn cancel(&self) -> Result<(), HarnessError> {
+    fn cancel(&self) -> Result<(), Error> {
         self.cancel.store(true, Ordering::SeqCst);
         Ok(())
     }
@@ -436,6 +441,173 @@ mod tests {
     use super::*;
     use crate::Harness;
 
+    /// A throwaway CLI standing in for an ACP agent's own binary.
+    #[cfg(unix)]
+    fn fake_cli(tag: &str, script: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("hl-acp-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cli");
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_is_present_only_if_its_command_runs() {
+        // This is what the picker shows as installed-or-not, and the only
+        // evidence is whether the binary answers at all.
+        let present = fake_cli("present", "exit 0");
+        assert!(probe_command(present.to_str().unwrap()));
+
+        let broken = fake_cli("broken", "exit 1");
+        assert!(!probe_command(broken.to_str().unwrap()), "a command that fails is not usable");
+        assert!(!probe_command("definitely-not-a-real-command"), "and one that is absent is not there");
+    }
+
+    #[test]
+    fn an_agent_that_cannot_list_leaves_the_picker_empty_rather_than_failing() {
+        // Offline or signed out is not a broken harness. Failing here would take
+        // the whole picker down over a model list nobody asked for yet.
+        assert!(models_from_listing(false, "anthropic/claude\nopenai/gpt").is_empty());
+    }
+
+    #[test]
+    fn a_model_listing_is_one_id_per_line_with_the_blanks_dropped() {
+        let models = models_from_listing(true, "  anthropic/claude  \n\n openai/gpt \n   \n");
+        assert_eq!(models.len(), 2, "blank lines are not models: {models:?}");
+        assert_eq!(models[0].value, "anthropic/claude", "trimmed");
+        assert_eq!(models[0].label, models[0].value, "no prettier name is on offer, so the id is the label");
+        assert_eq!(models[1].value, "openai/gpt");
+        assert!(models_from_listing(true, "").is_empty());
+    }
+
+    #[test]
+    fn only_an_allow_option_counts_as_permission() {
+        // The agent offers a list and we pick one. Choosing a reject as though
+        // it were an allow would silently deny every tool call; the reverse
+        // would approve them without asking.
+        use acp::schema::PermissionOptionKind as Kind;
+        assert!(is_allow(&Kind::AllowOnce));
+        assert!(is_allow(&Kind::AllowAlways));
+        assert!(!is_allow(&Kind::RejectOnce));
+        assert!(!is_allow(&Kind::RejectAlways));
+    }
+
+    #[test]
+    fn cancelling_a_run_is_visible_to_whoever_asks_afterwards() {
+        let run = AcpRun { cancel: Arc::new(AtomicBool::new(false)) };
+        assert!(!run.was_cancelled());
+        run.cancel().expect("cancel");
+        assert!(run.was_cancelled(), "a stopped run says so");
+    }
+
+    /// An ACP agent that speaks just enough of the protocol to complete one
+    /// run: the three requests a prompt needs, plus a streamed reply.
+    ///
+    /// It echoes back each request's id rather than assuming a sequence — the
+    /// client sends UUIDs, and a reply carrying the wrong id is simply never
+    /// matched, so the run hangs with no error to explain it.
+    #[cfg(unix)]
+    fn fake_acp_agent(reply: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("hl-acpagent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agent");
+        let script = format!(
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":"%s","result":{{"protocolVersion":1,"agentCapabilities":{{}},"authMethods":[]}}}}\n' "$id" ;;
+    *'"session/new"'*)
+      printf '{{"jsonrpc":"2.0","id":"%s","result":{{"sessionId":"ses-1"}}}}\n' "$id" ;;
+    *'"session/prompt"'*)
+      printf '%s\n' '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"ses-1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{reply}"}}}}}}}}'
+      printf '{{"jsonrpc":"2.0","id":"%s","result":{{"stopReason":"end_turn"}}}}\n' "$id" ;;
+  esac
+done
+"#
+        );
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn collect_run(agent: &std::path::Path) -> Vec<RunEvent> {
+        use std::sync::atomic::AtomicBool as Flag;
+        use std::sync::Mutex;
+
+        let harness = AcpHarness::custom(AcpHarnessConfig {
+            id: "fake".to_owned(),
+            display_name: "Fake".to_owned(),
+            command: agent.to_string_lossy().into_owned(),
+            args: Vec::new(),
+            install_hint: None,
+        });
+        let events: Arc<Mutex<Vec<RunEvent>>> = Arc::default();
+        let sink = Arc::clone(&events);
+        let done = Arc::new(Flag::new(false));
+        let flag = Arc::clone(&done);
+        let handle = harness
+            .start(
+                RunRequest {
+                    run_id: "acp-run".to_owned(),
+                    prompt: "hello".to_owned(),
+                    cwd: Some(std::env::temp_dir()),
+                    mode: RunMode::Ask,
+                    ..Default::default()
+                },
+                Arc::new(move |event| {
+                    if matches!(event, RunEvent::Exited { .. }) {
+                        flag.store(true, Ordering::SeqCst);
+                    }
+                    sink.lock().unwrap().push(event);
+                }),
+            )
+            .expect("the run should start");
+        for _ in 0..400 {
+            if done.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let _ = handle;
+        let out = events.lock().unwrap().clone();
+        out
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_run_against_a_real_acp_agent_streams_its_reply_and_finishes() {
+        // Everything under `run_acp` — the handshake, the session, the prompt,
+        // and the notification translation — only happens together. Its pieces
+        // being tested says nothing about whether the sequence works.
+        let agent = fake_acp_agent("the answer");
+        let events = collect_run(&agent);
+
+        assert!(
+            events.iter().any(|e| matches!(e, RunEvent::Started { .. })),
+            "the run announces itself: {events:?}"
+        );
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::Text { delta, .. } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "the answer", "the agent's reply reaches the caller: {events:?}");
+        assert!(
+            matches!(events.last(), Some(RunEvent::Exited { .. })),
+            "and exactly one Exited ends it: {events:?}"
+        );
+        let _ = std::fs::remove_dir_all(agent.parent().unwrap());
+    }
+
     #[test]
     fn generic_acp_agent_lists_no_models_without_shelling_out() {
         // A `custom` agent has no model_control, so list_models() short-circuits
@@ -449,9 +621,9 @@ mod tests {
             install_hint: None,
         });
         assert!(harness.list_models().expect("ok").is_empty());
-        let caps = harness.info().capabilities;
+        let caps = harness.features();
         assert!(caps.models.is_empty());
-        assert!(caps.allows_custom_model, "ACP agents accept a free-text model");
+        assert!(caps.custom_model, "ACP agents accept a free-text model");
     }
 
     #[test]

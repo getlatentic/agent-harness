@@ -6,32 +6,31 @@
 //!
 //! Every other example uses this same loop. Only the constructor changes.
 
-use harness::{Claude, Harness, HarnessError, RunEvent, RunMode, RunRequest, RunTuning};
+use harness::{Claude, Harness, Error, RunEvent, RunRequest};
 
-fn main() -> Result<(), HarnessError> {
+fn main() -> Result<(), Error> {
     // Drives the `claude` CLI. See `codex.rs` for the same loop, one line apart.
     let claude = Claude::new();
 
-    // `run_channel()` starts the run and hands back the events on a channel,
+    // `run()` starts the run and hands back the events on a channel,
     // so there's no callback/`Sender` plumbing to write by hand. It returns
-    // immediately; events arrive on background threads. (`run()` is still
-    // there for push semantics — forwarding straight onto a Tauri Channel or
-    // SSE sink from inside a callback.)
-    let (_handle, rx) = claude.run_channel(RunRequest {
+    // immediately; events arrive on background threads. (`start()` is the push
+    // form — forwarding straight onto a Tauri Channel or SSE sink from inside a
+    // callback, where a channel would be a wasted hop.)
+    //
+    // Keep `_handle` to `.cancel()`; dropping it does NOT stop the run.
+    let prompt = "In one sentence, what is a Markdown heading?";
+    let (_handle, events) = claude.run(RunRequest {
         run_id: "demo".into(),
-        prompt: "In one sentence, what is a Markdown heading?".into(),
-        cwd: None,                    // working dir for the agent's tool calls
-        mode: RunMode::Ask,           // Ask = answer only; Edit = may edit files
-        tuning: RunTuning::default(), // optional: model / effort / max_turns
-        resume: None,                 // Some(session_id) to continue a prior run
-        attachments: Vec::new(),      // images for multimodal models; none here
-    })?; // keep `_handle` to `.cancel()`; dropping it does NOT stop the run
+        prompt: prompt.into(),
+        ..Default::default()
+    })?;
 
-    // ONE normalized event stream, regardless of the backing CLI. `rx` hangs
-    // up on its own when the run ends, so this loop terminates without
+    // ONE normalized event stream, regardless of the backing CLI. The channel
+    // hangs up on its own when the run ends, so this loop terminates without
     // touching the handle:
-    for ev in rx {
-        match ev {
+    for event in events {
+        match event {
             RunEvent::Text { delta, .. } => print!("{delta}"), // the answer
             RunEvent::Thinking { delta, .. } => eprint!("{delta}"), // model reasoning
             RunEvent::ToolStart { title, .. } => eprintln!("\n[tool] {title}"),

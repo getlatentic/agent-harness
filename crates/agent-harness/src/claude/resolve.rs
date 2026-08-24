@@ -127,15 +127,17 @@ mod tests {
     #[test]
     fn classify_nvm_is_npm_global() {
         let home = Path::new("/Users/dev");
-        let path = Path::new("/Users/dev/.nvm/versions/node/v22.15.0/bin/claude");
+        // The version is not read — `classify` matches the nvm layout, not a
+        // node release — so it stays a placeholder rather than implying a floor.
+        let path = Path::new("/Users/dev/.nvm/versions/node/vX.Y.Z/bin/claude");
         assert_eq!(classify(path, home, None), InstallKind::NpmGlobal);
     }
 
     #[test]
     fn classify_node_modules_is_npm_global() {
         let home = Path::new("/Users/dev");
-        // A writable npm prefix outside nvm (Compose's bundled prefix points
-        // installs at `<data>/runtime/npm/lib/node_modules/...`).
+        // A writable npm prefix outside nvm — any host that points `npm
+        // install -g` at its own directory rather than the system one.
         let path = Path::new("/Users/dev/Library/App/runtime/npm/lib/node_modules/.bin/claude");
         assert_eq!(classify(path, home, None), InstallKind::NpmGlobal);
     }

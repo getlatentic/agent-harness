@@ -20,9 +20,9 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use crate::{
-    spawn_streaming, CredentialSpec, Harness, HarnessCapabilities, HarnessError, HarnessInfo, InstallHint,
-    HarnessModel, HarnessReadiness, InstallCallback, RunCallback, RunHandle, RunMode,
-    RunRequest, RunTuning,
+    probe_version, Command, ResolveCli, CredentialSpec, Harness, Features, Error,
+    Info, ModelChoice, Readiness, InstallCallback, InstallHint, RunCallback,
+    RunHandle, RunMode, RunRequest, RunTuning,
 };
 
 mod parser;
@@ -31,19 +31,55 @@ pub use parser::{parse_codex_line, CodexStreamParser};
 /// Registry id for the Codex harness.
 pub const CODEX_HARNESS_ID: &str = "codex";
 
+/// The program spawned when the host doesn't name one.
+pub const DEFAULT_CODEX_COMMAND: &str = "codex";
+
 /// OpenAI Codex CLI as a [`Harness`].
-#[derive(Debug, Default, Clone)]
-pub struct CodexHarness;
+#[derive(Debug, Clone)]
+pub struct CodexHarness {
+    command: String,
+}
+
+impl Default for CodexHarness {
+    // Not derived: a derived `Default` would leave `command` empty and every
+    // spawn would fail on a name nobody chose.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// What this adapter is, as opposed to what is layered onto it — the same
+/// split as [`AcpHarnessConfig`](crate::AcpHarnessConfig) and
+/// [`OpenHarnessConfig`](crate::OpenHarnessConfig).
+#[derive(Clone, Debug)]
+pub struct CodexHarnessConfig {
+    /// Program to spawn. A bare name is resolved on PATH; a path is used as
+    /// given. A rename upstream, a fork, a wrapper script or a test stub costs
+    /// a field here rather than a release.
+    pub command: String,
+}
+
+impl Default for CodexHarnessConfig {
+    fn default() -> Self {
+        Self { command: DEFAULT_CODEX_COMMAND.to_owned() }
+    }
+}
 
 impl CodexHarness {
+    /// Drives `codex` from PATH.
     pub fn new() -> Self {
-        Self
+        Self::custom(CodexHarnessConfig::default())
+    }
+
+    /// Drives a binary the host names.
+    pub fn custom(config: CodexHarnessConfig) -> Self {
+        Self { command: config.command }
     }
 }
 
 impl Harness for CodexHarness {
-    fn info(&self) -> HarnessInfo {
-        HarnessInfo {
+    fn info(&self) -> Info {
+        Info {
             id: CODEX_HARNESS_ID.to_owned(),
             display_name: "Codex".to_owned(),
             description: "OpenAI's Codex agent CLI. Uses your existing Codex login.".to_owned(),
@@ -51,33 +87,33 @@ impl Harness for CodexHarness {
                 InstallHint::url("https://developers.openai.com/codex")
                     .with_command("npm install -g @openai/codex"),
             ),
-            capabilities: HarnessCapabilities {
-                // Codex owns its own login and edits files directly.
-                // Model names change often, so allow free-text entry
-                // rather than a curated list; it exposes reasoning
-                // effort but no turn cap.
-                credential_required: false,
-                previews_edits: false,
-                models: Vec::new(),
-                allows_custom_model: true,
-                supports_effort: true,
-                supports_max_turns: false,
-                supports_login: true,
-                supports_custom_instructions: false,
-            },
         }
     }
 
-    fn list_models(&self) -> Result<Vec<HarnessModel>, HarnessError> {
+    fn features(&self) -> Features {
+        Features {
+            // Codex owns its own login and edits files directly. Model
+            // names change often, so it takes free-text entry rather than a
+            // curated list, and it exposes reasoning effort. What it does
+            // not support — a turn cap, previews, a stored credential — is
+            // left to `Default`.
+            custom_model: true,
+            effort: true,
+            login: true,
+            ..Default::default()
+        }
+    }
+
+    fn list_models(&self) -> Result<Vec<ModelChoice>, Error> {
         // Codex declares no static models (ids churn → free-text entry); fill the
         // picker from models.dev's `openai` lineup when the `models-dev` feature is
         // on (empty otherwise → the user types an id).
         Ok(crate::models_dev::provider_models("openai"))
     }
 
-    fn readiness(&self) -> HarnessReadiness {
-        let Some(version) = probe_version("codex") else {
-            return HarnessReadiness {
+    fn readiness(&self) -> Readiness {
+        let Some(version) = probe_version(&self.command) else {
+            return Readiness {
                 harness_id: CODEX_HARNESS_ID.to_owned(),
                 ready: false,
                 installed: false,
@@ -93,9 +129,9 @@ impl Harness for CodexHarness {
         // key is how you run headless (a container / CI), where `codex login`
         // can't open a browser. `codex login status` only sees the OAuth
         // state, so we OR in the env key ourselves.
-        let signed_in = probe_codex_signed_in()
+        let signed_in = probe_codex_signed_in(&self.command)
             || crate::harness::api_key_value_usable(std::env::var("OPENAI_API_KEY").ok());
-        HarnessReadiness {
+        Readiness {
             harness_id: CODEX_HARNESS_ID.to_owned(),
             ready: signed_in,
             installed: true,
@@ -109,11 +145,11 @@ impl Harness for CodexHarness {
                         .to_owned(),
                 )
             },
-            details: codex_resolved_details(),
+            details: codex_resolved_details(&self.command),
         }
     }
 
-    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
+    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
         // `attachments` ignored: codex exec is a text CLI (no image input here).
         let RunRequest { run_id, prompt, cwd, mode, tuning, resume, attachments: _ } = request;
         let args = build_codex_args(prompt, mode, &tuning, resume.as_deref());
@@ -131,14 +167,13 @@ impl Harness for CodexHarness {
         // threads, so the parser is held behind an `Arc<Mutex>` — the same
         // shape as bob's.
         let parser = Arc::new(Mutex::new(CodexStreamParser::new()));
-        let program = tuning.binary_path.clone().unwrap_or_else(|| PathBuf::from("codex"));
-        let handle = spawn_streaming(
-            program,
-            args,
-            Vec::new(),
-            cwd,
-            run_id,
-            move |event| {
+        let program = tuning.binary_path.clone().unwrap_or_else(|| PathBuf::from(&self.command));
+        let handle = Command::new(program)
+            .cwd(cwd)
+            .run_id(run_id)
+            .args(args)
+            .resolve_cli()
+            .stream(move |event| {
                 // Recover a poisoned lock rather than panic on a reader
                 // thread — parsing is total, so the parser is never
                 // mid-corruption.
@@ -148,7 +183,7 @@ impl Harness for CodexHarness {
                 }
             },
         )
-        .map_err(HarnessError::spawn)?;
+        .map_err(Error::spawn)?;
         Ok(Box::new(handle))
     }
 
@@ -161,9 +196,9 @@ impl Harness for CodexHarness {
         }
     }
 
-    fn login(&self, on_event: InstallCallback) -> Result<(), HarnessError> {
+    fn login(&self, on_event: InstallCallback) -> Result<(), Error> {
         // `codex login` runs the CLI's OAuth flow (opens the browser).
-        crate::run_login_command("codex", &["login"], on_event)
+        crate::run_login_command(&self.command, &["login"], on_event)
     }
 }
 
@@ -171,9 +206,9 @@ impl Harness for CodexHarness {
 /// `details`, mirroring the Claude adapter — so the Runtimes UI can surface
 /// "npm — can go stale / Update to native" instead of a bare, ambiguous
 /// "Update". Reuses the shared resolve/classify in `crate::claude::resolve`.
-fn codex_resolved_details() -> Value {
-    let path = crate::augmented_node_path();
-    let Some(resolved) = crate::claude::resolve::resolve_on_path("codex", &path) else {
+fn codex_resolved_details(command: &str) -> Value {
+    let path = crate::augmented_path();
+    let Some(resolved) = crate::claude::resolve::resolve_on_path(command, &path) else {
         return Value::Null;
     };
     let mut details = serde_json::Map::new();
@@ -191,33 +226,13 @@ fn codex_resolved_details() -> Value {
     Value::Object(details)
 }
 
-fn probe_version(program: &str) -> Option<String> {
-    // Augment PATH so a packaged `.app` (minimal launchd PATH) can find a
-    // CLI installed via nvm / Homebrew / official installer — otherwise an
-    // installed CLI is mis-reported as "not installed".
-    let output = crate::hidden_command(program)
-        .arg("--version")
-        .env("PATH", crate::augmented_node_path())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
-}
-
 /// Probe Codex's auth: `codex login status` exits 0 when signed in.
 /// Lets [`CodexHarness::readiness`] distinguish installed from signed-in
 /// (so the picker can offer "Sign in").
-fn probe_codex_signed_in() -> bool {
-    crate::hidden_command("codex")
+fn probe_codex_signed_in(command: &str) -> bool {
+    crate::hidden_command(command)
         .args(["login", "status"])
-        .env("PATH", crate::augmented_node_path())
+        .env("PATH", crate::augmented_path())
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -286,7 +301,185 @@ fn build_codex_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::events::RunEvent;
+
+    /// A stand-in `codex` that answers the three ways the adapter invokes it:
+    /// `--version`, `login status`, and a real `exec` run. The `exec` case
+    /// records the argv it was handed, so a test can assert what the CLI
+    /// actually received rather than what the pure builder returned.
+    #[cfg(unix)]
+    fn fake_codex(tag: &str, signed_in: bool, emits: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("codex-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let argv = dir.join("argv");
+        let cli = dir.join("codex");
+        let login_exit = i32::from(!signed_in);
+        std::fs::write(
+            &cli,
+            format!(
+                "#!/bin/sh\n\
+                 case \"$1\" in\n\
+                 --version) echo 'codex-cli 9.9.9'; exit 0 ;;\n\
+                 login) exit {login_exit} ;;\n\
+                 exec) : > '{argv}'; for a in \"$@\"; do printf '%s\\n' \"$a\" >> '{argv}'; done\n\
+                 {emits}\n\
+                 exit 0 ;;\n\
+                 esac\n\
+                 exit 1\n",
+                argv = argv.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (cli, argv)
+    }
+
+    #[cfg(unix)]
+    fn drive(cli: &std::path::Path, request: RunRequest) -> Vec<RunEvent> {
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Vec<RunEvent>>> = Arc::default();
+        let sink = Arc::clone(&seen);
+        let harness = CodexHarness::custom(CodexHarnessConfig {
+            command: cli.display().to_string(),
+        });
+        let handle = harness
+            .start(request, Arc::new(move |event| sink.lock().unwrap().push(event)))
+            .expect("the stand-in should spawn");
+
+        // Bounded: a fixture that never exits must fail the test, not hang it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let done = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, RunEvent::Exited { .. }));
+            if done {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the run never exited");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = handle.cancel();
+        let events = seen.lock().unwrap().clone();
+        events
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_run_reaches_the_cli_as_codex_exec_and_comes_back_as_events() {
+        // The argv assertions elsewhere test `build_codex_args` in isolation.
+        // This is the only test that proves the argv the *process* receives is
+        // that one — spawn, stream, parse and normalize included.
+        let message = r#"{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"done"}}"#;
+        let (cli, argv) = fake_codex("run", true, &format!("printf '%s\\n' '{message}'"));
+
+        let events = drive(
+            &cli,
+            RunRequest {
+                run_id: "r1".to_owned(),
+                prompt: "say something".to_owned(),
+                cwd: Some(std::env::temp_dir()),
+                tuning: RunTuning { model: Some("o4-mini".to_owned()), ..RunTuning::default() },
+                ..RunRequest::default()
+            },
+        );
+
+        let passed: Vec<String> =
+            std::fs::read_to_string(&argv).unwrap().lines().map(str::to_owned).collect();
+        assert_eq!(passed.first().map(String::as_str), Some("exec"));
+        assert!(passed.iter().any(|a| a == "--json"), "argv was {passed:?}");
+        assert!(passed.iter().any(|a| a == "--skip-git-repo-check"), "argv was {passed:?}");
+        assert!(passed.windows(2).any(|w| w[0] == "--model" && w[1] == "o4-mini"));
+        assert_eq!(
+            passed.last().map(String::as_str),
+            Some("say something"),
+            "the prompt is the trailing positional",
+        );
+
+        assert!(
+            events.iter().any(|e| matches!(e, RunEvent::Text { delta, .. } if delta == "done")),
+            "the CLI's message should arrive as text: {events:?}",
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            RunEvent::Exited { exit_code: Some(0), cancelled: false, .. }
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_nonzero_exit_is_reported_rather_than_read_as_a_finished_run() {
+        // `codex exec` failing (bad flag, refused sandbox) must not look like a
+        // run that simply produced nothing.
+        let (cli, _) = fake_codex("fail", true, "exit 3; :");
+        let events = drive(&cli, RunRequest { prompt: "hi".to_owned(), ..RunRequest::default() });
+        assert!(
+            events.iter().any(|e| matches!(e, RunEvent::Exited { exit_code: Some(3), .. })),
+            "{events:?}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_reports_the_version_and_whether_login_status_succeeded() {
+        // Both halves come from spawning the CLI, so neither is covered by the
+        // pure argv tests. Signed-out must still read as installed — the UI
+        // offers "Sign in" only when it knows the binary is there.
+        let (yes, _) = fake_codex("in", true, ":");
+        let ready = CodexHarness::custom(CodexHarnessConfig { command: yes.display().to_string() })
+            .readiness();
+        assert!(ready.installed && ready.ready && ready.auth_configured);
+        assert_eq!(ready.version.as_deref(), Some("codex-cli 9.9.9"));
+        assert!(ready.error.is_none());
+
+        let (no, _) = fake_codex("out", false, ":");
+        let ready = CodexHarness::custom(CodexHarnessConfig { command: no.display().to_string() })
+            .readiness();
+        assert!(ready.installed, "the binary is present either way");
+        assert!(!ready.ready && !ready.auth_configured);
+        assert!(ready.error.is_some(), "a signed-out CLI must say what to do");
+    }
+
+    #[test]
+    fn a_renamed_binary_is_what_gets_probed() {
+        let renamed = CodexHarness::custom(CodexHarnessConfig {
+            command: "definitely-not-a-real-binary-xyz".into(),
+        });
+        assert!(!renamed.readiness().installed, "an unresolvable command cannot report installed");
+        assert_eq!(CodexHarness::new().command, DEFAULT_CODEX_COMMAND);
+        assert_eq!(CodexHarness::default().command, DEFAULT_CODEX_COMMAND);
+    }
     use crate::ReasoningEffort;
+
+    /// A throwaway CLI standing in for `codex login status`.
+    #[cfg(unix)]
+    fn fake_cli(tag: &str, script: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("hl-codex-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cli");
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sign_in_is_read_from_the_exit_code_of_login_status() {
+        // Codex answers in prose rather than JSON, so the exit code is the
+        // whole signal. Getting it backwards sends a signed-in user to a Sign
+        // in button, or lets a signed-out one start a run that cannot work.
+        let signed_in = fake_cli("in", "echo 'Logged in'; exit 0");
+        assert!(probe_codex_signed_in(signed_in.to_str().unwrap()));
+
+        let signed_out = fake_cli("out", "echo 'Not logged in'; exit 1");
+        assert!(!probe_codex_signed_in(signed_out.to_str().unwrap()));
+
+        assert!(!probe_codex_signed_in("definitely-not-a-real-binary-xyz"), "an absent CLI is not signed in");
+    }
 
     #[test]
     fn codex_info_and_credential() {

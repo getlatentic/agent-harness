@@ -19,6 +19,15 @@ categories = ["api-bindings", "command-line-utilities", "development-tools"]
 [lib]
 name = "harness"
 
+# docs.rs builds with default features unless told otherwise, and the defaults
+# here are only the two CLI adapters — which would leave every type in
+# `openai_compatible` (OpenHarness, ApiKey, PromptProfile, the MCP surface)
+# missing from the published documentation. `docsrs` also lets items carry a
+# feature badge via `doc(cfg(...))`.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 # The CLI adapters are on by default. Slim the set with
 # `default-features = false` + the features you
@@ -51,7 +60,7 @@ openai-compatible = ["models-dev", "dep:ureq", "dep:ignore", "dep:globset", "dep
 cli-stream.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# Typed errors for the public API (HarnessError) — derive Display + the
+# Typed errors for the public API (Error) — derive Display + the
 # std::error::Error source chain without hand-writing impls.
 thiserror.workspace = true
 # ACP-client adapter deps (optional + gated behind the `acp` feature).
@@ -73,6 +82,16 @@ schemars = { workspace = true, optional = true }
 # Dev-only: the `playground` example's tiny web server (never a lib dependency).
 [dev-dependencies]
 tiny_http = "0.12"
+proptest.workspace = true
+# The program/PATH resolver tests create throwaway executable files in a temp
+# dir to exercise the executable-bit filter.
+tempfile = "3"
+
+# The readiness table covers every archetype, so it needs the ACP adapter as
+# well as the default CLI ones.
+[[example]]
+name = "discover"
+required-features = ["acp"]
 
 # The web playground drives a run from the browser over SSE; it needs the local
 # runtime (`openai-compatible`) + the ACP adapter (`acp`) to offer both

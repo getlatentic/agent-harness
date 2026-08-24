@@ -7,6 +7,403 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-08-23
+
+Documentation only — no code changed.
+
+### Fixed
+
+- **The install snippets pinned `0.4`.** Following the README gave the version
+  before every type was renamed.
+- **The OpenRouter example named `api_key_env`**, a field that was deliberately
+  removed: `api_key`, `api_key_env` and `requires_api_key` collapsed into one
+  `ApiKey`, because three fields could represent eight states and only four
+  were real. Copying that block would not compile. The same phantom survived in
+  two example headers and a test's prose.
+- **`cli-stream`'s README claimed `augmented_node_path()` as its own.** That
+  function belongs to `agent-harness`, under a name that no longer exists — and
+  the crate's module docs say the opposite, that the environment is the
+  caller's. `spawn_streaming` carried the same claim in its own docs. Its
+  cancel bullet now describes ending the tree rather than one process.
+- **The llama.cpp example said `readiness()` cannot probe a generic endpoint**
+  and that the first run is what tells you the server is down. `OpenAiModels`
+  changed that in 0.5.2; the example now uses `with_openai_models()`, which is
+  the case it was always about — a local server whose loaded model a config
+  file cannot know.
+
+### Added
+
+- `features()` in the trait summary, and why identity and ability are asked
+  separately; `Listing` from `catalog()`; and `with_openai_models()`.
+
+## [0.5.2] - 2026-08-23
+
+### Fixed
+
+- **Cancelling now ends the process *tree*, on both platforms.** A child that
+  started its own children and exited left them holding the stdout they
+  inherited: the pipe never closed, so no `Exited` arrived and a caller waiting
+  on the stream waited forever. The child leads its own process group on unix
+  and is placed in a Job Object on Windows, so the signal or the terminate
+  reaches everything it started. Both best-effort — if the OS refuses, this is
+  the old behaviour rather than a failed spawn. This was never Windows-only:
+  the regression test hangs without the fix on unix too.
+- **`crates/bob-rs` removed.** It stopped being a workspace member when the bob
+  adapter was dropped, so it has not compiled or been tested since; the doc
+  comments in live code that still referred to `bob_rs::BobError` now describe
+  what actually produces those errors.
+
+## [0.5.1] - 2026-08-23
+
+`agent-harness` 0.5.1 and `cli-stream` 0.4.1 — **use these, not 0.5.0**, which
+is yanked. It was published before its own CI finished and never passed on
+Windows; nothing below changes what the release is about, only whether it works
+on all three platforms.
+
+### Fixed
+
+- **The augmented `PATH` was unix-only, and Windows lost its real one.** It was
+  built by joining with `":"` and keeping entries that start with `"/"`. On
+  Windows that takes a real `C:\Windows\System32;...`, cuts it at every drive
+  letter, and discards each fragment as relative — leaving only the unix
+  fallback list, so every spawn and readiness probe searched directories that
+  machine does not have. Now `std::env::split_paths` / `join_paths` and
+  `Path::is_absolute`. The fallback returns nothing on Windows rather than unix
+  directories: its contents are Homebrew, `~/.local/bin` and nvm's layout, and
+  the login-shell query it backs up is POSIX-only.
+- **The system prompt arrived CRLF on Windows.** `include_str!` embeds whatever
+  git checked out and there was no `.gitattributes`, so the bytes differed by
+  platform — a different token count, and a different key for providers that
+  cache on the prefix. Line endings are normalised at the repo level.
+- `CDLA-Permissive-2.0` is allowed — `webpki-roots`, Mozilla's CA bundle, which
+  is data rather than code and only appears under `--all-features`.
+- `crossbeam-epoch` updated for RUSTSEC-2026-0204.
+
+### Changed
+
+- **`node_cli` is `program_path`, and `augmented_node_path()` is
+  `augmented_path()`** — see the migration note below.
+
+## [0.5.0] - 2026-08-23 [YANKED]
+
+`agent-harness` 0.5.0 and `cli-stream` 0.4.0.
+
+Everything below ships together: a 0.5.0 was prepared in August but never
+published, so its notes and everything accumulated since are one release.
+
+A release about what a run actually sends, and about surviving what comes back.
+The direct-model runtime was putting roughly 6,400 tokens on the wire before the
+user's prompt, over half of it read out of the host machine's home directory,
+and no local server started on the common 4096-token context could run the agent
+loop at all. It now sends ~1,200 on the same request, fits a 4k window with every
+tool offered, marks its prefix so providers that charge for re-reading it do not,
+and adapts what it offers to the model it is talking to.
+
+The naming is also settled: the `Harness` prefix is gone from every type, and
+the picker's three questions are three types.
+
+Read **Migration from 0.4** before upgrading.
+
+### Migration from 0.4
+
+**The `Harness` prefix is gone, and the picker's three questions are three
+types.** The library is `harness`, so `harness::HarnessInfo` said it twice —
+the redundancy `std::io::IoError` was renamed away from.
+
+| before | after |
+|---|---|
+| `HarnessError` | `Error` |
+| `HarnessInfo` | `Info` — identity only; see below |
+| `HarnessCapabilities` | `Features`, via `Harness::features()` |
+| `HarnessReadiness` | `Readiness` |
+| `HarnessModel` | `ModelChoice` |
+| `augmented_node_path()` | `augmented_path()` |
+
+**`augmented_node_path` is `augmented_path`.** Nothing about it was ever
+node-specific: it resolves whatever program the caller is about to spawn and
+gives the child a `PATH` that finds the user's tooling. An MCP server launched
+over stdio goes through the same code to find `npx`, `uvx` or a container
+command — and the old name kept implying MCP had a node dependency it does not
+have. The module behind it is `program_path` rather than `node_cli` for the same
+reason.
+
+**Capabilities moved off `Info` onto their own method.**
+`.info().capabilities` was 14 of 27 uses, each building an id, a display name
+and a description to read one bool. Identity is asked once; ability is asked
+constantly. `Harness::features()` defaults to supporting nothing, so a minimal
+adapter implements four methods and never mentions the type:
+
+```rust
+fn features(&self) -> Features {
+    Features { login: true, effort: true, ..Default::default() }
+}
+```
+
+Field names lost the prefix the type now carries: `supports_effort` → `effort`,
+`supports_max_turns` → `max_turns`, `supports_login` → `login`,
+`supports_custom_instructions` → `custom_instructions`, `allows_custom_model`
+→ `custom_model`.
+
+**`Registry::catalog()` yields `Listing`, not `Info`.** A picker needs both
+halves at the same moment, and that payload — which hosts serialize straight to
+a frontend — is a third thing that never had a name:
+
+```rust
+for listing in registry.catalog() {
+    println!("{} — effort: {}", listing.info.display_name, listing.features.effort);
+}
+```
+
+`ModelChoice` is more than a prefix strip: `Model` is ambiguous beside
+`ModelCost`, `ModelFacts` and `InstalledModel`, and the type is a picker entry
+of `value` + `label`.
+
+The `Harness` trait keeps its name.
+
+One collision to know about: `harness::Error` and `std::error::Error` cannot
+both be imported bare. Reach for the trait's methods without binding the name:
+
+```rust
+use harness::Error;
+use std::error::Error as _; // for `.source()`
+```
+
+**1. `Harness::run` is now `Harness::start`.** If you *implement* `Harness`,
+rename your method. The signature is unchanged:
+
+```rust
+fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError>
+```
+
+**2. `Harness::run_channel` is now `Harness::run`.** If you *call* a harness,
+`run` is the name to reach for, and it hands back a receiver:
+
+```rust
+let (_handle, events) = harness.run(request)?;   // was run_channel
+for event in events { /* … */ }
+```
+
+An adapter implements only `start`; every harness gets `run` for free.
+
+**3. `api_key`, `api_key_env` and `requires_api_key` are now one `ApiKey`.**
+Three fields could represent eight combinations for four meanings, and they
+could contradict each other — which they did: "needs a key" was inferred from
+"names an environment variable", so a host holding its key in a vault reported
+that no credential was required and looked permanently ready.
+
+```rust
+api_key: ApiKey::NotNeeded,                        // local Ollama, llama-server
+api_key: ApiKey::Value(key_from_your_vault),       // the secret itself
+api_key: ApiKey::Env("OPENROUTER_API_KEY".into()), // CI / headless
+api_key: ApiKey::Required,                         // needed, not supplied yet
+```
+
+| before | after |
+|---|---|
+| `api_key: Some(k)` | `ApiKey::Value(k)` |
+| `api_key_env: Some(v)` | `ApiKey::Env(v)` |
+| `requires_api_key: true`, no key yet | `ApiKey::Required` |
+| all unset | `ApiKey::NotNeeded` |
+
+`Value` never touches the environment, which matters because an exported
+variable is inherited by every child the agent spawns — including the `bash`
+tool, putting the key running the agent within the agent's reach. `is_needed()`
+and `env_var()` derive from the variant, so no two values can disagree.
+
+**4. Instruction files and skills no longer read `$HOME` on their own.**
+Runs loaded `~/.claude/CLAUDE.md` and scanned `~/.claude/skills`
+unconditionally — another product's configuration, on every turn, measured at
+~3,400 tokens on one machine. A library should not decide to read a user's home
+directory, so the host names the locations:
+
+```rust
+OpenHarnessConfig {
+    instruction_sources: InstructionSources::discover_global(),
+    global_skill_roots: harness::global_skill_roots(),
+    ..Default::default()
+}
+```
+
+Leave both at their defaults for project-only behaviour, which is what most
+hosts want: a writing app has no business inheriting a coding agent's rules.
+
+**5. `OpenHarnessConfig` gained `disabled_tools`.** Use `..Default::default()`
+to keep every built-in, or name the ones to withhold:
+
+```rust
+disabled_tools: vec!["bash".into()],
+```
+
+Withheld at construction, so a disabled tool never reaches the model's prompt
+rather than being advertised and refused. `OpenHarness::builtin_tool_names()`
+lists the valid ids.
+
+**6. Session files moved.** `sessions/<id>.json` plus `messages/<id>.jsonl`
+became a single `sessions/<id>.jsonl` — a header line, then one message per
+line. Nothing to do: the old layout is still read, so existing sessions resume.
+Only relevant if you read the files yourself.
+
+### Added
+
+- **`Discovery::OpenAiModels`** — list models by asking the endpoint, via the
+  `/v1/models` every OpenAI-compatible server is expected to serve. The three
+  existing strategies all needed the catalog known up front (Ollama's native
+  `/api/tags`, a models.dev provider id, or a static list), so a host pointing
+  at an endpoint configured at runtime — an LM Studio, a llama.cpp server, a
+  gateway — had to declare the models itself, which in practice means a person
+  typing one model name from memory. Select it with
+  `OpenHarnessConfig::with_openai_models()`; any models already declared become
+  the fallback, so a server that does not serve the route still offers what it
+  was configured with. A failed probe returns that fallback rather than an
+  error — whether the endpoint is up is `readiness`'s question, and answering it
+  twice puts the failure somewhere the caller cannot act on it. Readiness for
+  this mode judges a *local* endpoint by whether it answers, as Ollama already
+  is; a hosted one is still judged by its key.
+- **`PromptProfile`** — the tool surface and base prompt now fit the model.
+  `Auto` reads `ModelFacts` (context window and parameter count) and picks
+  `Compact` for a small window *or* a small model: core tools only, and a
+  terser prompt that keeps every rule, because the rules are what a weak model
+  gets wrong. Either fact alone decides, and with neither, a local endpoint gets
+  `Compact` and a hosted one `Full` — on a local server a wrong guess is a
+  refused request, on a hosted one a slightly narrower run.
+- **`PromptCache`** — `Ephemeral` marks the tool block, the system message and
+  the last settled turn as cacheable. Anthropic caches only what a request
+  marks and forwards the field through OpenAI-compatible gateways, so a Claude
+  model reached via OpenRouter was re-charging its whole prefix every turn.
+  Default `Implicit` is correct for providers that cache prefixes themselves.
+- **A large MCP surface is deferred behind `tool_search`.** Past 4 KB of MCP
+  schema those tools leave the initial list and one search tool takes their
+  place; the model describes what it wants and gets back matching schemas,
+  ready to call. Deferred means unlisted, never unavailable. Built-ins are never
+  deferred. Ranking is BM25, implemented in-crate — no new dependency.
+- **The skills catalog is inlined only while it fits.** Twenty skills is ~9 KB
+  paid on every request. Past the profile's budget the catalog leaves the prompt
+  and `skill` — now callable with no arguments — serves it to the one request
+  that asks.
+- **`OpenHarnessConfig.instruction_sources` / `global_skill_roots`** — where
+  `AGENTS.md`, `CLAUDE.md` and skills are read from, with a running 32 KiB
+  budget and first-match-per-directory. `InstructionSources::discover_global()`
+  and `global_skill_roots()` return the conventional per-user locations.
+- **`OpenHarnessConfig.disabled_tools`** and **`OpenHarness::builtin_tool_names`**.
+- **`ClaudeHarnessConfig` / `CodexHarnessConfig`**, via `Claude::custom` and
+  `Codex::custom` — name the binary to spawn. Both adapters hardcoded their
+  program in five places each while the ACP adapter had taken it from config
+  since it shipped, so an upstream rename or a fork needed a release to reach.
+- **`OpenHarness::ollama_at(base_url)`** — an Ollama on a non-default host.
+- **`models_dev::context_limit(provider, model)`** — a hosted model's context
+  window. Ollama reports its own via `/api/show` and a local `llama-server` via
+  `/props`; a hosted endpoint publishes one in a shape of its own or not at all,
+  so the catalog is the only cross-provider source.
+
+### Changed
+
+- Internal: the OpenAI `/v1` and native Ollama `/api/chat` request builders are
+  one function parameterised by a `Dialect`, rather than two near-identical
+  eight-argument twins kept in step by hand. The non-streaming `post_chat` is
+  gone — the same streamed builder serves callers that ignore the fragments.
+  Nothing public changed ([#41]).
+
+[#41]: https://github.com/getlatentic/agent-harness/issues/41
+
+- **BREAKING — `Harness::run` renamed to `start`; `run_channel` renamed to
+  `run`.** The common call is the channel one, so it should have the short name.
+  `run_channel` described its plumbing rather than what a caller wanted, and
+  left `run` — the obvious first thing to reach for — as the callback form.
+- **BREAKING — `api_key`, `api_key_env` and `requires_api_key` collapsed into
+  `ApiKey`.** Four meaningful states as a sum type, where three booleans and
+  options could express eight and contradict each other.
+- **BREAKING — instruction files and skills are opt-in outside the working
+  tree.** See migration 4.
+- **Sessions are one append-only JSONL file each.** Recording a turn was
+  O(n) — the whole conversation re-serialised to add one exchange — and a
+  whole-array file is only meaningful complete, so a process killed mid-write
+  lost the conversation rather than the turn. Appending costs the final line.
+  Metadata moved into the same file, where it cannot fall out of step with the
+  transcript the way two separate writes could.
+- **`RunRequest` and `RunMode` derive `Default`.** Name the fields you mean and
+  let the rest default. `RunMode` defaults to `Ask`, the read-only mode —
+  defaulting to `Edit` would hand write access to anyone who forgot the field.
+
+### Fixed
+
+- A compacted session no longer loses its summary and replays a duplicate turn.
+  Saving appended the transcript's tail, which is correct only while it grows at
+  the end; compaction inserts a summary in the middle, so the tail re-appended a
+  turn already on disk and the summary was never written at all. Resuming such a
+  session replayed the duplicate and had lost what replaced the rest of its
+  history. No API change.
+
+- Structured output and image attachments applied to streamed requests but not
+  to the non-streaming path used for compaction summaries and subagent turns.
+  There is now one request builder, so the two cannot disagree ([#41]).
+
+- **The shell tool no longer inherits the whole environment.** A command the
+  model ran could read any variable the host process held, including the API key
+  driving that same run. The child now gets an allowlist of about twenty benign
+  variables. A denylist was tried first and leaked in both directions — it
+  stripped `TOKENIZERS_PARALLELISM` while passing `AWS_ACCESS_KEY_ID` straight
+  through.
+- **A prompt the provider says is too long now compacts and retries.**
+  Compaction fired on an estimate, and an estimate against a tokenizer we do not
+  have is sometimes wrong — at which point the provider refused and the run
+  ended. A refusal naming a context overflow is now a third reason to compact,
+  beside the threshold. If there is nothing left to summarize the original error
+  is reported rather than retrying into the same refusal.
+- **A rejected request quotes the provider's explanation.** `ureq`'s `Display`
+  for a status error stops at the code, so a failure read `status code 400`
+  whether the key was refused, the model id was unknown, or the prompt was too
+  long. The body says which; it now reaches `RunEvent::Error` (truncated to 500
+  characters).
+- **Claude's `fable` alias is selectable.** The curated list held
+  `sonnet`/`opus`/`haiku`. Online this went unnoticed because models.dev
+  supplies `claude-fable-5`, but that list *is* the picker when models.dev is
+  unreachable, and Claude sets `allows_custom_model: false` — so offline, Fable
+  could be neither picked nor typed.
+- **A skill whose description is a YAML block scalar is readable.** The
+  frontmatter reader handled only a flat `key: value`, so the common
+  `description: >-` was read as the literal `">-"`. The skill still appeared in
+  the catalog, so nothing looked broken — the model simply had nothing to match
+  a task against. Seven of twenty-one skills on one machine were in that state.
+- **Skill discovery is ordered, so the prompt prefix stays byte-stable.** The
+  catalog sits ahead of the volatile working-directory block, making it part of
+  the prefix every request shares; directory order is not guaranteed, and one
+  reordered line misses the cache and re-prefills everything above it.
+- **No console window flashes on Windows** (#35). Every child process spawns
+  with `CREATE_NO_WINDOW`, via `cli_stream::hidden_command`.
+- **docs.rs shows the whole crate.** It builds default features, which here are
+  the two CLI adapters — so every type in `openai_compatible`, most of the
+  crate, was absent from the published documentation.
+
+- **A single undecodable byte no longer ends a run.** The line pump decoded
+  strictly, and treated a decode failure as end of stream — so one stray byte
+  from an agent CLI (a progress bar, an ANSI sequence, a path in whatever
+  encoding the filesystem gave it) silently dropped every line after it, the
+  final result included, and the run simply appeared to stop. Output is framed
+  on bytes and decoded lossily: an unreadable line is one damaged line.
+
+- **A relative program directory no longer outranks the whole `PATH`.**
+  Relative and empty `PATH` entries are dropped because a run spawns with its
+  working directory set to the user's workspace — somewhere the agent itself
+  writes — so anything resolving against the cwd can be planted. The program's
+  own directory was then prepended to that filtered path without being checked,
+  which is the same hole at the highest-priority position: a CLI configured as
+  `node_modules/.bin/claude` put a workspace-relative directory ahead of every
+  real one. Only an absolute directory is prepended now.
+
+- **`cli-stream` builds on Windows again**, and `PATH` is composed with
+  `std::env::join_paths` rather than a hardcoded `:`, which on Windows built a
+  path the OS reads as one nonexistent directory. A bare program name is
+  resolved against each `PATHEXT` suffix, so `claude` finds `claude.cmd`.
+
+- **One unreadable model no longer costs every provider its list.** models.dev
+  is a ~4 MB catalog published by someone else, and a single entry missing its
+  `id` failed the whole document — every provider, not just the one at fault.
+  Since a refetch returns the same bytes, "no models anywhere" persisted until
+  upstream fixed it. Models parse per entry now, and a body that cannot be read
+  is not written to the cache.
+
+- **A failed background catalog refresh no longer empties a working cache.**
+
 ## [0.4.0] - 2026-08-08
 
 `agent-harness` 0.4.0 and `cli-stream` 0.3.7.
@@ -425,7 +822,7 @@ from your `Cargo.toml`. Use `claude`, `codex`, `acp`, or
   Homebrew), cached once, with a hardcoded fallback.
 - The harness-agnostic raw tier `parse_raw_line`, the open `Registry`, and the
   `custom_harness` example (compose your own harness from the published pieces).
-- **`Harness::run_channel()`** — a provided method that starts a run and returns
+- **`Harness::run()`** — a provided method that starts a run and returns
   its `RunEvent`s on an `mpsc` receiver, so callers can `for ev in rx { … }`
   instead of hand-writing the `Arc::new(move |ev| tx.send(ev))` callback. The
   receiver hangs up on its own when the run ends. `run()` stays for push
@@ -433,7 +830,7 @@ from your `Cargo.toml`. Use `claude`, `codex`, `acp`, or
 - A local quality gate, `scripts/check.sh` (clippy `-D warnings` + test + build +
   feature-gate builds + `cargo deny` when installed), and a `deny.toml`.
 - **Testable docs + real-I/O coverage.** Runnable/`no_run` doctests on the
-  headline APIs (`spawn_streaming`, `Harness::run_channel`, `HarnessError`,
+  headline APIs (`spawn_streaming`, `Harness::run`, `HarnessError`,
   `Registry`) so the documented code can't drift from the API; a stub-process
   integration test (`tests/stub_run.rs`) that drives a real `sh` child through
   the full spawn → stream → normalize → channel/cancel path; and an

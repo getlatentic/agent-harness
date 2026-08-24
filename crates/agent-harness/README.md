@@ -10,8 +10,8 @@ teaching your UI another format.
 
 Imported as `harness`.
 
-```toml
-agent-harness = "0.4"
+```sh
+cargo add agent-harness
 ```
 
 ## Highlights
@@ -35,13 +35,13 @@ crate stays small.
 
 ```toml
 # Claude Code and Codex
-agent-harness = "0.4"
+agent-harness = "0.5"
 
 # Add ACP agents and the built-in agent for open models
-agent-harness = { version = "0.4", features = ["acp", "openai-compatible"] }
+agent-harness = { version = "0.5", features = ["acp", "openai-compatible"] }
 
 # Or take just one adapter
-agent-harness = { version = "0.4", default-features = false, features = ["claude"] }
+agent-harness = { version = "0.5", default-features = false, features = ["claude"] }
 ```
 
 | feature | what it adds |
@@ -53,34 +53,40 @@ agent-harness = { version = "0.4", default-features = false, features = ["claude
 
 ## Getting started
 
-Build an agent. Call `run_channel`. Read events.
+Build an agent. Call `run`. Read events.
+
+(`run` hands back a receiver to loop over. `start` takes a callback instead —
+reach for it when you are forwarding events straight onto a socket and an
+intermediate hop would be waste. An adapter implements only `start`; every
+harness gets `run` for free.)
 
 ```rust
-use harness::{Claude, Harness, RunEvent, RunMode, RunRequest, RunTuning};
+use harness::{Claude, Harness, RunEvent, RunRequest};
 
-let (_handle, events) = Claude::new().run_channel(RunRequest {
-    run_id: "1".into(),
-    prompt: "Summarize the README in one sentence.".into(),
-    attachments: Vec::new(),
-    cwd: None,
-    mode: RunMode::Ask,
-    tuning: RunTuning::default(),
-    resume: None,
+let (_handle, events) = Claude::new().run(RunRequest {
+    run_id: "demo".into(),
+    prompt: "In one sentence, what is a Markdown heading?".into(),
+    ..Default::default()
 })?;
 
 for event in events {
-    if let RunEvent::Text { delta, .. } = event {
-        print!("{delta}");
+    match event {
+        RunEvent::Text { delta, .. } => print!("{delta}"),
+        RunEvent::Exited { .. } => break,
+        _ => {}
     }
 }
 ```
+
+Name what you mean; the rest defaults — no working directory, `RunMode::Ask`
+(answer only; `Edit` lets it write files), no resumed session, no attachments.
 
 Keep `_handle` if you want to stop the run. Dropping it does not cancel.
 
 To use Codex instead, change one line:
 
 ```rust
-let (_handle, events) = harness::Codex::new().run_channel(request)?;
+let (_handle, events) = harness::Codex::new().run(request)?;
 ```
 
 ## Open models
@@ -93,23 +99,46 @@ It also handles sessions, skills, subagents, and MCP servers.
 
 ```rust
 let ollama = harness::OpenHarness::ollama();
-let (_handle, events) = ollama.run_channel(request)?;
+let (_handle, events) = ollama.run(request)?;
 ```
 
 A provider is configuration, not code. Point the same type at any
 OpenAI-compatible endpoint:
 
 ```rust
-use harness::{OpenHarness, OpenHarnessConfig};
+use harness::{ApiKey, OpenHarness, OpenHarnessConfig};
 
 let openrouter = OpenHarness::custom(OpenHarnessConfig {
     id: "openrouter".into(),
     display_name: "OpenRouter".into(),
     base_url: "https://openrouter.ai/api".into(),
-    api_key_env: Some("OPENROUTER_API_KEY".into()),
+    // One field, four states: no key wanted, needed and absent, a variable to
+    // read, or the secret itself. A value is never exported to the child's
+    // environment, where the agent's own `bash` tool could read it back.
+    api_key: ApiKey::Env("OPENROUTER_API_KEY".into()),
     ..Default::default()
 });
 ```
+
+Point it at a server on this machine and let the endpoint say what it serves,
+rather than naming a model you have to keep in sync:
+
+```rust
+use harness::{OpenHarness, OpenHarnessConfig};
+
+let lm_studio = OpenHarness::custom(OpenHarnessConfig {
+    id: "lm-studio".into(),
+    display_name: "LM Studio".into(),
+    base_url: "http://localhost:1234".into(),
+    ..Default::default()
+})
+.with_openai_models();
+```
+
+`with_openai_models()` reads the endpoint's own `/v1/models` — the list every
+OpenAI-compatible server is expected to serve — so `list_models()` returns what
+is actually loaded. Any models declared in the config become the fallback for a
+server that does not serve that route.
 
 Ollama is the one exception. It uses its native `/api/*` endpoints, so the
 context window is set correctly and local models can be pulled and deleted.
@@ -151,8 +180,14 @@ let registry = harness::Registry::new()
 
 ## What the trait gives you
 
-- **`Harness`** — `info`, `readiness`, `run`, `credential`, `login`,
-  `list_models`. Object-safe, so `Box<dyn Harness>` works.
+- **`Harness`** — `info`, `features`, `readiness`, `run`, `credential`,
+  `login`, `list_models`. Object-safe, so `Box<dyn Harness>` works.
+- **`Info` and `Features` are separate.** Identity is asked once; ability is
+  asked constantly, so capabilities live on `features()` rather than on the
+  struct carrying a name and a description. `features()` defaults to supporting
+  nothing, so a minimal adapter never mentions the type. `Registry::catalog()`
+  yields a `Listing` — both halves together, which is what a picker needs for
+  every row.
 - **`RunEvent`** — text, thinking, tool start and end, plan, usage with cache
   tokens, suggested edits, questions, and lifecycle. It follows the [Agent
   Client Protocol](https://agentclientprotocol.com) vocabulary.

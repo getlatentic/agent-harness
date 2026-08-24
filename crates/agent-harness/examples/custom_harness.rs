@@ -18,13 +18,12 @@
 //!     ordering stays canonical. (For a *stateless* parser, the one-liner
 //!     `normalize_process_event(event, my_fn)` does the same without the Mutex.)
 
-use std::path::PathBuf;
 use std::sync::{mpsc::sync_channel, Arc, Mutex};
 
 use harness::{
-    run_events_from_parsed, spawn_streaming, CredentialSpec, Harness, HarnessCapabilities,
-    HarnessError, HarnessInfo, HarnessReadiness, ParsedLine, ProcessEvent,
-    RunCallback, RunEvent, RunHandle, RunMode, RunRequest, RunTuning, Registry, SessionInfo,
+    run_events_from_parsed, Command, CredentialSpec, Harness,
+    Error, Info, Readiness, ParsedLine, Event,
+    RunCallback, RunEvent, RunHandle, RunRequest, Registry, SessionInfo,
 };
 use serde_json::Value;
 
@@ -35,28 +34,18 @@ const ECHO_ID: &str = "echo";
 struct EchoHarness;
 
 impl Harness for EchoHarness {
-    fn info(&self) -> HarnessInfo {
-        HarnessInfo {
+    fn info(&self) -> Info {
+        Info {
             id: ECHO_ID.to_owned(),
             display_name: "Echo".to_owned(),
             description: "A toy harness that echoes the prompt — a template for your own."
                 .to_owned(),
             install_hint: None,
-            capabilities: HarnessCapabilities {
-                credential_required: false,
-                previews_edits: false,
-                models: Vec::new(),
-                allows_custom_model: false,
-                supports_effort: false,
-                supports_max_turns: false,
-                supports_login: false,
-                supports_custom_instructions: false,
-            },
         }
     }
 
-    fn readiness(&self) -> HarnessReadiness {
-        HarnessReadiness {
+    fn readiness(&self) -> Readiness {
+        Readiness {
             harness_id: ECHO_ID.to_owned(),
             ready: true,
             installed: true,
@@ -76,7 +65,7 @@ impl Harness for EchoHarness {
         }
     }
 
-    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
+    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
         // A real harness spawns its CLI here. We spawn `printf` to emit two
         // JSON lines: an init (→ Session) and the answer (→ Text).
         let answer = format!(r#"{{"text":"echo: {}"}}"#, request.prompt.replace('"', "'"));
@@ -93,20 +82,18 @@ impl Harness for EchoHarness {
         // (invoked from reader threads), so per-run state lives behind an
         // `Arc<Mutex>` — the same shape the built-in codex adapter uses.
         let parser = Arc::new(Mutex::new(EchoParser::default()));
-        let handle = spawn_streaming(
-            PathBuf::from("printf"),
-            args,
-            Vec::new(),
-            cwd,
-            request.run_id,
-            move |event| {
+        let handle = Command::new("printf")
+            .cwd(cwd)
+            .run_id(request.run_id)
+            .args(args)
+            .stream(move |event| {
                 let mut parser = parser.lock().expect("echo parser mutex");
                 for ev in parser.on_process_event(event) {
                     (*on_event)(ev);
                 }
             },
         )
-        .map_err(HarnessError::spawn)?;
+        .map_err(Error::spawn)?;
         Ok(Box::new(handle))
     }
 }
@@ -121,10 +108,10 @@ struct EchoParser {
 }
 
 impl EchoParser {
-    fn on_process_event(&mut self, event: ProcessEvent) -> Vec<RunEvent> {
+    fn on_process_event(&mut self, event: Event) -> Vec<RunEvent> {
         match event {
-            ProcessEvent::Started { run_id } => vec![RunEvent::Started { run_id }],
-            ProcessEvent::Exited {
+            Event::Started { run_id } => vec![RunEvent::Started { run_id }],
+            Event::Exited {
                 run_id,
                 exit_code,
                 cancelled,
@@ -133,12 +120,12 @@ impl EchoParser {
                 exit_code,
                 cancelled,
             }],
-            ProcessEvent::Error { run_id, message } => vec![RunEvent::Error { run_id, message }],
-            ProcessEvent::Stderr { .. } => Vec::new(),
-            ProcessEvent::Stdout { run_id, line } => {
+            Event::Error { run_id, message } => vec![RunEvent::Error { run_id, message }],
+            Event::Stderr { .. } => Vec::new(),
+            Event::Stdout { run_id, line } => {
                 run_events_from_parsed(&run_id, self.parse_line(&line))
             }
-            // `ProcessEvent` is #[non_exhaustive]; ignore any future variant.
+            // `Event` is #[non_exhaustive]; ignore any future variant.
             _ => Vec::new(),
         }
     }
@@ -178,16 +165,12 @@ fn main() -> Result<(), String> {
     let on_event: RunCallback = Arc::new(move |ev| {
         let _ = tx.send(ev);
     });
-    let _handle = h.run(
+    let _handle = h.start(
         RunRequest {
-            run_id: "demo".into(),
-            prompt: "hello".into(),
-            cwd: None,
-            mode: RunMode::Ask,
-            tuning: RunTuning::default(),
-            resume: None,
-            attachments: Vec::new(),
-        },
+        run_id: "demo".into(),
+        prompt: "hello".into(),
+        ..Default::default()
+    },
         on_event,
     )
     .map_err(|e| e.to_string())?;

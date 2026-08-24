@@ -10,11 +10,11 @@
 //! `opencode()` shorthand for exactly the same thing.
 
 use harness::{
-    AcpHarness, AcpHarnessConfig, Harness, HarnessError, InstallHint, RunEvent, RunMode,
-    RunRequest, RunTuning,
+    AcpHarness, AcpHarnessConfig, Harness, Error, InstallHint, RunEvent,
+    RunRequest,
 };
 
-fn main() -> Result<(), HarnessError> {
+fn main() -> Result<(), Error> {
     let gemini = AcpHarness::custom(AcpHarnessConfig {
         id: "gemini".into(),
         display_name: "Gemini".into(),
@@ -34,22 +34,14 @@ fn main() -> Result<(), HarnessError> {
         return Ok(());
     }
 
-    let (_handle, rx) = gemini.run_channel(RunRequest {
+    let (_handle, events) = gemini.run(RunRequest {
         run_id: "demo".into(),
         prompt: "In one sentence, what is the Agent Client Protocol?".into(),
-        cwd: None,
-        // Ask means "do not change my files". For an ACP agent it works by
-        // denying permission requests, so it only covers calls the agent asks
-        // about. Gemini reads files and searches the web without asking,
-        // because it considers those safe. See RunMode's docs.
-        mode: RunMode::Ask,
-        tuning: RunTuning::default(),
-        resume: None,
-        attachments: Vec::new(),
+        ..Default::default()
     })?;
 
-    for ev in rx {
-        match ev {
+    for event in events {
+        match event {
             RunEvent::Text { delta, .. } => print!("{delta}"),
             RunEvent::Thinking { delta, .. } => eprint!("{delta}"),
             RunEvent::ToolStart { title, .. } => eprintln!("\n[tool] {title}"),

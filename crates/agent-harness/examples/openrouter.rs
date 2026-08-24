@@ -5,28 +5,31 @@
 //! ```
 //!
 //! There is no OpenRouter adapter in this crate. There is no OpenRouter code at
-//! all. A provider is a `base_url` and the name of an environment variable, so
-//! this example is the whole integration. The same five lines reach DeepSeek,
-//! Together, Groq, Fireworks, or anything else that speaks the OpenAI chat API
-//! — change the URL and the variable name.
+//! all. A provider is a `base_url` and a key, so this example is the whole
+//! integration. The same few lines reach DeepSeek, Together, Groq, Fireworks,
+//! or anything else that speaks the OpenAI chat API — change the URL.
+//!
+//! The key is read here and passed by value. An environment variable is a fine
+//! place for a demo to keep one; a real host reads it from an OS vault. Either
+//! way the secret goes into the config, not into the process environment,
+//! because every child the agent spawns inherits that environment.
 
-use harness::{
-    Harness, HarnessError, OpenHarness, OpenHarnessConfig, RunEvent, RunMode, RunRequest, RunTuning,
+use harness::{ApiKey, 
+    Harness, Error, OpenHarness, OpenHarnessConfig, RunEvent, RunRequest, RunTuning,
 };
 
-fn main() -> Result<(), HarnessError> {
-    if std::env::var("OPENROUTER_API_KEY").is_err() {
+fn main() -> Result<(), Error> {
+    let Ok(key) = std::env::var("OPENROUTER_API_KEY") else {
         eprintln!("Set OPENROUTER_API_KEY first. Get one at https://openrouter.ai/keys");
         return Ok(());
-    }
+    };
 
-    // The whole integration. The key is read from the environment at run time,
-    // so it never passes through this struct.
+    // The whole integration.
     let openrouter = OpenHarness::custom(OpenHarnessConfig {
         id: "openrouter".into(),
         display_name: "OpenRouter".into(),
         base_url: "https://openrouter.ai/api".into(),
-        api_key_env: Some("OPENROUTER_API_KEY".into()),
+        api_key: ApiKey::Value(key),
         ..Default::default()
     })
     // Optional: fill the model picker from the models.dev catalog rather than
@@ -36,18 +39,15 @@ fn main() -> Result<(), HarnessError> {
     let model = std::env::var("OPENROUTER_MODEL").unwrap_or_else(|_| "openai/gpt-oss-120b".into());
     eprintln!("[model] {model}");
 
-    let (_handle, rx) = openrouter.run_channel(RunRequest {
+    let (_handle, events) = openrouter.run(RunRequest {
         run_id: "demo".into(),
         prompt: "In one sentence, what is an OpenAI-compatible API?".into(),
-        cwd: None,
-        mode: RunMode::Ask,
         tuning: RunTuning { model: Some(model), ..Default::default() },
-        resume: None,
-        attachments: Vec::new(),
+        ..Default::default()
     })?;
 
-    for ev in rx {
-        match ev {
+    for event in events {
+        match event {
             RunEvent::Text { delta, .. } => print!("{delta}"),
             RunEvent::Thinking { delta, .. } => eprint!("{delta}"),
             RunEvent::ToolStart { title, .. } => eprintln!("\n[tool] {title}"),

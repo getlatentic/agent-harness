@@ -18,9 +18,9 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::{
-    normalize_process_event, spawn_streaming, CredentialSpec, Harness, HarnessCapabilities,
-    HarnessError, HarnessInfo, HarnessModel, HarnessReadiness, InstallCallback, InstallHint,
-    RunCallback, RunHandle, RunMode, RunRequest, RunTuning,
+    normalize_process_event, probe_version, Command, ResolveCli, CredentialSpec, Harness,
+    Features, Error, Info, ModelChoice, Readiness,
+    InstallCallback, InstallHint, RunCallback, RunHandle, RunMode, RunRequest, RunTuning,
 };
 
 mod parser;
@@ -32,19 +32,63 @@ pub use parser::parse_claude_line;
 /// Registry id for the Claude Code harness.
 pub const CLAUDE_HARNESS_ID: &str = "claude";
 
+/// The program spawned when the host doesn't name one.
+pub const DEFAULT_CLAUDE_COMMAND: &str = "claude";
+
 /// Claude Code CLI as a [`Harness`].
-#[derive(Debug, Default, Clone)]
-pub struct ClaudeHarness;
+#[derive(Debug, Clone)]
+pub struct ClaudeHarness {
+    command: String,
+}
+
+impl Default for ClaudeHarness {
+    // Not derived: a derived `Default` would leave `command` empty and every
+    // spawn would fail on a name nobody chose.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// What this adapter is, as opposed to what is layered onto it — the same
+/// split as [`AcpHarnessConfig`](crate::AcpHarnessConfig) and
+/// [`OpenHarnessConfig`](crate::OpenHarnessConfig).
+#[derive(Clone, Debug)]
+pub struct ClaudeHarnessConfig {
+    /// Program to spawn. A bare name is resolved on PATH; a path is used as
+    /// given. Everything else about the adapter — arguments, output parsing,
+    /// auth probing — is unchanged, so a rename upstream, a fork, a wrapper
+    /// script or a test stub costs a field here rather than a release.
+    pub command: String,
+}
+
+impl Default for ClaudeHarnessConfig {
+    fn default() -> Self {
+        Self { command: DEFAULT_CLAUDE_COMMAND.to_owned() }
+    }
+}
 
 impl ClaudeHarness {
+    /// Drives `claude` from PATH.
     pub fn new() -> Self {
-        Self
+        Self::custom(ClaudeHarnessConfig::default())
+    }
+
+    /// Drives a binary the host names:
+    ///
+    /// ```no_run
+    /// use harness::{ClaudeHarness, ClaudeHarnessConfig};
+    /// let claude = ClaudeHarness::custom(ClaudeHarnessConfig {
+    ///     command: "/opt/forks/claude-next".into(),
+    /// });
+    /// ```
+    pub fn custom(config: ClaudeHarnessConfig) -> Self {
+        Self { command: config.command }
     }
 }
 
 impl Harness for ClaudeHarness {
-    fn info(&self) -> HarnessInfo {
-        HarnessInfo {
+    fn info(&self) -> Info {
+        Info {
             id: CLAUDE_HARNESS_ID.to_owned(),
             display_name: "Claude Code".to_owned(),
             description: "Anthropic's Claude Code agent CLI. Uses your existing Claude Code login."
@@ -53,38 +97,43 @@ impl Harness for ClaudeHarness {
                 InstallHint::url("https://code.claude.com/docs")
                     .with_command("curl -fsSL https://claude.ai/install.sh | bash"),
             ),
-            capabilities: HarnessCapabilities {
-                // Claude Code owns its own login; it edits files
-                // directly (no previews). Curated model aliases (no
-                // free-text) + a turn cap; no reasoning-effort flag.
-                credential_required: false,
-                previews_edits: false,
-                models: vec![
-                    HarnessModel { value: "sonnet".to_owned(), label: "Sonnet (latest)".to_owned() },
-                    HarnessModel { value: "opus".to_owned(), label: "Opus (latest)".to_owned() },
-                    HarnessModel { value: "haiku".to_owned(), label: "Haiku (latest)".to_owned() },
-                ],
-                allows_custom_model: false,
-                supports_effort: false,
-                supports_max_turns: true,
-                supports_login: true,
-                supports_custom_instructions: false,
-            },
         }
     }
 
-    fn list_models(&self) -> Result<Vec<HarnessModel>, HarnessError> {
+    fn features(&self) -> Features {
+        Features {
+            // Claude Code owns its own login; it edits files directly, so
+            // no previews and no stored credential. Everything it does not
+            // support is left to `Default`.
+            //
+            // The aliases `claude --help` documents. This list is the whole
+            // picker when models.dev is unreachable, and `custom_model`
+            // stays off, so anything missing here is unreachable — not merely
+            // unlisted.
+            models: vec![
+                ModelChoice { value: "sonnet".to_owned(), label: "Sonnet (latest)".to_owned() },
+                ModelChoice { value: "opus".to_owned(), label: "Opus (latest)".to_owned() },
+                ModelChoice { value: "fable".to_owned(), label: "Fable (latest)".to_owned() },
+                ModelChoice { value: "haiku".to_owned(), label: "Haiku (latest)".to_owned() },
+            ],
+            max_turns: true,
+            login: true,
+            ..Default::default()
+        }
+    }
+
+    fn list_models(&self) -> Result<Vec<ModelChoice>, Error> {
         // Keep the curated aliases first (`sonnet`/`opus` track "latest" and don't
         // churn), then append models.dev's current `anthropic` lineup (exact ids)
         // when the `models-dev` feature is on. Offline / feature-off → just aliases.
-        let mut models = self.info().capabilities.models;
+        let mut models = self.features().models;
         models.extend(crate::models_dev::provider_models("anthropic"));
         Ok(models)
     }
 
-    fn readiness(&self) -> HarnessReadiness {
-        let Some(version) = probe_version("claude") else {
-            return HarnessReadiness {
+    fn readiness(&self) -> Readiness {
+        let Some(version) = probe_version(&self.command) else {
+            return Readiness {
                 harness_id: CLAUDE_HARNESS_ID.to_owned(),
                 ready: false,
                 installed: false,
@@ -100,9 +149,9 @@ impl Harness for ClaudeHarness {
         // counts: the env key is how you run headless (a container / CI),
         // where `claude auth login` can't open a browser. `claude auth status`
         // only sees the OAuth state, so we OR in the env key ourselves.
-        let signed_in = probe_claude_signed_in()
+        let signed_in = probe_claude_signed_in(&self.command)
             || crate::harness::api_key_value_usable(std::env::var("ANTHROPIC_API_KEY").ok());
-        HarnessReadiness {
+        Readiness {
             harness_id: CLAUDE_HARNESS_ID.to_owned(),
             ready: signed_in,
             installed: true,
@@ -116,11 +165,11 @@ impl Harness for ClaudeHarness {
                         .to_owned(),
                 )
             },
-            details: resolved_details(),
+            details: resolved_details(&self.command),
         }
     }
 
-    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
+    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
         // `attachments` ignored: Claude Code is a text CLI (no image input here).
         let RunRequest { run_id, prompt, cwd, mode, tuning, resume, attachments: _ } = request;
         let args = build_claude_args(prompt, mode, &tuning, resume.as_deref());
@@ -129,20 +178,19 @@ impl Harness for ClaudeHarness {
         // No env injected — Claude Code uses its own auth. PATH
         // augmentation inside `spawn_streaming` ensures `node` is
         // found for a Finder-launched .app.
-        let program = tuning.binary_path.clone().unwrap_or_else(|| PathBuf::from("claude"));
-        let handle = spawn_streaming(
-            program,
-            args,
-            Vec::new(),
-            cwd,
-            run_id,
-            move |event| {
+        let program = tuning.binary_path.clone().unwrap_or_else(|| PathBuf::from(&self.command));
+        let handle = Command::new(program)
+            .cwd(cwd)
+            .run_id(run_id)
+            .args(args)
+            .resolve_cli()
+            .stream(move |event| {
                 for normalized in normalize_process_event(event, parse_claude_line) {
                     (*on_event)(normalized);
                 }
             },
         )
-        .map_err(HarnessError::spawn)?;
+        .map_err(Error::spawn)?;
         Ok(Box::new(handle))
     }
 
@@ -157,10 +205,10 @@ impl Harness for ClaudeHarness {
         }
     }
 
-    fn login(&self, on_event: InstallCallback) -> Result<(), HarnessError> {
+    fn login(&self, on_event: InstallCallback) -> Result<(), Error> {
         // `claude auth login` runs the CLI's OAuth flow (opens the
         // browser); streamed + blocked-until-exit by the shared helper.
-        crate::run_login_command("claude", &["auth", "login"], on_event)
+        crate::run_login_command(&self.command, &["auth", "login"], on_event)
     }
 }
 
@@ -169,10 +217,10 @@ impl Harness for ClaudeHarness {
 /// signed in; defensively falls back to the exit code if the JSON is
 /// unexpected. Lets [`ClaudeHarness::readiness`] distinguish installed
 /// from signed-in.
-fn probe_claude_signed_in() -> bool {
-    let Ok(output) = crate::hidden_command("claude")
+fn probe_claude_signed_in(command: &str) -> bool {
+    let Ok(output) = crate::hidden_command(command)
         .args(["auth", "status"])
-        .env("PATH", crate::augmented_node_path())
+        .env("PATH", crate::augmented_path())
         .output()
     else {
         return false;
@@ -190,13 +238,13 @@ fn probe_claude_signed_in() -> bool {
 /// Build readiness `details` carrying where `claude` resolves on the augmented
 /// PATH and how it was installed (native / npm-global / homebrew / bundled /
 /// unknown). Attached as a `serde_json::Value` object so it rides the existing
-/// `HarnessReadiness.details` without a struct change. `details.resolved_path`
+/// `Readiness.details` without a struct change. `details.resolved_path`
 /// is absent when the binary can't be located despite a successful
 /// `--version` (e.g. a PATH entry the resolver can't read) — the host renders
 /// version + status regardless.
-fn resolved_details() -> Value {
-    let path = crate::augmented_node_path();
-    let Some(resolved) = resolve::resolve_on_path("claude", &path) else {
+fn resolved_details(command: &str) -> Value {
+    let path = crate::augmented_path();
+    let Some(resolved) = resolve::resolve_on_path(command, &path) else {
         return Value::Null;
     };
     let mut details = serde_json::Map::new();
@@ -265,32 +313,136 @@ fn extra_args_sets(extra_args: &[String], flag: &str) -> bool {
     extra_args.iter().any(|a| a == flag || a.starts_with(&with_eq))
 }
 
-/// Run `<program> --version`, returning the trimmed stdout on
-/// success. Used by readiness to detect the CLI on PATH.
-fn probe_version(program: &str) -> Option<String> {
-    // Augment PATH so a packaged `.app` (minimal launchd PATH) can find a
-    // CLI installed via nvm / Homebrew / official installer — otherwise an
-    // installed CLI is mis-reported as "not installed".
-    let output = crate::hidden_command(program)
-        .arg("--version")
-        .env("PATH", crate::augmented_node_path())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::events::RunEvent;
     use crate::ReasoningEffort;
+
+    /// A stand-in `claude` answering the three ways the adapter invokes it:
+    /// `--version`, `auth status` (JSON with `loggedIn`), and a `-p` run that
+    /// records the argv it was handed.
+    #[cfg(unix)]
+    fn fake_claude(tag: &str, signed_in: bool, emits: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("claude-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let argv = dir.join("argv");
+        let cli = dir.join("claude");
+        std::fs::write(
+            &cli,
+            format!(
+                "#!/bin/sh\n\
+                 case \"$1\" in\n\
+                 --version) echo '1.2.3 (Claude Code)'; exit 0 ;;\n\
+                 auth) echo '{{\"loggedIn\":{signed_in}}}'; exit 0 ;;\n\
+                 -p) : > '{argv}'; for a in \"$@\"; do printf '%s\\n' \"$a\" >> '{argv}'; done\n\
+                 {emits}\n\
+                 exit 0 ;;\n\
+                 esac\n\
+                 exit 1\n",
+                argv = argv.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (cli, argv)
+    }
+
+    #[cfg(unix)]
+    fn drive(cli: &std::path::Path, request: RunRequest) -> Vec<RunEvent> {
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Vec<RunEvent>>> = Arc::default();
+        let sink = Arc::clone(&seen);
+        let harness = ClaudeHarness::custom(ClaudeHarnessConfig {
+            command: cli.display().to_string(),
+        });
+        let handle = harness
+            .start(request, Arc::new(move |event| sink.lock().unwrap().push(event)))
+            .expect("the stand-in should spawn");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let done = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, RunEvent::Exited { .. }));
+            if done {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the run never exited");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = handle.cancel();
+        let events = seen.lock().unwrap().clone();
+        events
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_run_reaches_the_cli_as_stream_json_and_comes_back_as_events() {
+        // The argv tests elsewhere check `build_claude_args` in isolation; this
+        // is the only one proving the process receives that argv, and that its
+        // NDJSON comes back through the parser as normalized events.
+        let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi there"}}}"#;
+        let (cli, argv) = fake_claude("run", true, &format!("printf '%s\\n' '{delta}'"));
+
+        let events = drive(
+            &cli,
+            RunRequest {
+                run_id: "r1".to_owned(),
+                prompt: "greet me".to_owned(),
+                cwd: Some(std::env::temp_dir()),
+                tuning: RunTuning { model: Some("opus".to_owned()), ..RunTuning::default() },
+                ..RunRequest::default()
+            },
+        );
+
+        let passed: Vec<String> =
+            std::fs::read_to_string(&argv).unwrap().lines().map(str::to_owned).collect();
+        assert_eq!(passed.first().map(String::as_str), Some("-p"));
+        assert_eq!(
+            passed.get(1).map(String::as_str),
+            Some("greet me"),
+            "the prompt follows -p: {passed:?}",
+        );
+        assert!(passed.windows(2).any(|w| w[0] == "--output-format" && w[1] == "stream-json"));
+        assert!(passed.iter().any(|a| a == "--include-partial-messages"), "{passed:?}");
+        assert!(passed.windows(2).any(|w| w[0] == "--model" && w[1] == "opus"));
+
+        assert!(
+            events.iter().any(|e| matches!(e, RunEvent::Text { delta, .. } if delta == "hi there")),
+            "the CLI's delta should arrive as text: {events:?}",
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            RunEvent::Exited { exit_code: Some(0), cancelled: false, .. }
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_reads_logged_in_from_the_auth_probe() {
+        // `auth status` answers JSON, so this covers the parse as well as the
+        // spawn. Signed-out still reads as installed: the UI offers "Sign in"
+        // only once it knows the binary is there.
+        let (yes, _) = fake_claude("in", true, ":");
+        let ready =
+            ClaudeHarness::custom(ClaudeHarnessConfig { command: yes.display().to_string() })
+                .readiness();
+        assert!(ready.installed && ready.ready && ready.auth_configured);
+        assert_eq!(ready.version.as_deref(), Some("1.2.3 (Claude Code)"));
+
+        let (no, _) = fake_claude("out", false, ":");
+        let ready =
+            ClaudeHarness::custom(ClaudeHarnessConfig { command: no.display().to_string() })
+                .readiness();
+        assert!(ready.installed, "the binary is present either way");
+        assert!(!ready.ready && !ready.auth_configured);
+        assert!(ready.error.is_some(), "a signed-out CLI must say what to do");
+    }
 
     #[test]
     fn claude_info_and_credential() {
@@ -300,6 +452,89 @@ mod tests {
         assert!(hint.command.is_some_and(|c| c.contains("claude.ai/install.sh")));
         // Claude manages its own auth — Compose doesn't require a key.
         assert!(!h.credential().required);
+    }
+
+    #[test]
+    fn a_renamed_binary_is_what_gets_probed() {
+        // The point of the field: if the CLI is renamed upstream, or a user
+        // keeps a fork or wrapper under another name, that costs a call here
+        // rather than a release. A name nothing can resolve must read as "not
+        // installed" — proving readiness consults the configured command and
+        // not a baked-in "claude".
+        let renamed = ClaudeHarness::custom(ClaudeHarnessConfig {
+            command: "definitely-not-a-real-binary-xyz".into(),
+        });
+        let readiness = renamed.readiness();
+        assert!(!readiness.installed, "an unresolvable command cannot report installed");
+
+        // And the default still targets the real one.
+        assert_eq!(ClaudeHarness::new().command, DEFAULT_CLAUDE_COMMAND);
+        assert_eq!(ClaudeHarness::default().command, DEFAULT_CLAUDE_COMMAND);
+    }
+
+    /// A throwaway CLI that behaves however the test needs. The probes take the
+    /// command as an argument, so no PATH juggling is involved — the same trick
+    /// the MCP client uses to test a protocol against a real process.
+    #[cfg(unix)]
+    fn fake_cli(tag: &str, script: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("hl-claude-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cli");
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_signed_out_cli_is_believed_over_the_exit_code() {
+        // `auth status` answering `{"loggedIn": false}` while exiting 0 is the
+        // case that matters: the fallback below would read that as signed in,
+        // and the user would be told to try a run that cannot work.
+        let out = fake_cli("signedout", r#"echo '{"loggedIn": false}'"#);
+        assert!(!probe_claude_signed_in(out.to_str().unwrap()));
+
+        let inn = fake_cli("signedin", r#"echo '{"loggedIn": true}'"#);
+        assert!(probe_claude_signed_in(inn.to_str().unwrap()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_that_does_not_answer_in_json_falls_back_to_how_it_exited() {
+        // Older builds print prose. Exit 0 with something to say is the best
+        // available evidence; silence or a failure is not.
+        let prose = fake_cli("prose", "echo 'Logged in as someone@example.test'");
+        assert!(probe_claude_signed_in(prose.to_str().unwrap()));
+
+        let silent = fake_cli("silent", "exit 0");
+        assert!(!probe_claude_signed_in(silent.to_str().unwrap()), "exit 0 with nothing said proves nothing");
+
+        let failed = fake_cli("authfail", "echo 'not logged in'; exit 1");
+        assert!(!probe_claude_signed_in(failed.to_str().unwrap()));
+
+        assert!(!probe_claude_signed_in("definitely-not-a-real-binary-xyz"), "an absent CLI is not signed in");
+    }
+
+
+    #[test]
+    fn every_documented_alias_is_offered() {
+        // These are the aliases `claude --help` names. The list matters more
+        // than it looks: models.dev supplies the exact ids, but when it is
+        // unreachable — offline, or a first launch with a cold cache — this
+        // vec IS the picker. Combined with `custom_model: false`, an
+        // alias missing here cannot be selected or typed. `fable` was absent
+        // and therefore unreachable in exactly that state.
+        let caps = ClaudeHarness::new().features();
+        let offered: Vec<&str> = caps.models.iter().map(|m| m.value.as_str()).collect();
+        for alias in ["sonnet", "opus", "fable", "haiku"] {
+            assert!(offered.contains(&alias), "`--model {alias}` is documented, got {offered:?}");
+        }
+        assert!(
+            !caps.custom_model,
+            "if free-text entry is ever allowed, an omission above stops being unreachable \
+             and this test can relax"
+        );
     }
 
     /// Value of the arg immediately following `flag`, if present.

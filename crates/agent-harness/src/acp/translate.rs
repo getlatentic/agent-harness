@@ -157,4 +157,153 @@ mod tests {
         let user = session_update_to_events("r1", acp::SessionUpdate::UserMessageChunk(chunk("u")));
         assert!(user.is_empty());
     }
+
+    /// Build the update from its wire form rather than its Rust constructors.
+    /// The input to this module is JSON an agent sent, so deserializing pins the
+    /// field names too — a rename upstream should fail here, not in the field.
+    fn update(payload: serde_json::Value) -> acp::SessionUpdate {
+        serde_json::from_value(payload).expect("a valid session/update payload")
+    }
+
+    fn events(payload: serde_json::Value) -> Vec<RunEvent> {
+        session_update_to_events("r1", update(payload))
+    }
+
+    #[test]
+    fn an_announced_tool_call_carries_its_subject_and_kind() {
+        // `locations` is what lets a host follow along in the file the agent is
+        // working in; `kind` is what picks the icon and the read/write framing.
+        let out = events(serde_json::json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "c1",
+            "title": "Read config",
+            "kind": "read",
+            "status": "pending",
+            "locations": [{ "path": "/tmp/a.toml", "line": 12 }],
+            "rawInput": { "path": "/tmp/a.toml" }
+        }));
+
+        let [RunEvent::ToolStart { tool_call_id, title, tool_kind, locations, raw_input, .. }] = out.as_slice() else {
+            panic!("expected one ToolStart, got {out:?}");
+        };
+        assert_eq!(tool_call_id, "c1");
+        assert_eq!(title, "Read config");
+        assert_eq!(*tool_kind, ToolKind::Read);
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].path, "/tmp/a.toml");
+        assert_eq!(locations[0].line, Some(12));
+        assert!(raw_input.as_ref().is_some_and(|raw| raw.contains("a.toml")));
+    }
+
+    #[test]
+    fn only_a_finished_tool_call_ends_it() {
+        // An in-progress update is a status change, not a result. Emitting
+        // ToolEnd for it would close the card while the tool is still running.
+        for status in ["pending", "in_progress"] {
+            let out = events(serde_json::json!({
+                "sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": status
+            }));
+            assert!(out.is_empty(), "{status} is not terminal, got {out:?}");
+        }
+
+        let done = events(serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "content": [{ "type": "content", "content": { "type": "text", "text": "42 lines" } }]
+        }));
+        let [RunEvent::ToolEnd { ok, content, .. }] = done.as_slice() else {
+            panic!("expected one ToolEnd, got {done:?}");
+        };
+        assert!(ok);
+        assert_eq!(content.as_deref(), Some("42 lines"));
+
+        let failed = events(serde_json::json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "failed"
+        }));
+        assert!(matches!(failed.as_slice(), [RunEvent::ToolEnd { ok: false, .. }]), "{failed:?}");
+    }
+
+    #[test]
+    fn a_result_falls_back_to_raw_output_when_there_is_no_text() {
+        // A tool whose result is structured rather than prose still has
+        // something worth showing; an empty card is worse than raw JSON.
+        let out = events(serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "content": [],
+            "rawOutput": { "count": 3 }
+        }));
+        let [RunEvent::ToolEnd { content, .. }] = out.as_slice() else { panic!("{out:?}") };
+        assert!(content.as_ref().is_some_and(|c| c.contains("count")), "got {content:?}");
+    }
+
+    #[test]
+    fn a_diff_result_is_named_rather_than_rendered() {
+        let out = events(serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "content": [{ "type": "diff", "path": "/a.txt", "oldText": "a", "newText": "b" }]
+        }));
+        let [RunEvent::ToolEnd { content, .. }] = out.as_slice() else { panic!("{out:?}") };
+        assert_eq!(content.as_deref(), Some("[diff]"));
+    }
+
+    #[test]
+    fn a_plan_keeps_the_order_status_and_priority_of_every_entry() {
+        // The whole plan is replaced on each update, so dropping or reordering
+        // an entry silently rewrites what the user is watching.
+        let out = events(serde_json::json!({
+            "sessionUpdate": "plan",
+            "entries": [
+                { "content": "first", "priority": "high", "status": "completed" },
+                { "content": "second", "priority": "low", "status": "in_progress" },
+                { "content": "third", "priority": "medium", "status": "pending" }
+            ]
+        }));
+        let [RunEvent::Plan { entries, .. }] = out.as_slice() else { panic!("{out:?}") };
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].content, "first");
+        assert_eq!(entries[0].status, PlanEntryStatus::Completed);
+        assert_eq!(entries[0].priority, Some(PlanEntryPriority::High));
+        assert_eq!(entries[1].status, PlanEntryStatus::InProgress);
+        assert_eq!(entries[1].priority, Some(PlanEntryPriority::Low));
+        assert_eq!(entries[2].status, PlanEntryStatus::Pending);
+        assert_eq!(entries[2].priority, Some(PlanEntryPriority::Medium));
+    }
+
+    #[test]
+    fn every_acp_tool_kind_maps_to_one_of_ours() {
+        // `ToolKind` was extended to mirror ACP's set precisely so this is 1:1.
+        // A kind quietly collapsing to Other is a card losing its meaning.
+        for (wire, expected) in [
+            ("read", ToolKind::Read),
+            ("edit", ToolKind::Edit),
+            ("delete", ToolKind::Delete),
+            ("move", ToolKind::Move),
+            ("search", ToolKind::Search),
+            ("execute", ToolKind::Execute),
+            ("fetch", ToolKind::Fetch),
+            ("think", ToolKind::Other),
+            ("other", ToolKind::Other),
+        ] {
+            let out = events(serde_json::json!({
+                "sessionUpdate": "tool_call", "toolCallId": "c", "title": "t", "kind": wire
+            }));
+            let [RunEvent::ToolStart { tool_kind, .. }] = out.as_slice() else { panic!("{wire}: {out:?}") };
+            assert_eq!(*tool_kind, expected, "kind {wire}");
+        }
+    }
+
+    #[test]
+    fn an_update_we_do_not_model_is_dropped_rather_than_guessed_at() {
+        // `SessionUpdate` is #[non_exhaustive] and grows upstream. Anything new
+        // must pass through silently instead of becoming a misleading event.
+        assert!(events(serde_json::json!({
+            "sessionUpdate": "available_commands_update", "availableCommands": []
+        }))
+        .is_empty());
+    }
 }

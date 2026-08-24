@@ -59,16 +59,52 @@ impl Tool for WebFetch {
     }
 }
 
-fn fetch(url: &str, format: &str, timeout: Option<u64>) -> ToolOutcome {
+/// The URL actually requested. `http://` is upgraded rather than refused —
+/// models paste plain-http links constantly and the page is nearly always
+/// served over TLS anyway — and every other scheme is refused outright.
+///
+/// The refusal is the point: a fetch tool that followed `file://` would read
+/// the host's disk on the model's say-so, and this tool is offered even in
+/// read-only runs because reading the *web* is not reading the machine.
+fn resolve_url(url: &str) -> Result<String, String> {
     let url = match url.strip_prefix("http://") {
         Some(rest) => format!("https://{rest}"),
         None => url.to_owned(),
     };
-    if !url.starts_with("https://") {
-        return ToolOutcome::err(format!("webfetch: `{url}` is not a valid http(s) URL"));
+    if url.starts_with("https://") {
+        Ok(url)
+    } else {
+        Err(format!("webfetch: `{url}` is not a valid http(s) URL"))
     }
-    let secs = timeout.filter(|&t| t > 0).unwrap_or(DEFAULT_TIMEOUT_SECS).min(MAX_TIMEOUT_SECS);
-    let resp = match ureq::get(&url).timeout(Duration::from_secs(secs)).call() {
+}
+
+/// How long to wait. A host may ask for less, never for more: an unbounded
+/// wait is a run that never finishes and a turn budget spent on one URL.
+/// Zero reads as "unset" rather than "give up immediately".
+fn timeout_secs(requested: Option<u64>) -> u64 {
+    requested.filter(|&t| t > 0).unwrap_or(DEFAULT_TIMEOUT_SECS).min(MAX_TIMEOUT_SECS)
+}
+
+fn fetch(url: &str, format: &str, timeout: Option<u64>) -> ToolOutcome {
+    match resolve_url(url) {
+        Ok(url) => transfer(&url, format, timeout),
+        Err(message) => ToolOutcome::err(message),
+    }
+}
+
+/// Fetch, cap, and render a URL that has **already passed [`resolve_url`]`.
+///
+/// Split from [`fetch`] because which URLs are allowed is a policy question
+/// and moving the bytes is a mechanism, and composing them left the mechanism
+/// — including the response-size cap, which is a real guard — unreachable from
+/// any test: `resolve_url` upgrades `http` to `https`, so a local stand-in
+/// server could never be the thing fetched.
+///
+/// Private, and it is the caller's job to have resolved first: this does not
+/// re-check the scheme.
+fn transfer(url: &str, format: &str, timeout: Option<u64>) -> ToolOutcome {
+    let secs = timeout_secs(timeout);
+    let resp = match ureq::get(url).timeout(Duration::from_secs(secs)).call() {
         Ok(r) => r,
         Err(e) => return ToolOutcome::err(format!("webfetch: request to {url} failed: {e}")),
     };
@@ -174,6 +210,319 @@ fn strip_span(s: &str, open: &str, close: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server answering once with the given status, headers and body.
+    fn serving(body: Vec<u8>, content_type: &str, declared_len: Option<u64>) -> String {
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port");
+        let url = format!("http://{}", server.server_addr());
+        let content_type = content_type.to_owned();
+        std::thread::spawn(move || {
+            while let Ok(request) = server.recv() {
+                let mut response = tiny_http::Response::from_data(body.clone()).with_header(
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], content_type.as_bytes())
+                        .expect("header"),
+                );
+                if let Some(len) = declared_len {
+                    response = response.with_header(
+                        tiny_http::Header::from_bytes(
+                            &b"Content-Length"[..],
+                            len.to_string().as_bytes(),
+                        )
+                        .expect("header"),
+                    );
+                }
+                let _ = request.respond(response);
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn an_oversized_body_is_refused_even_when_the_server_never_said_how_big_it_was() {
+        // The cheap check reads Content-Length, and a server is free to omit it
+        // or lie. If that were the only check, the cap would hold exactly when
+        // it was not needed — so the read is capped at the limit plus one byte
+        // and the overflow is caught after the fact.
+        let body = vec![b'a'; (MAX_RESPONSE_BYTES + 1) as usize];
+        let url = serving(body, "text/plain", None);
+
+        let outcome = transfer(&url, "text", None);
+        assert!(!outcome.ok);
+        assert!(outcome.output.contains("too large"), "got {:?}", outcome.output);
+    }
+
+    /// A raw listener, because the point of the next test is a response whose
+    /// declared length does not match its body — and a real HTTP server
+    /// helpfully corrects that for you.
+    fn serving_raw(response: &'static str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                use std::io::{BufRead, BufReader, Write};
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                // Drain the request head so the client is not writing into a
+                // closed socket before it reads.
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    if line.ends_with("\r\n\r\n") || line == "\r\n" {
+                        break;
+                    }
+                    line.clear();
+                }
+                let mut stream = &stream;
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn a_declared_oversize_is_refused_on_the_header_alone() {
+        // The early exit: a `Content-Length` over the cap is refused before the
+        // body is pulled, so we never move 5MB we are about to discard. The
+        // body here is four bytes, so only the header can be what refused it.
+        let url = serving_raw(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: text/plain\r\n\
+             Content-Length: 6000000\r\n\
+             \r\n\
+             tiny",
+        );
+        let outcome = transfer(&url, "text", Some(5));
+        assert!(!outcome.ok, "got {:?}", outcome.output);
+        assert!(outcome.output.contains("too large"), "got {:?}", outcome.output);
+    }
+
+    #[test]
+    fn a_body_at_the_limit_is_still_delivered() {
+        // The boundary the two checks share — off by one here rejects a page
+        // that is exactly allowed.
+        let body = vec![b'a'; MAX_RESPONSE_BYTES as usize];
+        let url = serving(body, "text/plain", None);
+        let outcome = transfer(&url, "text", None);
+        assert!(outcome.ok, "got {:?}", outcome.output);
+        assert_eq!(outcome.output.len(), MAX_RESPONSE_BYTES as usize);
+    }
+
+    #[test]
+    fn html_is_converted_whether_or_not_the_header_admits_it() {
+        // Plenty of servers send HTML as text/plain or with no type at all.
+        // Handing raw markup to the model wastes the context the conversion
+        // exists to save.
+        let markup = b"<html><body><h1>Title</h1><p>Words here.</p></body></html>".to_vec();
+
+        let declared = serving(markup.clone(), "text/html; charset=utf-8", None);
+        let outcome = transfer(&declared, "markdown", None);
+        assert!(outcome.ok);
+        assert!(outcome.output.contains("Title"), "got {:?}", outcome.output);
+        assert!(!outcome.output.contains("<h1>"), "markup should be gone: {:?}", outcome.output);
+
+        let lying = serving(markup, "text/plain", None);
+        let outcome = transfer(&lying, "markdown", None);
+        assert!(!outcome.output.contains("<h1>"), "sniffed, not trusted: {:?}", outcome.output);
+    }
+
+    #[test]
+    fn asking_for_html_returns_it_verbatim() {
+        // The escape hatch: a caller that wants the markup gets the markup.
+        let markup = b"<html><body><h1>Title</h1></body></html>".to_vec();
+        let url = serving(markup, "text/html", None);
+        let outcome = transfer(&url, "html", None);
+        assert!(outcome.output.contains("<h1>Title</h1>"), "got {:?}", outcome.output);
+    }
+
+    #[test]
+    fn an_unreachable_url_is_an_error_naming_it() {
+        // A dead endpoint must not read as a page with nothing on it.
+        let outcome = transfer("http://127.0.0.1:1/nothing-here", "text", Some(1));
+        assert!(!outcome.ok);
+        assert!(outcome.output.contains("127.0.0.1:1"), "got {:?}", outcome.output);
+    }
+
+    #[test]
+    fn each_way_a_page_can_look_like_markup_is_enough_on_its_own() {
+        // Four independent signals, and the sniffer needs *any* of them. Testing
+        // one document that trips several says only that the chain works —
+        // every `||` could be an `&&` and a page announcing itself with just a
+        // doctype, or just a `<div>`, would be handed to the model as raw tags.
+        assert!(looks_like_html("<!doctype html>hello"), "doctype alone");
+        assert!(looks_like_html("<html>hello</html>"), "an html element alone");
+        assert!(looks_like_html("<p>x</p><body>y</body>"), "a body tag alone");
+        assert!(looks_like_html("<span><div>x</div></span>"), "a div alone");
+
+        assert!(!looks_like_html("cost < 5 and x -> y"), "prose is not markup");
+        assert!(!looks_like_html(""), "nor is nothing");
+    }
+
+    #[test]
+    fn text_and_markdown_are_different_renderings_of_the_same_page() {
+        // They share the is_html decision but not the renderer, and the whole
+        // point of asking for one is not getting the other.
+        let markup = "<h1>Title</h1><p>Body.</p>";
+        let as_text = render("text", markup.to_owned(), true);
+        let as_markdown = render("markdown", markup.to_owned(), true);
+
+        assert!(as_text.contains("Title") && !as_text.contains('#'), "text is plain: {as_text:?}");
+        assert!(as_markdown.contains("# Title"), "markdown keeps structure: {as_markdown:?}");
+    }
+
+    #[test]
+    fn a_page_that_is_not_markup_is_never_run_through_a_markup_renderer() {
+        // Entities are the tell: a converter decodes them, passthrough does
+        // not. Prose alone cannot show this — `htmd` leaves prose unchanged
+        // either way — so the case has to be something only a renderer touches.
+        let body = "a &amp; b";
+        assert_eq!(render("markdown", body.to_owned(), false), body, "verbatim when not markup");
+        assert_ne!(
+            render("markdown", body.to_owned(), true),
+            body,
+            "and this is the difference that proves the flag is consulted",
+        );
+    }
+
+    #[test]
+    fn the_model_is_told_which_argument_is_the_url() {
+        // The schema is the only description of the call the model gets; empty,
+        // it guesses argument names and every fetch fails as a parse error.
+        let schema = WebFetch.parameters().to_string();
+        assert!(schema.contains("url"), "got {schema}");
+
+        // And the prose beside it — with no description the model cannot tell
+        // this tool from any other and reaches for it at the wrong times.
+        assert!(
+            WebFetch.description().to_lowercase().contains("fetch"),
+            "got {:?}",
+            WebFetch.description(),
+        );
+    }
+
+    /// A raw listener declaring `len` and actually sending that many bytes —
+    /// `tiny_http` chunks a body this size, which skips the `Content-Length`
+    /// check entirely.
+    fn serving_declared(len: u64) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                use std::io::{BufRead, BufReader, Write};
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    if line == "\r\n" {
+                        break;
+                    }
+                    line.clear();
+                }
+                let mut stream = &stream;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {len}\r\n\r\n"
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&vec![b'a'; len as usize]);
+                let _ = stream.flush();
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn a_declared_length_exactly_at_the_cap_is_allowed() {
+        // The boundary the header check shares with the body check: `>` not
+        // `>=`, or a page of exactly the limit is refused before it is read.
+        let url = serving_declared(MAX_RESPONSE_BYTES);
+        let outcome = transfer(&url, "text", Some(10));
+        assert!(outcome.ok, "exactly at the cap is within it: {:?}", outcome.output);
+        assert_eq!(outcome.output.len(), MAX_RESPONSE_BYTES as usize);
+    }
+
+    #[test]
+    fn the_cap_is_five_megabytes_and_says_so_as_a_number() {
+        // Every other test here writes `MAX_RESPONSE_BYTES`, so all of them
+        // scale with the constant and none of them can pin it: `5 * 1024 *
+        // 1024` becoming `5 + 1024 + 1024` is a 2 KB ceiling that truncates
+        // almost every page, and the suite would stay green. A literal is the
+        // only thing that holds it.
+        assert_eq!(MAX_RESPONSE_BYTES, 5_242_880);
+    }
+
+    #[test]
+    fn plain_text_is_delivered_as_written() {
+        // The conversion has to be conditional on the content actually being
+        // markup. Run over prose it eats anything angle-bracketed — a diff, a
+        // shell redirect, a generic type — and the model reads a mangled page.
+        // Asked for `text`, which routes to the naive stripper — everything
+        // from `<` to the next `>` goes. Prose with no angle brackets cannot
+        // tell the two paths apart, and neither can the `markdown` path:
+        // `htmd` is a real html5ever parser, so it leaves prose alone whether
+        // or not we hand it over.
+        const PROSE: &str = "cost < 5 and x -> y, so budget accordingly";
+        let url = serving(PROSE.as_bytes().to_vec(), "text/plain", None);
+        let outcome = transfer(&url, "text", None);
+        assert_eq!(outcome.output, PROSE, "plain text must not be read as markup");
+    }
+
+    #[test]
+    fn a_stripped_script_takes_its_closing_tag_with_it() {
+        // The offset that resumes after `</script>` is what decides whether the
+        // tag itself is removed or leaks into the text. Content *after* the
+        // span is what shows the difference — a page ending at the closing tag
+        // reads the same either way.
+        let text = html_to_text("<p>before</p><script>var x = 1;</script><p>after</p>");
+        assert!(text.contains("before") && text.contains("after"), "got {text:?}");
+        assert!(!text.contains("var x"), "the script body is gone: {text:?}");
+        assert!(!text.contains('/'), "and so is the closing tag: {text:?}");
+
+        // Two spans in a row: the resume point has to be right each time, not
+        // just the first.
+        let text = html_to_text("a<style>p{color:red}</style>b<style>i{}</style>c");
+        assert_eq!(text, "abc", "got {text:?}");
+    }
+
+    #[test]
+    fn an_unterminated_script_does_not_leak_the_rest_of_the_page() {
+        // Real pages are truncated mid-download. Without a closing tag there is
+        // no safe resume point, so everything after the opener is dropped
+        // rather than emitted as script source.
+        let text = html_to_text("<p>keep</p><script>var x = 1; // and then nothing");
+        assert!(text.contains("keep"));
+        assert!(!text.contains("var x"), "got {text:?}");
+    }
+
+    #[test]
+    fn runs_of_blank_lines_collapse_to_one() {
+        // Whitespace is the cheapest thing to waste a context window on, and
+        // generated markup is full of it. One blank line survives a run so
+        // paragraphs still read apart.
+        let text = html_to_text("<p>one</p>\n\n\n\n\n<p>two</p>");
+        assert!(!text.contains("\n\n\n"), "no run longer than one blank: {text:?}");
+        assert!(text.contains("one") && text.contains("two"));
+    }
+
+    #[test]
+    fn only_the_web_is_fetchable_and_plain_http_is_upgraded() {
+        // `webfetch` is offered in read-only runs on the grounds that reading
+        // the web is not reading the machine. A scheme that reaches the disk or
+        // the local network would quietly make that untrue.
+        assert_eq!(resolve_url("http://example.test/a").unwrap(), "https://example.test/a");
+        assert_eq!(resolve_url("https://example.test/a").unwrap(), "https://example.test/a");
+
+        for refused in ["file:///etc/passwd", "ftp://example.test/x", "/etc/passwd", "example.test"] {
+            let err = resolve_url(refused).unwrap_err();
+            assert!(err.contains("not a valid http(s) URL"), "{refused} → {err}");
+        }
+    }
+
+    #[test]
+    fn a_fetch_waits_for_a_bounded_time_the_host_can_shorten_but_not_extend() {
+        // An unbounded wait is a run that never finishes; a zero one would make
+        // every fetch fail on a slow page.
+        assert_eq!(timeout_secs(None), DEFAULT_TIMEOUT_SECS);
+        assert_eq!(timeout_secs(Some(0)), DEFAULT_TIMEOUT_SECS, "zero reads as unset, not as give up now");
+        assert_eq!(timeout_secs(Some(5)), 5, "a shorter wait is the host's to choose");
+        assert_eq!(timeout_secs(Some(9_999)), MAX_TIMEOUT_SECS, "a longer one is not");
+    }
 
     #[test]
     fn render_converts_html_per_format() {

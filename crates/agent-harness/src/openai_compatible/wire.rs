@@ -1,14 +1,16 @@
-//! The OpenAI-compatible chat wire format + the blocking HTTP calls.
+//! The OpenAI-compatible chat wire format, and the HTTP pieces shared with the
+//! native Ollama path.
 //!
-//! Works against any endpoint that speaks the OpenAI
-//! `/v1/chat/completions` shape — OpenRouter, vLLM, LM Studio, and Ollama's
-//! `/v1` shim. Ollama's native `/api/*` endpoints (used for local models so
-//! `num_ctx` can be set) live in [`super::ollama`], which reuses this module's
-//! [`ThinkSplitter`] and [`send_with_retry`]. HTTP is blocking (`ureq`), driven
-//! from the worker thread `run()` spawns; errors come back as `String` and the
-//! loop turns them into a [`crate::RunEvent::Error`].
+//! The message and usage types here are the crate's internal currency: both
+//! dialects in [`super::chat`] speak them, and [`super::ollama`] translates
+//! to and from its own shape at the edge. This module also owns the parts
+//! neither dialect should reimplement — the retry policy, the SSE drain, the
+//! cache breakpoints, and [`ThinkSplitter`].
+//!
+//! HTTP is blocking (`ureq`), driven from the worker thread `run()` spawns;
+//! errors come back as `String` and the loop turns them into a
+//! [`crate::RunEvent::Error`].
 
-use std::io::{BufRead, BufReader};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -65,17 +67,6 @@ pub(crate) struct FunctionCall {
     pub arguments: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct ChatResponse {
-    #[serde(default)]
-    pub choices: Vec<Choice>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct Choice {
-    pub message: ChatMessage,
-}
-
 /// Token usage in the OpenAI shape, plus prompt-cache counters when the provider
 /// reports them: `prompt_tokens_details.cached_tokens` (OpenAI/DeepSeek
 /// auto-caching) or `cache_read_input_tokens`/`cache_creation_input_tokens`
@@ -127,13 +118,101 @@ pub(super) fn send_with_retry(url: &str, make: impl Fn() -> Result<ureq::Respons
         match make() {
             Ok(resp) => return Ok(resp),
             Err(e) if attempt < MAX_RETRIES && is_retryable(&e) => {
-                let backoff = retry_after(&e).unwrap_or_else(|| Duration::from_millis(1000 * 2u64.pow(attempt)));
-                std::thread::sleep(backoff);
+                // The provider's own `Retry-After` wins: it knows when it will
+                // be ready, and guessing shorter just spends another attempt.
+                std::thread::sleep(retry_after(&e).unwrap_or_else(|| backoff(attempt)));
                 attempt += 1;
             }
-            Err(e) => return Err(format!("chat request to {url} failed: {e}")),
+            Err(e) => return Err(describe_failure(url, e)),
         }
     }
+}
+
+/// How long to wait before retry number `attempt`, counting from zero: one
+/// second, doubling. Backing off at all is what keeps a rate limit from
+/// becoming a tighter loop against the thing that just asked for less.
+fn backoff(attempt: u32) -> Duration {
+    Duration::from_millis(1000 * 2u64.pow(attempt))
+}
+
+/// Mark the cacheable prefix with Anthropic-style `cache_control` breakpoints.
+///
+/// Anthropic caches only what a request explicitly marks, unlike OpenAI and
+/// DeepSeek which cache a matching prefix implicitly. Reached through an
+/// OpenAI-compatible gateway — OpenRouter forwards the field — an unmarked
+/// request re-charges the whole system prompt and tool block at full input
+/// price on every turn of a conversation.
+///
+/// Three breakpoints, because a cache breakpoint covers everything *before* it
+/// and nothing after:
+///
+/// 1. the last tool, covering the whole schema block;
+/// 2. the system message;
+/// 3. the last message of settled history.
+///
+/// The first two are the fixed prefix. The third is what makes a conversation
+/// cheap: without it every turn re-sends the entire transcript at full price,
+/// and the transcript is the part that grows. Placing it on the newest settled
+/// message means the turn that just completed is cached for the next one.
+///
+/// Anthropic allows four; the fourth is left unspent rather than guessed at.
+///
+/// Carrying the field forces a message's content from a bare string into a
+/// one-element text part — the only shape that has somewhere to put it.
+pub(super) fn mark_cache_breakpoints(body: &mut Value) {
+    let breakpoint = json!({ "type": "ephemeral" });
+
+    if let Some(last) = body.get_mut("tools").and_then(Value::as_array_mut).and_then(|tools| tools.last_mut()) {
+        last["cache_control"] = breakpoint.clone();
+    }
+
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else { return };
+    if let Some(system) = messages.iter_mut().find(|m| m["role"] == "system") {
+        mark_message(system, &breakpoint);
+    }
+    // The final message is the prompt just added, which by definition has never
+    // been sent before — a breakpoint there would cache nothing and burn a slot.
+    // The one before it ends the history both this turn and the next will share.
+    if messages.len() >= 3 {
+        let settled = messages.len() - 2;
+        if messages[settled]["role"] != "system" {
+            mark_message(&mut messages[settled], &breakpoint);
+        }
+    }
+}
+
+/// Attach `cache_control` to a message, promoting string content to a text part.
+/// Leaves a message alone when its content is absent — a tool-call-only
+/// assistant turn has no text to hang it on.
+fn mark_message(message: &mut Value, breakpoint: &Value) {
+    if let Some(text) = message["content"].as_str().map(str::to_owned) {
+        message["content"] = json!([{ "type": "text", "text": text, "cache_control": breakpoint }]);
+    }
+}
+
+/// Maximum characters of a provider's error body to quote.
+const MAX_BODY_SNIPPET: usize = 500;
+
+/// A failed request, carrying the provider's own explanation when it sent one.
+///
+/// `ureq`'s `Display` for a status error stops at the code, and the body is
+/// where a provider names the field it rejected — which model id is unknown,
+/// which tool schema it would not accept, why the key was refused. Discarding
+/// it leaves a bare "status code 400" that could mean anything.
+fn describe_failure(url: &str, error: Box<ureq::Error>) -> String {
+    let ureq::Error::Status(code, response) = *error else {
+        return format!("chat request to {url} failed: {error}");
+    };
+    let body = response.into_string().unwrap_or_default();
+    let body = body.trim();
+    if body.is_empty() {
+        return format!("chat request to {url} failed: status {code}");
+    }
+    let mut snippet: String = body.chars().take(MAX_BODY_SNIPPET).collect();
+    if body.chars().nth(MAX_BODY_SNIPPET).is_some() {
+        snippet.push('…');
+    }
+    format!("chat request to {url} failed: status {code}: {snippet}")
 }
 
 fn is_retryable(e: &ureq::Error) -> bool {
@@ -156,36 +235,6 @@ fn retry_after(e: &ureq::Error) -> Option<Duration> {
     }
 }
 
-/// POST `{base}/v1/chat/completions` (blocking). `base` carries no trailing
-/// slash. `tools` is the OpenAI `tools` array (built in [`super::tools`]);
-/// when empty it's omitted.
-pub(crate) fn post_chat(
-    base: &str,
-    api_key: Option<&str>,
-    model: &str,
-    messages: &[ChatMessage],
-    tools: &[Value],
-) -> Result<ChatResponse, String> {
-    let url = format!("{base}/v1/chat/completions");
-    let mut body = json!({
-        "model": model,
-        "messages": messages,
-        "stream": false,
-    });
-    if !tools.is_empty() {
-        body["tools"] = Value::Array(tools.to_vec());
-    }
-    let resp = send_with_retry(&url, || {
-        let mut req = ureq::post(&url);
-        if let Some(key) = api_key {
-            req = req.set("Authorization", &format!("Bearer {key}"));
-        }
-        req.send_json(body.clone()).map_err(Box::new)
-    })?;
-    resp.into_json::<ChatResponse>()
-        .map_err(|e| format!("decoding chat response from {url}: {e}"))
-}
-
 /// A streamed fragment handed to the caller as it arrives: assistant text, or
 /// model reasoning (which the host renders distinctly from the answer).
 pub(crate) enum Fragment<'a> {
@@ -193,67 +242,9 @@ pub(crate) enum Fragment<'a> {
     Reasoning(&'a str),
 }
 
-/// Stream `{base}/v1/chat/completions` (SSE). Calls `on_delta` for each text /
-/// reasoning fragment as it arrives, accumulates the full assistant message
-/// (content + tool calls) and any usage, and returns them. Blocking — driven on
-/// the worker thread, like [`post_chat`].
-// Each argument is a distinct wire field, and the two `post_chat_stream`
-// variants must stay signature-symmetric so callers can swap endpoints; the
-// optional bits are already bundled in `RequestExtras`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn post_chat_stream(
-    base: &str,
-    api_key: Option<&str>,
-    model: &str,
-    messages: &[ChatMessage],
-    tools: &[Value],
-    extras: RequestExtras,
-    cancel: &AtomicBool,
-    on_delta: impl FnMut(Fragment),
-) -> Result<(ChatMessage, Option<Usage>), String> {
-    let url = format!("{base}/v1/chat/completions");
-    let mut body = json!({
-        "model": model,
-        "messages": messages,
-        "stream": true,
-        "stream_options": { "include_usage": true },
-    });
-    if !tools.is_empty() {
-        body["tools"] = Value::Array(tools.to_vec());
-    }
-    if let Some(rf) = extras.response_format {
-        body["response_format"] = rf.clone();
-    }
-    if !extras.image_data_uris.is_empty() {
-        attach_images(&mut body, extras.image_data_uris);
-    }
-    let resp = send_with_retry(&url, || {
-        let mut req = ureq::post(&url);
-        if let Some(key) = api_key {
-            req = req.set("Authorization", &format!("Bearer {key}"));
-        }
-        req.send_json(body.clone()).map_err(Box::new)
-    })?;
-    let reader = BufReader::new(resp.into_reader());
-    Ok(drain_stream(reader.lines().map_while(Result::ok), extras.reasoning_tag, cancel, on_delta))
-}
-
-/// Optional request shaping beyond messages + tools, bundled so `post_chat_stream`
-/// stays within its argument budget.
-#[derive(Default)]
-pub(crate) struct RequestExtras<'a> {
-    /// OpenAI `response_format` for structured output, if any.
-    pub response_format: Option<&'a Value>,
-    /// Image data URIs to attach to the first user message (multimodal input).
-    pub image_data_uris: &'a [String],
-    /// Inline reasoning tag to lift out of the stream (e.g. `Some("think")` for
-    /// `<think>…</think>`); `None` disables extraction. See [`ThinkSplitter`].
-    pub reasoning_tag: Option<&'a str>,
-}
-
 /// Rewrite the first user message's content into a multimodal parts array — the
 /// original text plus one `image_url` part per data URI (the OpenAI vision shape).
-fn attach_images(body: &mut Value, uris: &[String]) {
+pub(super) fn attach_images(body: &mut Value, uris: &[String]) {
     let Some(messages) = body["messages"].as_array_mut() else { return };
     let Some(first_user) = messages.iter_mut().find(|m| m["role"] == "user") else { return };
     let text = first_user["content"].as_str().unwrap_or_default().to_owned();
@@ -277,7 +268,9 @@ fn base64_encode(data: &[u8]) -> String {
     for chunk in data.chunks(3) {
         let b1 = *chunk.get(1).unwrap_or(&0);
         let b2 = *chunk.get(2).unwrap_or(&0);
-        let n = ((chunk[0] as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
+        // Three bytes packed big-endian into the low 24 bits, which is what
+        // base64 then reads back six bits at a time.
+        let n = u32::from_be_bytes([0, chunk[0], b1, b2]);
         out.push(ALPHABET[((n >> 18) & 63) as usize] as char);
         out.push(ALPHABET[((n >> 12) & 63) as usize] as char);
         out.push(if chunk.len() > 1 { ALPHABET[((n >> 6) & 63) as usize] as char } else { '=' });
@@ -289,7 +282,7 @@ fn base64_encode(data: &[u8]) -> String {
 /// Parse an OpenAI SSE chat stream into the assembled assistant message + usage,
 /// invoking `on_delta` per text fragment. Split out from the HTTP so it's unit-
 /// testable without a live endpoint.
-fn drain_stream(
+pub(super) fn drain_stream(
     lines: impl Iterator<Item = String>,
     reasoning_tag: Option<&str>,
     cancel: &AtomicBool,
@@ -637,6 +630,38 @@ mod tests {
     }
 
     #[test]
+    fn the_wait_between_attempts_doubles() {
+        // Retrying is only half of backing off. A flat or shrinking wait turns
+        // the provider asking for less traffic into three requests in as many
+        // milliseconds.
+        assert_eq!(backoff(0), Duration::from_secs(1));
+        assert_eq!(backoff(1), Duration::from_secs(2));
+        assert_eq!(backoff(2), Duration::from_secs(4));
+        assert!(backoff(1) > backoff(0) && backoff(2) > backoff(1));
+    }
+
+    #[test]
+    fn text_held_back_as_a_possible_tag_is_neither_shown_early_nor_lost() {
+        // A delta ending in `<thi` might be the start of `<think>` or might be
+        // the answer itself. It is held until the next delta decides — and if
+        // the stream ends first, it was ordinary text all along.
+        let mut splitter = ThinkSplitter::new(Some("think"));
+        let fragments = std::cell::RefCell::new(Vec::<String>::new());
+        let mut record = |f: Fragment| match f {
+            Fragment::Text(t) | Fragment::Reasoning(t) => fragments.borrow_mut().push(t.to_owned()),
+        };
+
+        let shown = splitter.feed("<thi", &mut record);
+        assert!(shown.is_empty(), "nothing is committed to the message yet");
+        assert!(fragments.borrow().is_empty(), "and nothing is streamed — not even an empty delta");
+
+        // The stream ends without completing the tag, so it was never a tag.
+        let flushed = splitter.finish(&mut record);
+        assert_eq!(flushed, "<thi", "the held text belongs in the message, not dropped on the floor");
+        assert_eq!(*fragments.borrow(), ["<thi"], "and reaches the reader exactly once");
+    }
+
+    #[test]
     fn drain_stream_stops_within_one_chunk_of_cancel() {
         // #115: the Stop button sets this flag; the drain must quit reading
         // immediately instead of riding out the whole generation.
@@ -658,5 +683,136 @@ mod tests {
         // pull happens, its chunk is discarded, and the read ends.
         assert_eq!(seen, 1, "the poll after the first pull saw the flag");
         assert!(msg.content.as_deref().unwrap_or("").is_empty());
+    }
+
+    fn status_error(code: u16, body: &str) -> Box<ureq::Error> {
+        let response = ureq::Response::new(code, "Bad Request", body).expect("build response");
+        Box::new(ureq::Error::Status(code, response))
+    }
+
+    #[test]
+    fn cache_breakpoints_land_on_the_tool_block_and_the_system_message() {
+        let mut body = json!({
+            "messages": [
+                { "role": "system", "content": "the rules" },
+                { "role": "user", "content": "hello" }
+            ],
+            "tools": [ { "function": { "name": "read" } }, { "function": { "name": "list" } } ]
+        });
+        mark_cache_breakpoints(&mut body);
+
+        // The LAST tool, not the first: a breakpoint covers everything before
+        // it, so marking the first would cache one schema and re-send the rest.
+        assert_eq!(body["tools"][1]["cache_control"]["type"], "ephemeral");
+        assert!(body["tools"][0]["cache_control"].is_null(), "only the last tool carries it");
+
+        // A bare string has nowhere to hang the field, so the system content
+        // becomes a one-element text part.
+        assert_eq!(body["messages"][0]["content"][0]["text"], "the rules");
+        assert_eq!(body["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(body["messages"][1]["content"], "hello", "the only user turn is the new one");
+    }
+
+
+    #[test]
+    fn history_gets_its_own_breakpoint_but_the_new_prompt_does_not() {
+        // The prefix breakpoints cover a fixed ~1.2k tokens. The transcript is
+        // the part that grows, so without a breakpoint in it a long
+        // conversation re-sends everything at full price every turn.
+        //
+        // Long enough that the index is arithmetic rather than a coincidence:
+        // at four messages "second from the end" and "half way" are the same
+        // position, and a test there cannot tell the two apart.
+        let mut body = json!({ "messages": [
+            { "role": "system", "content": "rules" },
+            { "role": "user", "content": "first question" },
+            { "role": "assistant", "content": "first answer" },
+            { "role": "user", "content": "second question" },
+            { "role": "assistant", "content": "second answer" },
+            { "role": "user", "content": "the new prompt" }
+        ]});
+        mark_cache_breakpoints(&mut body);
+
+        assert_eq!(body["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral", "system");
+        assert_eq!(
+            body["messages"][4]["content"][0]["cache_control"]["type"], "ephemeral",
+            "the last settled turn ends the history this and the next turn share"
+        );
+        assert_eq!(
+            body["messages"][5]["content"], "the new prompt",
+            "the newest message has never been sent, so caching it would burn a slot for nothing"
+        );
+        for earlier in [1, 2, 3] {
+            assert!(
+                body["messages"][earlier]["content"].is_string(),
+                "one history breakpoint, not many: message {earlier} was marked"
+            );
+        }
+    }
+
+    #[test]
+    fn a_first_turn_marks_only_the_prefix() {
+        // system + the first prompt: there is no settled history to cache yet.
+        let mut body = json!({ "messages": [
+            { "role": "system", "content": "rules" },
+            { "role": "user", "content": "hello" }
+        ]});
+        mark_cache_breakpoints(&mut body);
+        assert_eq!(body["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(body["messages"][1]["content"], "hello");
+    }
+
+    #[test]
+    fn a_tool_call_turn_without_text_is_left_alone() {
+        // An assistant turn that only calls tools has no content string to
+        // promote; writing a parts array over it would drop the tool calls.
+        let mut body = json!({ "messages": [
+            { "role": "system", "content": "rules" },
+            { "role": "assistant", "tool_calls": [ { "id": "1" } ] },
+            { "role": "user", "content": "next" }
+        ]});
+        mark_cache_breakpoints(&mut body);
+        assert!(body["messages"][1]["tool_calls"].is_array(), "tool calls survive");
+        assert!(body["messages"][1]["content"].is_null(), "nothing invented to carry the field");
+    }
+
+    #[test]
+    fn marking_a_request_without_tools_or_system_is_a_no_op() {
+        let mut body = json!({ "messages": [ { "role": "user", "content": "hi" } ] });
+        let before = body.clone();
+        mark_cache_breakpoints(&mut body);
+        assert_eq!(body, before, "nothing to mark must not corrupt the request");
+    }
+
+    #[test]
+    fn a_rejected_request_quotes_the_providers_explanation() {
+        // The reason this exists: `ureq`'s Display stops at the status code, so
+        // a real llama.cpp context overflow read as a bare "status code 400" —
+        // indistinguishable from a bad key or an unknown model.
+        let body = r#"{"error":{"message":"request (6406 tokens) exceeds the available context size (4096 tokens)","type":"exceed_context_size_error"}}"#;
+        let message = describe_failure("http://localhost:8080/v1/chat/completions", status_error(400, body));
+
+        assert!(message.contains("status 400"), "keeps the code: {message}");
+        assert!(message.contains("exceeds the available context size"), "quotes the body: {message}");
+        assert!(message.contains("localhost:8080"), "names the endpoint: {message}");
+    }
+
+    #[test]
+    fn a_long_body_is_truncated_rather_than_dumped() {
+        let body = "x".repeat(MAX_BODY_SNIPPET * 3);
+        let message = describe_failure("http://host/v1", status_error(400, &body));
+
+        assert!(message.ends_with('…'), "marks the truncation: {message}");
+        assert!(
+            message.len() < body.len(),
+            "a provider that returns an HTML error page must not become the whole message"
+        );
+    }
+
+    #[test]
+    fn an_empty_body_still_reports_the_status() {
+        let message = describe_failure("http://host/v1", status_error(401, ""));
+        assert!(message.contains("status 401"), "{message}");
+        assert!(!message.trim_end().ends_with(':'), "no dangling colon: {message}");
     }
 }

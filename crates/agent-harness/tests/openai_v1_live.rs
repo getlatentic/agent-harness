@@ -1,11 +1,11 @@
 //! The generic OpenAI-compatible `/v1` route against **real hosted providers**.
 //!
 //! `tests/ollama_route.rs` covers the native `/api/*` path Ollama gets. This
-//! covers the other branch — [`wire::post_chat_stream`] — which every non-Ollama
+//! covers the other branch — the `OpenAi` dialect — which every non-Ollama
 //! provider takes: DeepSeek, OpenRouter, vLLM, LM Studio, llama-server.
 //!
 //! These providers are *configuration*, not code: each is an `OpenHarness` with
-//! a different `base_url` + `api_key_env`. So one parameterised test covers all
+//! a different `base_url` + `api_key`. So one parameterised test covers all
 //! of them, and adding a provider means adding a row — not an adapter.
 //!
 //! Ignored by default: each run costs real tokens and needs a key in the
@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use harness::{
+use harness::{ApiKey, 
     Harness, OpenHarness, OpenHarnessConfig, RunEvent, RunMode, RunRequest, RunTuning,
 };
 
@@ -40,7 +40,7 @@ fn exercise(provider: &str, base_url: &str, key_env: &str, model: &str) {
         id: provider.to_owned(),
         display_name: provider.to_owned(),
         base_url: base_url.to_owned(),
-        api_key_env: Some(key_env.to_owned()),
+        api_key: ApiKey::Env(key_env.to_owned()),
         ..Default::default()
     });
 
@@ -52,7 +52,7 @@ fn exercise(provider: &str, base_url: &str, key_env: &str, model: &str) {
     let done = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&done);
     let _handle = harness
-        .run(
+        .start(
             RunRequest {
                 run_id: format!("live-{provider}"),
                 prompt: "Reply with the single word: pong".to_owned(),

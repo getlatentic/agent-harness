@@ -3,10 +3,17 @@
 #   cargo release <level|version>            # DRY RUN by default — prints the plan
 #   cargo release <level|version> --execute  # actually bump + changelog + commit + tag + publish
 #
-# The three crates version and release in lockstep:
-#   * `shared-version` keeps their versions identical and bumps them together;
-#   * cargo-release publishes in dependency order (cli-stream → bob-rs →
-#     agent-harness), waiting for each to appear in the index;
+# The two crates release together but do NOT share a version number:
+#   * `shared-version` applies to the workspace `version` field, which only
+#     agent-harness inherits. cli-stream pins its own and bumps independently,
+#     because it is a stable upstream leaf that changes far less often;
+#   * so a release produces two different versions, and therefore two tags —
+#     which is why cli-stream overrides `tag-name` in its own manifest. With
+#     both on the bare `v{version}` scheme, cli-stream reaching 0.4.0 collides
+#     with the tag agent-harness already published at 0.4.0, and the release
+#     aborts partway through;
+#   * cargo-release publishes in dependency order (cli-stream → agent-harness),
+#     waiting for each to appear in the index;
 #   * the CHANGELOG stamp (below) turns `## [Unreleased]` into a fresh
 #     `## [Unreleased]` plus a dated version section.
 #
@@ -18,6 +25,21 @@
 
 shared-version = true
 tag-name = "v{{version}}"
+
+# The default branch requires a pull request — an active ruleset with no bypass
+# actors — so cargo-release's `git push origin main` is rejected. That push is
+# the LAST step, after both crates are already on crates.io, and a publish
+# cannot be undone: the run would end with the versions live, the release commit
+# and tags local, and main behind.
+#
+# So the release stops at "committed, tagged, published". The branch goes up as
+# a PR and the tags by hand:
+#
+#   git push origin cli-stream-v0.4.0 v0.5.0
+#
+# Only `v*` triggers .github/workflows/release.yml, so the project version makes
+# the GitHub release and cli-stream's tag stays a plain marker.
+push = false
 
 # Single shared workspace CHANGELOG. Scoped to the agent-harness crate (in its
 # [package.metadata.release]) so it stamps exactly once — a workspace-level

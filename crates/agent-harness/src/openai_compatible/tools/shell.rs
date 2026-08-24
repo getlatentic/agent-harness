@@ -86,16 +86,82 @@ enum BashEnd {
 /// poor fit for the per-call shell of an agent loop).
 fn shell_command(command: &str) -> Command {
     #[cfg(unix)]
-    {
+    let mut c = {
         let mut c = crate::hidden_command("sh");
         c.arg("-c").arg(command);
         c
-    }
+    };
     #[cfg(windows)]
-    {
+    let mut c = {
         let mut c = crate::hidden_command("cmd");
         c.arg("/C").arg(command);
         c
+    };
+    restrict_env(&mut c);
+    c
+}
+
+/// What a shell the *model* drives inherits from this process.
+///
+/// Deny by default, and name the exceptions. The obvious alternative — strip
+/// anything whose name looks like a secret — is wrong in both directions. It
+/// removes `TOKENIZERS_PARALLELISM` and `PASSWORD_STORE_DIR`, which are not
+/// secrets, while passing `DATABASE_URL` (which carries `user:pass@host`),
+/// `AWS_ACCESS_KEY_ID`, `GH_PAT`, and `SSH_AUTH_SOCK` — a live handle to the
+/// user's SSH agent — straight through.
+///
+/// The two failure modes are not symmetric. Withholding something needed
+/// breaks a command in the open, and it can be added back. Passing something
+/// secret leaks it silently. So this keeps only what a shell needs in order to
+/// function at all, and anything else is the host's explicit decision.
+const ALLOWED_ENV: &[&str] = &[
+    // Without these a shell cannot find a binary or read its own config.
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    // Text handling: the wrong locale mangles any non-ASCII output.
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    // Somewhere to write.
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "TZ",
+    // Windows: a process that cannot see SystemRoot generally fails to start.
+    "SystemRoot",
+    "SystemDrive",
+    "windir",
+    "COMSPEC",
+    "PATHEXT",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "ProgramFiles",
+    "ProgramData",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+];
+
+/// Case-insensitive: Windows environment names are, and `Path` vs `PATH`
+/// differs between shells.
+fn is_allowed(name: &str) -> bool {
+    ALLOWED_ENV.iter().any(|allowed| allowed.eq_ignore_ascii_case(name))
+}
+
+/// Replace the child's environment with the allowed subset.
+fn restrict_env(command: &mut Command) {
+    let keep: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
+        .filter(|(name, _)| is_allowed(&name.to_string_lossy()))
+        .collect();
+    command.env_clear();
+    for (name, value) in keep {
+        command.env(name, value);
     }
 }
 
@@ -209,4 +275,73 @@ fn lock(buf: &Arc<Mutex<Vec<u8>>>) -> std::sync::MutexGuard<'_, Vec<u8>> {
 fn taken(buf: &Arc<Mutex<Vec<u8>>>) -> String {
     let bytes = std::mem::take(&mut *lock(buf));
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::*;
+
+    fn shell_sees(var: &str) -> String {
+        let script = if cfg!(windows) { format!("echo %{var}%") } else { format!("echo ${var}") };
+        let out = shell_command(&script).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    #[test]
+    fn a_shell_call_cannot_read_the_host_key() {
+        // The exposure this closes: the host holds a provider key, and the
+        // model asks the shell to echo it back.
+        std::env::set_var("OPENROUTER_API_KEY", "sk-or-v1-SENTINEL");
+        assert!(!shell_sees("OPENROUTER_API_KEY").contains("SENTINEL"));
+        std::env::remove_var("OPENROUTER_API_KEY");
+    }
+
+    #[test]
+    fn the_cases_a_secret_name_denylist_missed() {
+        // Each of these passed a name-shaped denylist. A URL carries its own
+        // credentials; an agent socket is a live handle to the user's keys.
+        for (name, value) in [
+            ("DATABASE_URL", "postgres://user:SENTINEL@host/db"),
+            ("AWS_ACCESS_KEY_ID", "AKIASENTINEL"),
+            ("GH_PAT", "ghp_SENTINEL"),
+            ("SSH_AUTH_SOCK", "/tmp/ssh-SENTINEL/agent.1"),
+            ("NPM_AUTH", "SENTINEL"),
+        ] {
+            std::env::set_var(name, value);
+            assert!(!shell_sees(name).contains("SENTINEL"), "{name} leaked");
+            std::env::remove_var(name);
+        }
+    }
+
+    #[test]
+    fn the_cases_a_secret_name_denylist_wrongly_stripped() {
+        // These are not secrets, and a tool that needs them must still get
+        // them. A denylist removed all three for containing TOKEN/PASSWORD.
+        for (name, value) in [
+            ("TOKENIZERS_PARALLELISM", "false"),
+            ("PASSWORD_STORE_DIR", "/home/x/.password-store"),
+            ("TOKEN_BUDGET", "4096"),
+        ] {
+            std::env::set_var(name, value);
+            // Still withheld — but by a rule that is honest about it: anything
+            // not named is withheld, secret or not. The host adds what it needs.
+            assert!(!is_allowed(name));
+            std::env::remove_var(name);
+        }
+    }
+
+    #[test]
+    fn a_shell_call_still_works() {
+        // Deny-by-default is only viable if a shell can still run. Without
+        // PATH there is no `echo` to find.
+        assert!(!shell_sees("PATH").is_empty());
+        assert!(is_allowed("HOME") && is_allowed("TMPDIR"));
+    }
+
+    #[test]
+    fn allowed_names_ignore_case() {
+        // Windows environment names are case-insensitive, and shells differ on
+        // `Path` vs `PATH`.
+        assert!(is_allowed("path") && is_allowed("Path") && is_allowed("systemroot"));
+    }
 }

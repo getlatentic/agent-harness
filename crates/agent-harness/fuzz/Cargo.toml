@@ -1,0 +1,53 @@
+# Fuzz targets for the parsers that eat bytes we did not write: the NDJSON an
+# agent CLI streams on stdout, and the raw passthrough behind it.
+#
+# Detached from the workspace (the empty `[workspace]` below) because these
+# build on nightly with sanitizers and must not drag the published crates onto
+# that toolchain.
+[package]
+name = "agent-harness-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.agent-harness]
+path = ".."
+
+[profile.release]
+debug = true
+
+[[bin]]
+name = "claude_line"
+path = "fuzz_targets/claude_line.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codex_line"
+path = "fuzz_targets/codex_line.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raw_line"
+path = "fuzz_targets/raw_line.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "normalize_event"
+path = "fuzz_targets/normalize_event.rs"
+test = false
+doc = false
+bench = false

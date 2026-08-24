@@ -26,7 +26,8 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::events::RunEvent;
-use cli_stream::{spawn_streaming, InstallEvent, ProcessEvent, ProcessHandle};
+use cli_stream::{Command, Event, InstallEvent, ProcessHandle};
+use crate::program_path::ResolveCli;
 
 // --- Streaming callbacks --------------------------------------------
 
@@ -41,11 +42,11 @@ pub type InstallCallback = Arc<dyn Fn(InstallEvent) + Send + Sync>;
 
 // --- Errors ---------------------------------------------------------
 
-/// A boxed, type-erased error source. The [`HarnessError`] variants carry one
+/// A boxed, type-erased error source. The [`Error`] variants carry one
 /// of these instead of `#[from]`-ing a single concrete type, because each
 /// *category* can be produced by more than one underlying error: a `Spawn`
-/// failure is a [`cli_stream::StreamError`] for the claude/codex adapters but a
-/// `bob_rs::BobError` for bob. The real error stays reachable through
+/// failure is a [`cli_stream::StreamError`] for a CLI adapter and an I/O or
+/// protocol error for an ACP one. The real error stays reachable through
 /// [`std::error::Error::source`] (and `downcast_ref`); the category is the
 /// variant.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -57,19 +58,19 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 ///
 /// Each category carries the real underlying error as a [`source`] (via the
 /// [`BoxError`] field), so a consumer that wants more than the category can
-/// walk `.source()` or `downcast_ref::<cli_stream::StreamError>()` /
-/// `::<bob_rs::BobError>()`. The `Display` still flattens the source into the
+/// walk `.source()` or `downcast_ref::<cli_stream::StreamError>()`. The
+/// `Display` still flattens the source into the
 /// message (`"failed to start the agent: <source>"`), so a consumer that just
 /// stringifies at a boundary (e.g. a Tauri command's `.to_string()`) gets the
 /// same full message as before. `#[non_exhaustive]` so adding a variant later
 /// isn't a breaking change.
 ///
 /// ```
-/// use harness::{HarnessError, StreamError};
-/// use std::error::Error;
+/// use harness::{Error, StreamError};
+/// use std::error::Error as _; // for `.source()`, without shadowing `harness::Error`
 ///
 /// // Box any typed source under a category constructor:
-/// let err = HarnessError::spawn(StreamError::PipeNotCaptured { stream: "stdout" });
+/// let err = Error::spawn(StreamError::PipeNotCaptured { stream: "stdout" });
 ///
 /// // Stringifying at a boundary flattens the source into the message
 /// // (so a Tauri command's `.to_string()` keeps its full text)…
@@ -77,14 +78,14 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 ///
 /// // …while the real typed cause stays reachable for a consumer that wants
 /// // to branch on it rather than parse a string.
-/// let source = err.source().expect("Spawn carries a source");
+/// let source = err.source().expect("Command carries a source");
 /// assert!(source.downcast_ref::<StreamError>().is_some());
 /// ```
 ///
 /// [`source`]: std::error::Error::source
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum HarnessError {
+pub enum Error {
     /// The harness's CLI couldn't be started — not installed, not on `PATH`,
     /// or an OS-level spawn failure.
     #[error("failed to start the agent: {0}")]
@@ -105,22 +106,22 @@ pub enum HarnessError {
     Other(String),
 }
 
-impl HarnessError {
-    /// Categorize a source error as a [`Spawn`](HarnessError::Spawn) failure.
+impl Error {
+    /// Categorize a source error as a [`Spawn`](Error::Spawn) failure.
     /// Accepts anything boxable — a typed `StreamError`/`BobError`, or a
     /// `String`/`&str` for adapters with nothing typed to carry.
     pub fn spawn(source: impl Into<BoxError>) -> Self {
         Self::Spawn(source.into())
     }
-    /// Categorize a source error as an [`Install`](HarnessError::Install) failure.
+    /// Categorize a source error as an [`Install`](Error::Install) failure.
     pub fn install(source: impl Into<BoxError>) -> Self {
         Self::Install(source.into())
     }
-    /// Categorize a source error as a [`Login`](HarnessError::Login) failure.
+    /// Categorize a source error as a [`Login`](Error::Login) failure.
     pub fn login(source: impl Into<BoxError>) -> Self {
         Self::Login(source.into())
     }
-    /// Categorize a source error as a [`Cancel`](HarnessError::Cancel) failure.
+    /// Categorize a source error as a [`Cancel`](Error::Cancel) failure.
     pub fn cancel(source: impl Into<BoxError>) -> Self {
         Self::Cancel(source.into())
     }
@@ -134,7 +135,7 @@ impl HarnessError {
 /// these two operations, so the concrete mechanism stays behind the trait.
 pub trait RunControl: Send + Sync {
     /// Stop the run. Best-effort; idempotent.
-    fn cancel(&self) -> Result<(), HarnessError>;
+    fn cancel(&self) -> Result<(), Error>;
     /// Whether [`cancel`](RunControl::cancel) was called.
     fn was_cancelled(&self) -> bool;
     /// The OS process id of the underlying child while it's alive, for a
@@ -153,8 +154,8 @@ pub type RunHandle = Box<dyn RunControl>;
 // Both the trait and the handle live in this crate, so this impl is here
 // (orphan rule) rather than in any adapter crate.
 impl RunControl for ProcessHandle {
-    fn cancel(&self) -> Result<(), HarnessError> {
-        ProcessHandle::cancel(self).map_err(HarnessError::cancel)
+    fn cancel(&self) -> Result<(), Error> {
+        ProcessHandle::cancel(self).map_err(Error::cancel)
     }
     fn was_cancelled(&self) -> bool {
         ProcessHandle::was_cancelled(self)
@@ -184,10 +185,15 @@ impl RunControl for ProcessHandle {
 ///
 /// Treat `Ask` as "do not change my files", not as a sandbox. None of these
 /// adapters isolate the process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RunMode {
     /// Answer / discuss. No file edits expected.
+    ///
+    /// The default, deliberately: a caller who omits the mode gets the
+    /// read-only one. Defaulting to `Edit` would hand write access to anyone
+    /// who forgot the field.
+    #[default]
     Ask,
     /// Propose edits to the workspace.
     Edit,
@@ -271,7 +277,11 @@ pub struct Attachment {
 /// approval mode, coin budget, executable override) are filled in by
 /// the adapter from its own defaults; the user-facing tuning the
 /// picker exposes (model, effort, turn cap) rides on `tuning`.
-#[derive(Debug, Clone)]
+/// Derives `Default`, so a call site names only what it cares about and leaves
+/// the rest to `..Default::default()`. Spelling out `cwd: None`, `resume:
+/// None` and `attachments: Vec::new()` on every call was noise, and it made
+/// each new field a breaking change for every caller.
+#[derive(Debug, Clone, Default)]
 pub struct RunRequest {
     /// Caller-chosen id used to correlate events with the handle.
     pub run_id: String,
@@ -314,7 +324,7 @@ pub struct CredentialSpec {
 /// trait stays generic.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct HarnessReadiness {
+pub struct Readiness {
     pub harness_id: String,
     /// Installed *and* authenticated *and* able to run.
     pub ready: bool,
@@ -331,14 +341,14 @@ pub struct HarnessReadiness {
 /// via [`RunTuning::model`]; `label` is the human-facing name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct HarnessModel {
+pub struct ModelChoice {
     pub value: String,
     pub label: String,
 }
 
 /// An installed model with the metadata a model-manager UI shows — the
 /// neutral shape returned by [`Harness::list_installed_models`]. Richer than
-/// [`HarnessModel`] (the picker's name-only entry): on-disk `size` in bytes plus
+/// [`ModelChoice`] (the picker's name-only entry): on-disk `size` in bytes plus
 /// the parameter count / quantization where the backend reports them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -423,9 +433,19 @@ pub struct ModelManagement {
 /// to it *declaratively* instead of branching on the harness id. A new
 /// adapter that, say, needs a stored key just sets `credential_required:
 /// true` here — no `id == "bob"` checks to hunt down.
-#[derive(Debug, Clone, Serialize)]
+///
+/// [`Default`] is "supports nothing", which is the honest starting point: an
+/// adapter names what it does support and leaves the rest, rather than
+/// restating eight fields and risking one being wrong by omission.
+///
+/// ```
+/// # use harness::Features;
+/// let claude_like = Features { max_turns: true, ..Default::default() };
+/// assert!(!claude_like.effort);
+/// ```
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct HarnessCapabilities {
+pub struct Features {
     /// Compose stores this harness's credential (bob). When `false`,
     /// the CLI owns its own login (claude/codex) and Compose runs no
     /// credential/install preflight — a missing login surfaces as the
@@ -436,26 +456,26 @@ pub struct HarnessCapabilities {
     /// file watcher reflects them (claude/codex).
     pub previews_edits: bool,
     /// Curated model choices for the picker's selector. Empty → no
-    /// curated list (rely on `allows_custom_model`).
-    pub models: Vec<HarnessModel>,
+    /// curated list (rely on `custom_model`).
+    pub models: Vec<ModelChoice>,
     /// Whether a free-text model id is accepted beyond `models` (codex,
     /// whose model names change frequently). Drives a text field vs a
     /// fixed dropdown in the picker.
-    pub allows_custom_model: bool,
+    pub custom_model: bool,
     /// Honors [`RunTuning::effort`] (codex reasoning effort).
-    pub supports_effort: bool,
+    pub effort: bool,
     /// Honors [`RunTuning::max_turns`] (claude turn cap).
-    pub supports_max_turns: bool,
+    pub max_turns: bool,
     /// Supports an interactive [`Harness::login`] flow (the CLI's own
     /// OAuth, e.g. `claude auth login` / `codex login`). Drives the
     /// picker's "Sign in" affordance when installed-but-not-signed-in.
     /// `false` for harnesses Compose authenticates itself (bob).
-    pub supports_login: bool,
+    pub login: bool,
     /// Honors [`RunTuning::extra_instructions`] — the user's per-harness custom
     /// instructions, appended to the system prompt. `true` only for the
     /// `openai-compatible` adapter so far; the picker hides the field for the
     /// rest rather than offering a control that does nothing.
-    pub supports_custom_instructions: bool,
+    pub custom_instructions: bool,
 }
 
 /// Where a user gets a harness that isn't on the machine yet.
@@ -484,19 +504,20 @@ impl InstallHint {
     }
 }
 
-/// Static metadata for the harness picker.
+/// Who a harness is: the identity and presentation a picker renders.
+///
+/// What it can *do* is [`Features`], asked for separately — that question
+/// is put far more often than this one, and answering it should not mean
+/// building three strings.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct HarnessInfo {
+pub struct Info {
     pub id: String,
     pub display_name: String,
     pub description: String,
     /// How the user installs this harness themselves. `None` when there is
     /// nothing to install — a hosted endpoint, or an agent they already supply.
     pub install_hint: Option<InstallHint>,
-    /// Declarative capabilities — what the harness supports, so the UI
-    /// and run-gating never special-case its id.
-    pub capabilities: HarnessCapabilities,
 }
 
 // --- The trait ------------------------------------------------------
@@ -505,23 +526,33 @@ pub struct HarnessInfo {
 /// (they hold config, not connections) so a registry can hand out
 /// fresh boxes on demand.
 pub trait Harness: Send + Sync {
-    /// Static metadata for the UI.
-    fn info(&self) -> HarnessInfo;
+    /// Who this harness is — identity and presentation, for the picker.
+    fn info(&self) -> Info;
+
+    /// What this harness supports, so a consumer adapts to it declaratively
+    /// instead of branching on [`Info::id`].
+    ///
+    /// Defaults to supporting nothing, which is the safe direction: an adapter
+    /// names what it does, and one that has not heard of a capability added
+    /// later does not claim it.
+    fn features(&self) -> Features {
+        Features::default()
+    }
 
     /// Probe availability / version / auth. May shell out; callers
     /// should treat it as blocking and run it off the UI thread.
-    fn readiness(&self) -> HarnessReadiness;
+    fn readiness(&self) -> Readiness;
 
     /// Start a run, streaming events through `on_event`. Returns a
     /// handle immediately; work continues on background threads.
-    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError>;
+    fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error>;
 
     /// The credential this harness needs.
     fn credential(&self) -> CredentialSpec;
 
     /// Enumerate the models this harness can run, *live*. The default returns
-    /// the static list declared in [`HarnessInfo`]
-    /// (`info().capabilities.models`), so existing adapters need no change.
+    /// the static list declared in [`Info`]
+    /// (`capabilities().models`), so existing adapters need no change.
     ///
     /// Override it when the model set is discovered at runtime rather than
     /// known at compile time — a hosted-API adapter querying the provider's
@@ -530,8 +561,8 @@ pub trait Harness: Send + Sync {
     /// returns an empty list, and the host hides the picker — capability by
     /// the *absence* of models, not a separate flag. May shell out / hit the
     /// network; treat it as blocking and run it off the UI thread.
-    fn list_models(&self) -> Result<Vec<HarnessModel>, HarnessError> {
-        Ok(self.info().capabilities.models)
+    fn list_models(&self) -> Result<Vec<ModelChoice>, Error> {
+        Ok(self.features().models)
     }
 
     /// Whether this harness can install/list/delete its own models locally, and
@@ -548,8 +579,8 @@ pub trait Harness: Send + Sync {
     /// name-only set). Default: unsupported — override alongside
     /// [`model_management`](Harness::model_management). Blocking (hits the local
     /// server); run it off the UI thread.
-    fn list_installed_models(&self) -> Result<Vec<InstalledModel>, HarnessError> {
-        Err(HarnessError::Other(
+    fn list_installed_models(&self) -> Result<Vec<InstalledModel>, Error> {
+        Err(Error::Other(
             "This harness does not support managing models.".to_owned(),
         ))
     }
@@ -563,16 +594,16 @@ pub trait Harness: Send + Sync {
         _model: &str,
         _cancel: &std::sync::atomic::AtomicBool,
         _on_progress: PullProgressCallback<'_>,
-    ) -> Result<(), HarnessError> {
-        Err(HarnessError::Other(
+    ) -> Result<(), Error> {
+        Err(Error::Other(
             "This harness does not support managing models.".to_owned(),
         ))
     }
 
     /// Remove an installed local model. Removing one that's already absent
     /// succeeds (the requested end state). Default: unsupported.
-    fn delete_model(&self, _model: &str) -> Result<(), HarnessError> {
-        Err(HarnessError::Other(
+    fn delete_model(&self, _model: &str) -> Result<(), Error> {
+        Err(Error::Other(
             "This harness does not support managing models.".to_owned(),
         ))
     }
@@ -583,8 +614,8 @@ pub trait Harness: Send + Sync {
     /// `Done { ok }` reports success. This is the agent authenticating
     /// itself — distinct from installing it, which the host's user does.
     /// Default: unsupported, for harnesses the host authenticates by key.
-    fn login(&self, _on_event: InstallCallback) -> Result<(), HarnessError> {
-        Err(HarnessError::login(
+    fn login(&self, _on_event: InstallCallback) -> Result<(), Error> {
+        Err(Error::login(
             "This harness does not support interactive sign-in.",
         ))
     }
@@ -605,25 +636,21 @@ pub trait Harness: Send + Sync {
     /// [`RunControl`] — so it is safe to drain `rx` to completion while
     /// still holding the handle for a possible [`cancel`](RunControl::cancel).)
     ///
-    /// Prefer [`run`](Harness::run) directly when you need push semantics —
+    /// Prefer [`start`](Harness::start) when you need push semantics —
     /// e.g. forwarding straight onto a Tauri `Channel` or an SSE sink from
     /// inside the callback — where an intermediate channel is just an extra
-    /// hop. This is a provided method (not overridable surface): adapters
-    /// implement only `run`, and every harness — built-in or third-party —
-    /// gets `run_channel` for free.
+    /// hop. This is a provided method (not overridable surface): an adapter
+    /// implements only [`start`](Harness::start), and every harness — built-in
+    /// or third-party — gets `run` for free.
     ///
     /// ```no_run
     /// use harness::{Claude, Harness, RunEvent, RunMode, RunRequest, RunTuning};
     ///
-    /// # fn main() -> Result<(), harness::HarnessError> {
-    /// let (_handle, rx) = Claude::new().run_channel(RunRequest {
+    /// # fn main() -> Result<(), harness::Error> {
+    /// let (_handle, rx) = Claude::new().run(RunRequest {
     ///     run_id: "demo".into(),
     ///     prompt: "Explain Markdown headings in one sentence.".into(),
-    ///     cwd: None,
-    ///     mode: RunMode::Ask,
-    ///     tuning: RunTuning::default(),
-    ///     resume: None,
-    ///     attachments: Vec::new(),
+    ///     ..Default::default()
     /// })?;
     /// for event in rx {
     ///     match event {
@@ -635,12 +662,12 @@ pub trait Harness: Send + Sync {
     /// # Ok(())
     /// # }
     /// ```
-    fn run_channel(
+    fn run(
         &self,
         request: RunRequest,
-    ) -> Result<(RunHandle, mpsc::Receiver<RunEvent>), HarnessError> {
+    ) -> Result<(RunHandle, mpsc::Receiver<RunEvent>), Error> {
         let (tx, rx) = mpsc::channel();
-        let handle = self.run(
+        let handle = self.start(
             request,
             Arc::new(move |event| {
                 // A hung-up receiver (consumer stopped early) is not an
@@ -655,7 +682,7 @@ pub trait Harness: Send + Sync {
 
 /// Run a harness's interactive sign-in command, streaming its output as
 /// [`InstallEvent`]s and blocking until it exits. Reuses
-/// [`spawn_streaming`] (PATH augmentation + reader threads, so a packaged
+/// [`ResolveCli`] (CLI resolution + reader threads, so a packaged
 /// `.app` finds the CLI), mapping its process events onto the
 /// install-stream shape (Step / Stdout / Stderr / Done). The login CLI
 /// opens the user's browser for OAuth; we surface its output (incl. any
@@ -666,7 +693,7 @@ pub fn run_login_command(
     program: &str,
     args: &[&str],
     on_event: InstallCallback,
-) -> Result<(), HarnessError> {
+) -> Result<(), Error> {
     (*on_event)(InstallEvent::Step {
         text: "Opening your browser to sign in…".to_owned(),
     });
@@ -675,28 +702,14 @@ pub fn run_login_command(
     let events_cb = Arc::clone(&on_event);
     // Bound, not `_`, so the handle outlives the wait (dropping it could
     // signal the child); by the time we return, the process has exited.
-    let _handle = spawn_streaming(
-        PathBuf::from(program),
-        args.iter().map(|s| (*s).to_owned()).collect(),
-        Vec::new(),
-        std::env::current_dir().unwrap_or_default(),
-        format!("login-{program}"),
-        move |event| match event {
-            ProcessEvent::Started { .. } => {}
-            ProcessEvent::Stdout { line, .. } => {
-                (*events_cb)(InstallEvent::Stdout { text: line });
+    let spawn = Command::new(program).cwd(std::env::current_dir().unwrap_or_default()).run_id(format!("login-{program}"))
+        .args(args.iter().copied());
+    let _handle = spawn.resolve_cli().stream(move |event| {
+            let finished = matches!(event, Event::Exited { .. });
+            if let Some(install) = login_event(&event) {
+                (*events_cb)(install);
             }
-            ProcessEvent::Stderr { line, .. } => {
-                (*events_cb)(InstallEvent::Stderr { text: line });
-            }
-            ProcessEvent::Error { message, .. } => {
-                (*events_cb)(InstallEvent::Stderr { text: message });
-            }
-            ProcessEvent::Exited { exit_code, .. } => {
-                (*events_cb)(InstallEvent::Done {
-                    exit_code,
-                    ok: exit_code == Some(0),
-                });
+            if finished {
                 let (lock, cvar) = &*done_cb;
                 // Recover from a poisoned lock instead of panicking on a
                 // reader thread: the guarded value is a plain bool, never in a
@@ -704,17 +717,39 @@ pub fn run_login_command(
                 *lock.lock().unwrap_or_else(|p| p.into_inner()) = true;
                 cvar.notify_all();
             }
-            // `ProcessEvent` is #[non_exhaustive]; ignore any future variant.
-            _ => {}
         },
     )
-    .map_err(HarnessError::login)?;
+    .map_err(Error::login)?;
     let (lock, cvar) = &*done;
     let mut finished = lock.lock().unwrap_or_else(|p| p.into_inner());
     while !*finished {
         finished = cvar.wait(finished).unwrap_or_else(|p| p.into_inner());
     }
     Ok(())
+}
+
+/// One process event as an install-stream event, or `None` for the ones a user
+/// has no use for.
+///
+/// A separate function because the interesting cases are decisions, not
+/// plumbing: stderr carries text worth showing (an OAuth device code often
+/// arrives there, and so does the reason a login failed), and a read or wait
+/// failure is surfaced as stderr rather than dropped — a run that dies mid-way
+/// would otherwise end with no explanation at all. Those paths are provoked by
+/// OS-level failures no test can arrange, so the mapping is checked here with
+/// values instead.
+fn login_event(event: &Event) -> Option<InstallEvent> {
+    match event {
+        Event::Stdout { line, .. } => Some(InstallEvent::Stdout { text: line.clone() }),
+        Event::Stderr { line, .. } => Some(InstallEvent::Stderr { text: line.clone() }),
+        Event::Error { message, .. } => Some(InstallEvent::Stderr { text: message.clone() }),
+        Event::Exited { exit_code, .. } => {
+            Some(InstallEvent::Done { exit_code: *exit_code, ok: *exit_code == Some(0) })
+        }
+        // `Started` is the spawn itself, which the caller already knows about;
+        // `Event` is #[non_exhaustive], so anything new is ignored too.
+        _ => None,
+    }
 }
 
 /// Whether an API-key value an adapter pulled from the environment counts as
@@ -724,9 +759,9 @@ pub fn run_login_command(
 /// which can't complete where there's no browser. Pure (the env read stays at
 /// the call site) so it's unit-tested directly.
 ///
-/// Only the claude/codex adapters OR this into readiness — bob reports auth via
-/// `bob-rs`'s own keychain source — so it's gated to those features. Without
-/// them (`--no-default-features`) it would be dead code, hence the `cfg`.
+/// Only the claude/codex adapters OR this into readiness, so it is gated to
+/// those features: without them (`--no-default-features`) it would be dead
+/// code, hence the `cfg`.
 #[cfg(any(feature = "claude", feature = "codex"))]
 pub(crate) fn api_key_value_usable(value: Option<String>) -> bool {
     matches!(value, Some(v) if !v.trim().is_empty())
@@ -748,7 +783,7 @@ mod tests {
     #[test]
     fn pull_aggregator_sums_across_digests_keeping_latest_per_digest() {
         let mut agg = PullProgressAggregator::default();
-        // Manifest phase: no byte totals yet → no percent.
+        // Info phase: no byte totals yet → no percent.
         assert_eq!(
             agg.update(&PullProgress { status: "pulling manifest".into(), digest: None, total: None, completed: None }),
             None
@@ -781,11 +816,215 @@ mod tests {
         assert!(!api_key_value_usable(None));
     }
 
+    /// An adapter that implements only the four required methods — the whole
+    /// point of the trait's provided ones. What it gets for free is a contract
+    /// third-party adapters depend on, so it is asserted rather than assumed.
+    struct MinimalHarness;
+
+    impl Harness for MinimalHarness {
+        fn info(&self) -> Info {
+            Info {
+                id: "minimal".to_owned(),
+                display_name: "Minimal".to_owned(),
+                description: "implements the required surface and nothing else".to_owned(),
+                install_hint: None,
+            }
+        }
+
+        fn features(&self) -> Features {
+            Features {
+                models: vec![ModelChoice { value: "m1".to_owned(), label: "Model one".to_owned() }],
+                ..Default::default()
+            }
+        }
+        fn readiness(&self) -> Readiness {
+            Readiness {
+                harness_id: "minimal".to_owned(),
+                ready: true,
+                installed: true,
+                version: None,
+                auth_configured: true,
+                error: None,
+                details: serde_json::Value::Null,
+            }
+        }
+        fn start(&self, _request: RunRequest, _on_event: RunCallback) -> Result<RunHandle, Error> {
+            Ok(Box::new(NoopControl))
+        }
+        fn credential(&self) -> CredentialSpec {
+            CredentialSpec {
+                label: "none".to_owned(),
+                keychain_service: "s".to_owned(),
+                keychain_account: "a".to_owned(),
+                required: false,
+            }
+        }
+    }
+
+    #[test]
+    fn an_adapter_that_implements_only_the_required_surface_still_answers_the_rest() {
+        let harness = MinimalHarness;
+        // The picker asks every harness for models; the default answers from
+        // the capabilities it already declared rather than making each adapter
+        // write the same one-liner.
+        assert_eq!(harness.list_models().unwrap(), harness.features().models);
+        assert!(harness.model_management().is_none(), "no model management is the default");
+        assert!(NoopControl.pid().is_none(), "a harness with no process reports no pid");
+    }
+
+    #[test]
+    fn unsupported_optional_features_refuse_rather_than_pretend_to_succeed() {
+        // Returning Ok(vec![]) here would read as "you have no models
+        // installed" from a harness that cannot install any — the same
+        // absent-versus-unsupported confusion the session store had.
+        let harness = MinimalHarness;
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+
+        for message in [
+            harness.list_installed_models().map(|_| ()).unwrap_err().to_string(),
+            harness.pull_model("m", &cancel, &mut |_| {}).unwrap_err().to_string(),
+            harness.delete_model("m").unwrap_err().to_string(),
+        ] {
+            assert!(message.contains("does not support managing models"), "got {message}");
+        }
+        assert!(
+            harness.login(Arc::new(|_| {})).unwrap_err().to_string().contains("interactive sign-in"),
+            "and sign-in says which thing is unsupported"
+        );
+    }
+
+    #[test]
+    fn capabilities_default_to_supporting_nothing() {
+        // The safe direction: a new field defaults to off, so an adapter that
+        // has not heard of it does not silently claim it.
+        let none = Features::default();
+        assert!(!none.credential_required && !none.previews_edits && !none.custom_model);
+        assert!(!none.effort && !none.max_turns && !none.login);
+        assert!(!none.custom_instructions);
+        assert!(none.models.is_empty());
+    }
+
+    #[test]
+    fn reasoning_effort_keeps_the_tokens_a_cli_actually_accepts() {
+        // These are sent verbatim as `model_reasoning_effort=<value>`; a
+        // prettified variant name would be rejected by the CLI, not by us.
+        assert_eq!(ReasoningEffort::Minimal.as_cli_value(), "minimal");
+        assert_eq!(ReasoningEffort::Low.as_cli_value(), "low");
+        assert_eq!(ReasoningEffort::Medium.as_cli_value(), "medium");
+        assert_eq!(ReasoningEffort::High.as_cli_value(), "high");
+    }
+
+    #[test]
+    fn an_install_hint_always_has_a_url_and_optionally_a_command() {
+        // Not every agent has a one-liner that works on every platform, so the
+        // command is optional while the home page never is.
+        let bare = InstallHint::url("https://example.test/install");
+        assert_eq!(bare.url, "https://example.test/install");
+        assert!(bare.command.is_none());
+        assert_eq!(bare.with_command("brew install thing").command.as_deref(), Some("brew install thing"));
+    }
+
+    fn login_events(program: &str, args: &[&str]) -> (Result<(), Error>, Vec<InstallEvent>) {
+        let seen: Arc<Mutex<Vec<InstallEvent>>> = Arc::default();
+        let sink = Arc::clone(&seen);
+        let result = run_login_command(program, args, Arc::new(move |event| sink.lock().unwrap().push(event)));
+        let events = seen.lock().unwrap().clone();
+        (result, events)
+    }
+
+    #[test]
+    fn a_sign_in_streams_the_cli_output_the_user_has_to_act_on() {
+        // The whole reason this streams rather than waiting: an OAuth flow
+        // prints a device code or a URL, and a user who never sees it cannot
+        // finish signing in.
+        let (result, events) = login_events("echo", &["visit https://example.test/device"]);
+        assert!(result.is_ok(), "{result:?}");
+
+        assert!(
+            matches!(events.first(), Some(InstallEvent::Step { .. })),
+            "something is said before the browser opens: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, InstallEvent::Stdout { text } if text.contains("example.test/device"))),
+            "the URL reaches the host: {events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(InstallEvent::Done { ok: true, exit_code: Some(0) })),
+            "and it ends exactly once, saying how: {events:?}"
+        );
+    }
+
+    #[test]
+    fn every_kind_of_process_output_reaches_the_user_during_sign_in() {
+        // The paths that matter here cannot be provoked from a test — a wait or
+        // read failure is an OS-level fault — so the mapping is checked with
+        // values. Losing any of these leaves a stalled sign-in with nothing on
+        // screen to explain it.
+        let ev = |e: Event| login_event(&e);
+        let run_id = || "r".to_owned();
+
+        assert!(ev(Event::Started { run_id: run_id() }).is_none(), "the spawn is not news");
+
+        let out = ev(Event::Stdout { run_id: run_id(), line: "visit https://x.test".into() });
+        assert!(matches!(out, Some(InstallEvent::Stdout { text }) if text.contains("x.test")));
+
+        // A device code arrives on stderr as often as stdout, and so does the
+        // reason a login failed.
+        let err = ev(Event::Stderr { run_id: run_id(), line: "code ABCD".into() });
+        assert!(matches!(err, Some(InstallEvent::Stderr { text }) if text == "code ABCD"));
+
+        // A stream that dies is reported, not swallowed.
+        let broken = ev(Event::Error { run_id: run_id(), message: "stream read failed".into() });
+        assert!(matches!(broken, Some(InstallEvent::Stderr { text }) if text.contains("read failed")));
+
+        let ok = ev(Event::Exited { run_id: run_id(), exit_code: Some(0), cancelled: false });
+        assert!(matches!(ok, Some(InstallEvent::Done { ok: true, exit_code: Some(0) })));
+        let failed = ev(Event::Exited { run_id: run_id(), exit_code: Some(1), cancelled: false });
+        assert!(matches!(failed, Some(InstallEvent::Done { ok: false, .. })), "only zero is success");
+    }
+
+    #[test]
+    fn a_failed_sign_in_says_so_rather_than_completing_quietly() {
+        // `false` exits non-zero without printing. Reporting ok here would
+        // leave a host believing the user is signed in.
+        let (result, events) = login_events("false", &[]);
+        assert!(result.is_ok(), "the command ran; it is its exit code that failed");
+        assert!(
+            matches!(events.last(), Some(InstallEvent::Done { ok: false, .. })),
+            "got {events:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_process_backed_run_reports_its_pid_and_whether_it_was_stopped() {
+        // Both answers are load-bearing for an embedder. The pid is recorded so
+        // a child orphaned by a hard crash can be reaped on the next launch;
+        // `was_cancelled` is how a run the user stopped is told apart from one
+        // that finished on its own. Forwarding either wrongly is invisible
+        // until a stale agent is left running.
+        let child = Command::new("sleep")
+            .cwd(std::env::temp_dir())
+            .run_id("pid-test")
+            .args(["30"])
+            .resolve_cli()
+            .stream(|_| {})
+        .expect("sleep should spawn");
+        let run: RunHandle = Box::new(child);
+
+        let pid = run.pid().expect("a live child has a pid");
+        assert!(pid > 1, "a real OS pid, not a placeholder: {pid}");
+        assert!(!run.was_cancelled(), "nothing has stopped it yet");
+
+        run.cancel().expect("cancel");
+        assert!(run.was_cancelled(), "a stopped run says so");
+    }
+
     /// A no-op [`RunControl`] so the mock harness below can hand back a
     /// [`RunHandle`] without a real process behind it.
     struct NoopControl;
     impl RunControl for NoopControl {
-        fn cancel(&self) -> Result<(), HarnessError> {
+        fn cancel(&self) -> Result<(), Error> {
             Ok(())
         }
         fn was_cancelled(&self) -> bool {
@@ -796,24 +1035,24 @@ mod tests {
     /// A minimal in-memory harness whose `run()` pushes a fixed event
     /// sequence straight to the callback, synchronously, then returns —
     /// dropping its only `RunCallback` clone. That's exactly the ownership
-    /// shape `run_channel` relies on, with no subprocess to spawn, so it
+    /// shape `run` relies on, with no subprocess to spawn, so it
     /// pins down the contract: events are forwarded, and the receiver hangs
     /// up on its own once the run's callback ownership ends.
     struct MockHarness {
         events: Vec<RunEvent>,
     }
     impl Harness for MockHarness {
-        fn info(&self) -> HarnessInfo {
-            unreachable!("not exercised by run_channel")
+        fn info(&self) -> Info {
+            unreachable!("not exercised by run")
         }
-        fn readiness(&self) -> HarnessReadiness {
-            unreachable!("not exercised by run_channel")
+        fn readiness(&self) -> Readiness {
+            unreachable!("not exercised by run")
         }
-        fn run(
+        fn start(
             &self,
             _request: RunRequest,
             on_event: RunCallback,
-        ) -> Result<RunHandle, HarnessError> {
+        ) -> Result<RunHandle, Error> {
             for event in &self.events {
                 on_event(event.clone());
             }
@@ -822,7 +1061,7 @@ mod tests {
             Ok(Box::new(NoopControl))
         }
         fn credential(&self) -> CredentialSpec {
-            unreachable!("not exercised by run_channel")
+            unreachable!("not exercised by run")
         }
     }
 
@@ -839,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn run_channel_forwards_every_event_then_closes() {
+    fn run_forwards_every_event_then_closes() {
         let harness = MockHarness {
             events: vec![
                 RunEvent::Text {
@@ -853,7 +1092,7 @@ mod tests {
                 },
             ],
         };
-        let (_handle, rx) = harness.run_channel(demo_request()).expect("run_channel ok");
+        let (_handle, rx) = harness.run(demo_request()).expect("run ok");
         // Draining to completion *terminates* — proof the channel closed
         // without us dropping the handle.
         let collected: Vec<RunEvent> = rx.into_iter().collect();
@@ -874,18 +1113,18 @@ mod tests {
     }
 
     #[test]
-    fn run_channel_receiver_closes_even_with_no_events() {
+    fn run_receiver_closes_even_with_no_events() {
         let harness = MockHarness { events: Vec::new() };
-        let (_handle, rx) = harness.run_channel(demo_request()).expect("run_channel ok");
+        let (_handle, rx) = harness.run(demo_request()).expect("run ok");
         assert_eq!(rx.into_iter().count(), 0); // closes immediately, doesn't hang
     }
 
     #[test]
     fn harness_error_preserves_typed_source_and_flattened_message() {
-        use std::error::Error;
+        use std::error::Error as _;
 
-        // Categorize a real typed engine error as a Spawn failure.
-        let err = HarnessError::spawn(cli_stream::StreamError::PipeNotCaptured { stream: "stdout" });
+        // Categorize a real typed engine error as a Command failure.
+        let err = Error::spawn(cli_stream::StreamError::PipeNotCaptured { stream: "stdout" });
 
         // Display still flattens the source into the message, so a consumer
         // that just `.to_string()`s at a boundary (a Tauri command) gets the
@@ -897,7 +1136,7 @@ mod tests {
 
         // And the real typed error is reachable via the source chain — the
         // whole point of carrying a source instead of a flattened string.
-        let source = err.source().expect("HarnessError::Spawn has a source");
+        let source = err.source().expect("Error::Spawn has a source");
         assert!(
             source.downcast_ref::<cli_stream::StreamError>().is_some(),
             "source should downcast back to the typed StreamError"

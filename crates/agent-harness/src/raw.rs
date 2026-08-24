@@ -17,7 +17,7 @@
 //! `parse_codex_line`), which interprets it into `RunEvent`. This tier carries
 //! none of that.
 //!
-//! Want the absolute rawest? [`crate::ProcessEvent::Stdout`] already carries
+//! Want the absolute rawest? [`crate::Event::Stdout`] already carries
 //! the verbatim line — skip this and parse the string yourself.
 
 use serde_json::Value;

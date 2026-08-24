@@ -34,6 +34,7 @@ use crate::{RunEvent, RunMode, ToolKind};
 
 mod fetch;
 mod file;
+pub(crate) mod discovery;
 pub(crate) mod mcp;
 mod patch;
 mod question;
@@ -129,6 +130,14 @@ fn builtins() -> Vec<Box<dyn Tool>> {
     ]
 }
 
+/// One tool's OpenAI function definition.
+fn tool_def(tool: &dyn Tool) -> Value {
+    json!({
+        "type": "function",
+        "function": { "name": tool.id(), "description": tool.description(), "parameters": tool.parameters() }
+    })
+}
+
 /// Whether [`ToolSet::defs`] builds the tool list for the main agent or a `task`
 /// subagent — a subagent's set drops the opt-out tools (`task`, `question`), so
 /// it can neither spawn its own children nor stop to ask the user.
@@ -142,10 +151,29 @@ pub(crate) enum AgentContext {
 /// MCP servers. Built once per run and shared with subagents, so a dynamic tool
 /// source (MCP) slots in beside the static built-ins behind one type — no
 /// central match to grow.
+/// The name of the search tool offered when tools are deferred.
+pub(crate) const TOOL_SEARCH: &str = "tool_search";
+
+/// Matches returned per tool search. Enough to choose from, few enough that the
+/// reply stays smaller than the schemas it replaced.
+const TOOL_SEARCH_LIMIT: usize = 8;
+
+/// MCP schema bytes past which MCP tools move behind [`TOOL_SEARCH`].
+///
+/// Under this, deferral costs more than it saves: the search tool's own schema
+/// plus a round trip to find what was already in the prompt. Claude Code makes
+/// the same call with a character threshold behind `ENABLE_TOOL_SEARCH=auto:N`.
+const DEFER_MCP_ABOVE_BYTES: usize = 4_096;
+
 pub(crate) struct ToolSet {
     tools: Vec<Box<dyn Tool>>,
     permissions: Vec<crate::openai_compatible::PermissionRule>,
     permission_prompt: Option<crate::openai_compatible::PermissionPrompt>,
+    /// Ids registered and callable but kept out of the initial tool list. Empty
+    /// unless the MCP surface is large enough to be worth hiding.
+    deferred: std::collections::HashSet<String>,
+    /// Ranked lookup over the deferred tools.
+    index: discovery::Index,
 }
 
 impl ToolSet {
@@ -154,6 +182,8 @@ impl ToolSet {
     #[cfg(test)]
     pub(crate) fn builtin() -> Self {
         Self {
+            deferred: std::collections::HashSet::new(),
+            index: discovery::Index::build(Vec::new()),
             tools: builtins(),
             permissions: Vec::new(),
             permission_prompt: None,
@@ -167,14 +197,58 @@ impl ToolSet {
         mcp: Vec<Box<dyn Tool>>,
         permissions: Vec<crate::openai_compatible::PermissionRule>,
         permission_prompt: Option<crate::openai_compatible::PermissionPrompt>,
+        disabled: &[String],
     ) -> Self {
         let mut tools = builtins();
+        let builtin_count = tools.len();
         tools.extend(mcp);
+        // Withheld at construction, not refused at call time. A tool the host
+        // disabled should never reach the model at all: an advertised-then-
+        // refused tool still costs its schema in every request, and still
+        // invites the model to try.
+        tools.retain(|t| !disabled.iter().any(|name| name == t.id()));
+
+        // Only MCP tools are candidates: the built-ins are a fixed handful that
+        // a coding task needs, where an MCP surface is open-ended and mostly
+        // irrelevant to any given request.
+        let mcp_ids: Vec<String> = tools
+            .iter()
+            .skip(builtin_count)
+            .map(|t| t.id().to_owned())
+            .collect();
+        let mcp_bytes: usize = tools
+            .iter()
+            .filter(|t| mcp_ids.iter().any(|id| id == t.id()))
+            .map(|t| t.description().len() + t.parameters().to_string().len())
+            .sum();
+
+        let (deferred, index) = if mcp_bytes > DEFER_MCP_ABOVE_BYTES {
+            let entries = tools
+                .iter()
+                .filter(|t| mcp_ids.iter().any(|id| id == t.id()))
+                .map(|t| discovery::Entry {
+                    id: t.id().to_owned(),
+                    text: format!("{} {}", t.id(), t.description()),
+                })
+                .collect();
+            (mcp_ids.into_iter().collect(), discovery::Index::build(entries))
+        } else {
+            (std::collections::HashSet::new(), discovery::Index::build(Vec::new()))
+        };
+
         Self {
             tools,
             permissions,
             permission_prompt,
+            deferred,
+            index,
         }
+    }
+
+    /// Every built-in tool's id, so a host can offer the choice rather than
+    /// hardcoding a list that drifts as tools are added.
+    pub fn builtin_tool_names() -> Vec<String> {
+        builtins().iter().map(|t| t.id().to_owned()).collect()
     }
 
     /// The OpenAI `tools` array offered to the model: the read-only tools always,
@@ -187,18 +261,68 @@ impl ToolSet {
     /// (`task`, `question`).
     pub(crate) fn defs(&self, mode: RunMode, model: &str, context: AgentContext) -> Vec<Value> {
         let subagent = matches!(context, AgentContext::Subagent);
-        self.tools
+        let mut defs: Vec<Value> = self
+            .tools
             .iter()
             .filter(|t| t.offered(mode, model))
             .filter(|t| !subagent || t.in_subagent())
             .filter(|t| !(t.mutating() && matches!(mode, RunMode::Ask)))
-            .map(|t| {
-                json!({
-                    "type": "function",
-                    "function": { "name": t.id(), "description": t.description(), "parameters": t.parameters() }
-                })
-            })
-            .collect()
+            // Deferred tools stay registered and callable; they are simply not
+            // advertised. `tool_search` is how the model reaches them.
+            .filter(|t| !self.deferred.contains(t.id()))
+            .map(|t| tool_def(t.as_ref()))
+            .collect();
+        if !self.deferred.is_empty() {
+            defs.push(self.search_def());
+        }
+        defs
+    }
+
+    /// The `tool_search` schema, naming how many tools are behind it so the
+    /// model can judge whether searching is worth a turn.
+    fn search_def(&self) -> Value {
+        json!({
+            "type": "function",
+            "function": {
+                "name": TOOL_SEARCH,
+                "description": format!(
+                    "Find tools that are available but not listed here — {} of them, from connected \
+                     integrations. Describe the task in a few words (\"file a github issue\", \"query \
+                     the database\") and the matching tools are returned with their full schemas, ready \
+                     to call. Search before concluding something cannot be done.",
+                    self.deferred.len()
+                ),
+                "parameters": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {
+                        "query": { "type": "string", "description": "What you are trying to do." }
+                    }
+                }
+            }
+        })
+    }
+
+    /// Answer a `tool_search` call with the schemas of the best matches.
+    fn search_tools(&self, args: &Value) -> ToolOutcome {
+        let Some(query) = args.get("query").and_then(Value::as_str) else {
+            return ToolOutcome::err(format!("{TOOL_SEARCH}: `query` is required"));
+        };
+        let matched = self.index.search(query, TOOL_SEARCH_LIMIT);
+        if matched.is_empty() {
+            return ToolOutcome::ok(format!(
+                "No available tool matches \"{query}\". Do not search again for the same thing."
+            ));
+        }
+        let defs: Vec<Value> = matched
+            .iter()
+            .filter_map(|id| self.tools.iter().find(|t| t.id() == *id))
+            .map(|t| tool_def(t.as_ref()))
+            .collect();
+        ToolOutcome::ok(
+            serde_json::to_string_pretty(&defs)
+                .unwrap_or_else(|_| "could not encode the matching tools".to_owned()),
+        )
     }
 
     /// The neutral [`ToolKind`] for a tool name, so the host routes the card
@@ -215,6 +339,9 @@ impl ToolSet {
     /// hallucinates a mutating tool in `Ask` mode is refused even though it
     /// wasn't offered. Output past the caps is truncated (+ spilled) here.
     pub(crate) fn execute(&self, name: &str, args: &Value, ctx: &ToolCtx) -> ToolOutcome {
+        if name == TOOL_SEARCH {
+            return self.search_tools(args);
+        }
         let Some(tool) = self.tools.iter().find(|t| t.id() == name) else {
             return ToolOutcome::err(format!("unknown tool `{name}`"));
         };
@@ -397,7 +524,7 @@ pub(crate) enum Keep {
 }
 
 /// A single end of an output — which one [`take_end`] keeps.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum End {
     Head,
     Tail,
@@ -669,6 +796,189 @@ fn find_line_trimmed_unique(content: &str, old: &str) -> Option<(usize, usize)> 
 mod tests {
     use super::*;
 
+    #[test]
+    fn every_tool_is_offered_by_default() {
+        // Opt-out, not opt-in: a host that says nothing gets the full set.
+        let all = ToolSet::new(vec![], vec![], None, &[]);
+        let names = tool_names(&all.defs(RunMode::Edit, "qwen", AgentContext::Main));
+        assert!(names.contains(&"bash".to_string()));
+        assert!(names.contains(&"read".to_string()));
+    }
+
+    #[test]
+    fn a_disabled_tool_is_never_offered() {
+        // The difference from PermissionRule::deny, which advertises the tool
+        // and refuses the call: this one never reaches the model, so it costs
+        // no schema and cannot be attempted.
+        let set = ToolSet::new(vec![], vec![], None, &["bash".to_owned()]);
+        let names = tool_names(&set.defs(RunMode::Edit, "qwen", AgentContext::Main));
+        assert!(!names.contains(&"bash".to_string()));
+        // Everything else survives — disabling one tool is not a mode switch.
+        assert!(names.contains(&"read".to_string()) && names.contains(&"edit".to_string()));
+    }
+
+    #[test]
+    fn a_disabled_tool_is_also_refused_if_the_model_guesses_it() {
+        // Withholding the schema is not the whole defence: a model can still
+        // name a tool it was never shown.
+        let set = ToolSet::new(vec![], vec![], None, &["bash".to_owned()]);
+        let cancel = AtomicBool::new(false);
+        let ctx = ToolCtx {
+            cwd: any_cwd(),
+            mode: RunMode::Edit,
+            cancel: &cancel,
+            run_id: "t",
+            call_id: "c",
+            skills: &[],
+            subagent: None,
+            model: None,
+        };
+        assert!(!set.execute("bash", &json!({ "command": "echo hi" }), &ctx).ok);
+    }
+
+    /// Tool names in the list the model is actually shown.
+    fn offered_names(set: &ToolSet) -> Vec<String> {
+        set.defs(RunMode::Ask, "test-model", AgentContext::Main)
+            .iter()
+            .filter_map(|d| d["function"]["name"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// A ToolCtx for a search or a direct call in these tests.
+    fn search_ctx(cancel: &AtomicBool) -> ToolCtx<'_> {
+        ToolCtx {
+            cwd: any_cwd(),
+            mode: RunMode::Ask,
+            cancel,
+            run_id: "t",
+            call_id: "c",
+            skills: &[],
+            subagent: None,
+            model: None,
+        }
+    }
+
+    /// A stand-in MCP tool with a schema big enough to matter.
+    struct FakeMcp {
+        id: String,
+        description: String,
+    }
+    impl Tool for FakeMcp {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn description(&self) -> &str {
+            &self.description
+        }
+        fn parameters(&self) -> Value {
+            json!({ "type": "object", "properties": { "padding": { "type": "string" } } })
+        }
+        fn kind(&self) -> ToolKind {
+            ToolKind::Other
+        }
+        fn mutating(&self) -> bool {
+            false
+        }
+        fn execute(&self, _args: &Value, _ctx: &ToolCtx) -> ToolOutcome {
+            ToolOutcome::ok("called")
+        }
+    }
+
+    fn many_mcp_tools() -> Vec<Box<dyn Tool>> {
+        let subjects = ["github issue", "slack message", "database query", "calendar event", "email draft"];
+        (0..20)
+            .map(|i| {
+                let subject = subjects[i % subjects.len()];
+                Box::new(FakeMcp {
+                    id: format!("mcp_tool_{i:02}"),
+                    description: format!(
+                        "Work with a {subject}. {}",
+                        "This description is long enough to make the surface worth deferring. ".repeat(3)
+                    ),
+                }) as Box<dyn Tool>
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_small_mcp_surface_stays_in_the_prompt() {
+        // Below the threshold, deferral costs more than it saves: the search
+        // tool's own schema plus a round trip to find what was already there.
+        let one = vec![Box::new(FakeMcp { id: "solo".into(), description: "does one thing".into() })
+            as Box<dyn Tool>];
+        let set = ToolSet::new(one, Vec::new(), None, &[]);
+        let names = offered_names(&set);
+        assert!(names.contains(&"solo".to_owned()), "a small surface is listed: {names:?}");
+        assert!(!names.contains(&TOOL_SEARCH.to_owned()), "and needs no search tool");
+    }
+
+    #[test]
+    fn a_large_mcp_surface_is_deferred_behind_one_search_tool() {
+        let set = ToolSet::new(many_mcp_tools(), Vec::new(), None, &[]);
+        let names = offered_names(&set);
+
+        assert!(names.contains(&TOOL_SEARCH.to_owned()), "the search tool is offered: {names:?}");
+        assert!(!names.iter().any(|n| n.starts_with("mcp_tool_")), "no MCP schema rides along: {names:?}");
+        // The built-ins are not candidates — a coding task needs them.
+        assert!(names.contains(&"read".to_owned()) && names.contains(&"list".to_owned()));
+    }
+
+    #[test]
+    fn searching_returns_callable_schemas_for_what_matches() {
+        let set = ToolSet::new(many_mcp_tools(), Vec::new(), None, &[]);
+
+        let found = set.execute(TOOL_SEARCH, &json!({ "query": "file a github issue" }), &search_ctx(&AtomicBool::new(false)));
+        assert!(found.ok, "search should succeed: {}", found.output);
+        let defs: Vec<Value> = serde_json::from_str(&found.output).expect("a JSON array of tool defs");
+        assert!(!defs.is_empty(), "a matching query returns tools");
+        assert!(
+            defs.iter().all(|d| d["function"]["parameters"].is_object()),
+            "each result carries the schema needed to call it"
+        );
+
+        // And a deferred tool remains callable even though it was never listed.
+        let name = defs[0]["function"]["name"].as_str().unwrap().to_owned();
+        let called = set.execute(&name, &json!({}), &search_ctx(&AtomicBool::new(false)));
+        assert!(called.ok, "deferred does not mean unavailable: {}", called.output);
+    }
+
+    #[test]
+    fn a_search_matching_nothing_says_so_rather_than_guessing() {
+        let set = ToolSet::new(many_mcp_tools(), Vec::new(), None, &[]);
+        let out = set.execute(TOOL_SEARCH, &json!({ "query": "photosynthesis" }), &search_ctx(&AtomicBool::new(false)));
+        assert!(out.ok);
+        assert!(out.output.contains("No available tool matches"), "got {}", out.output);
+        assert!(out.output.contains("Do not search again"), "a repeat search would burn turns");
+    }
+
+    #[test]
+    fn disabling_shrinks_the_prompt() {
+        // Tool schemas are sent on every request, so withholding one is also a
+        // per-turn token saving — the reason to prefer it over a runtime deny.
+        let all = ToolSet::new(vec![], vec![], None, &[]);
+        let fewer = ToolSet::new(vec![], vec![], None, &["bash".to_owned()]);
+        let full = serde_json::to_string(&all.defs(RunMode::Edit, "qwen", AgentContext::Main)).unwrap();
+        let cut = serde_json::to_string(&fewer.defs(RunMode::Edit, "qwen", AgentContext::Main)).unwrap();
+        assert!(cut.len() < full.len());
+    }
+
+    #[test]
+    fn the_host_can_enumerate_what_it_may_disable() {
+        // So a host builds its UI from the crate's list rather than hardcoding
+        // names that drift as tools are added.
+        let names = ToolSet::builtin_tool_names();
+        assert!(names.iter().any(|n| n == "bash"));
+        assert!(names.iter().any(|n| n == "read"));
+    }
+
+    /// Tool ids out of an OpenAI `tools` array.
+    fn tool_names(defs: &[Value]) -> Vec<String> {
+        defs.iter()
+            .filter_map(|d| d["function"]["name"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+
     /// Run a tool through the public dispatch with a fresh (un-cancelled) context.
     fn run(name: &str, args: Value, cwd: &Path, mode: RunMode) -> ToolOutcome {
         let cancel = AtomicBool::new(false);
@@ -792,6 +1102,7 @@ mod tests {
                 "bash", "rm -rf",
             )],
             None,
+            &[],
         );
         let cancel = AtomicBool::new(false);
         let ctx = ToolCtx {
@@ -838,6 +1149,7 @@ mod tests {
             vec![],
             vec![crate::openai_compatible::PermissionRule::ask("bash")],
             Some(prompt),
+            &[],
         );
         assert!(
             !tools
@@ -856,6 +1168,7 @@ mod tests {
             vec![],
             vec![crate::openai_compatible::PermissionRule::ask("bash")],
             None,
+            &[],
         );
         assert!(
             !no_prompt
@@ -992,6 +1305,81 @@ mod tests {
             "fn main() {\n    let x = 2;\n}\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_zero_timeout_falls_back_to_the_default_rather_than_killing_instantly() {
+        // `timeout.filter(|&t| t > 0)` treats 0 as "unset". Relaxing that to
+        // `>= 0` accepts it, and a zero-millisecond budget kills every command
+        // the moment it starts — a model that passes 0 gets a tool that never
+        // works, with a timeout message rather than an argument error.
+        let dir = scratch("bash-zero-timeout");
+        let out = run("bash", json!({ "command": "echo hi", "timeout": 0 }), &dir, RunMode::Edit);
+        assert!(out.ok, "a zero timeout must mean the default, got: {}", out.output);
+        assert_eq!(out.output.trim(), "hi");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The joining logic is platform-independent, but producing "stdout with no
+    // trailing newline" is not: the tool runs `sh -c` on unix and `cmd /C` on
+    // Windows, where `;` is not a separator and there is no `printf`. Asserting
+    // the seam needs a shell that can emit exactly these two streams.
+    #[cfg(unix)]
+    #[test]
+    fn stdout_and_stderr_are_joined_without_running_together() {
+        // Three mutants lived in this one condition: `&&` to `||`, and either
+        // `!` deleted. Each produces output the model reads as one stream —
+        // a missing separator glues the last line of stdout to the [stderr]
+        // header, and a spurious one puts a blank line before it.
+        let dir = scratch("bash-streams");
+
+        // stdout with no trailing newline, then stderr: exactly one newline.
+        let both = run(
+            "bash",
+            json!({ "command": "printf out; printf err >&2" }),
+            &dir,
+            RunMode::Edit,
+        );
+        assert!(both.ok, "{}", both.output);
+        assert!(both.output.contains("out\n[stderr]"), "one separator: {:?}", both.output);
+
+        // stderr alone: no leading blank line, because there is no stdout to
+        // separate it from.
+        let only_err = run("bash", json!({ "command": "printf err >&2" }), &dir, RunMode::Edit);
+        assert!(only_err.ok, "{}", only_err.output);
+        assert!(
+            only_err.output.starts_with("[stderr]"),
+            "nothing to separate from: {:?}",
+            only_err.output
+        );
+
+        // stdout alone: the marker never appears.
+        let only_out = run("bash", json!({ "command": "printf out" }), &dir, RunMode::Edit);
+        assert!(!only_out.output.contains("[stderr]"), "{:?}", only_out.output);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_bash_schema_tells_the_model_how_to_call_it() {
+        // An empty schema is worse than a missing tool: the model is invited to
+        // call something it cannot form arguments for.
+        let set = ToolSet::builtin();
+        let defs = set.defs(RunMode::Edit, "test-model", AgentContext::Main);
+        let bash = defs
+            .iter()
+            .find(|d| d["function"]["name"] == "bash")
+            .expect("bash is offered in Edit mode");
+
+        assert!(
+            bash["function"]["parameters"]["properties"]["command"].is_object(),
+            "the schema must declare `command`: {}",
+            bash["function"]["parameters"]
+        );
+        let description = bash["function"]["description"].as_str().unwrap_or_default();
+        assert!(
+            description.len() > 20 && description.to_lowercase().contains("command"),
+            "a tool with no description is one the model cannot choose deliberately: {description:?}"
+        );
     }
 
     #[test]
@@ -1349,6 +1737,218 @@ mod tests {
             "fn main() {\n    let x = 2;\n}\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_output_caps_are_the_sizes_they_claim_to_be() {
+        // A cap is only a cap at a specific size. `50 * 1024` becoming
+        // `50 + 1024` is a 1 KB ceiling that truncates almost every real
+        // command's output, and nothing else would fail.
+        assert_eq!(MAX_OUTPUT_BYTES, 50 * 1024);
+        assert_eq!(MAX_OUTPUT_LINES, 2000);
+    }
+
+    #[test]
+    fn a_tool_without_a_subject_offers_none_for_permission_matching() {
+        // The trait's default. A rule with a `pattern` matches on the subject,
+        // so a default of `Some("")` or any string would make pattern rules
+        // start matching tools that have no subject to match against.
+        struct Subjectless;
+        impl Tool for Subjectless {
+            fn id(&self) -> &str {
+                "subjectless"
+            }
+            fn description(&self) -> &str {
+                "has no subject"
+            }
+            fn parameters(&self) -> Value {
+                json!({ "type": "object" })
+            }
+            fn kind(&self) -> ToolKind {
+                ToolKind::Other
+            }
+            fn mutating(&self) -> bool {
+                false
+            }
+            fn execute(&self, _args: &Value, _ctx: &ToolCtx) -> ToolOutcome {
+                ToolOutcome::ok("done")
+            }
+        }
+        assert_eq!(Subjectless.permission_subject(&json!({})), None);
+
+        // And the consequence: a pattern rule cannot match it.
+        let set = ToolSet::new(
+            vec![Box::new(Subjectless)],
+            vec![crate::PermissionRule::deny_matching("subjectless", "anything")],
+            None,
+            &[],
+        );
+        let out = set.execute("subjectless", &json!({}), &search_ctx(&AtomicBool::new(false)));
+        assert!(out.ok, "a pattern rule must not match a tool with no subject: {}", out.output);
+    }
+
+    #[test]
+    fn both_ends_keeps_a_half_from_each_and_counts_what_it_dropped() {
+        // `MAX_OUTPUT_LINES / 2` becoming `* 2` stops the halves being halves,
+        // and the omitted count is what tells the model how much it is missing —
+        // a wrong number there is a confident lie.
+        let lines: Vec<String> = (0..5_000).map(|i| format!("line{i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let out = take_both_ends(&refs, refs.len(), &None);
+
+        assert!(out.starts_with("line0\n"), "the head survives: {:?}", &out[..40]);
+        assert!(out.trim_end().ends_with("line4999"), "the tail survives");
+
+        let kept = out.lines().filter(|l| l.starts_with("line")).count();
+        assert!(kept <= MAX_OUTPUT_LINES, "kept {kept} of a {MAX_OUTPUT_LINES} cap");
+
+        let omitted: usize = out
+            .lines()
+            .find(|l| l.contains("omitted"))
+            .and_then(|l| l.split_whitespace().find_map(|w| w.replace(',', "").parse().ok()))
+            .expect("the marker states how many lines were dropped");
+        assert_eq!(omitted, refs.len() - kept, "the count must match what was actually dropped");
+    }
+
+    #[test]
+    fn both_ends_splits_the_line_cap_in_half() {
+        // Short lines, so the LINE cap binds rather than the byte cap — which is
+        // what makes `MAX_OUTPUT_LINES / 2` observable. Turned into `* 2` the
+        // halves stop being halves and four times as much comes back.
+        let lines: Vec<&str> = vec!["x"; 5_000];
+        let out = take_both_ends(&lines, lines.len(), &None);
+        let kept = out.lines().filter(|l| *l == "x").count();
+        assert_eq!(
+            kept, MAX_OUTPUT_LINES,
+            "half from each end is the whole cap, no more: got {kept}"
+        );
+    }
+
+    #[test]
+    fn take_end_stops_at_the_byte_budget_not_one_line_past_it() {
+        // The same exact-boundary case `collect_within` has, through the public
+        // path: each 3-byte line costs 4 with its newline, so 8 fits two and 7
+        // fits one. `>` relaxed to `>=`, or the `+ 1` dropped, moves that line.
+        let lines = ["aaa", "bbb", "ccc"];
+        for (budget, expected) in [(8usize, 2usize), (7, 1), (4, 1), (3, 0)] {
+            let body = take_end(&lines, lines.len(), 100, budget, End::Head, &None);
+            let kept = body.lines().filter(|l| lines.contains(l)).count();
+            assert_eq!(kept, expected, "budget {budget} should keep {expected}: {body:?}");
+        }
+    }
+
+    #[test]
+    fn both_ends_splits_the_byte_cap_in_half_too() {
+        // The companion to the line-cap test, and it needs LONG lines: with
+        // short ones the line cap binds first and the byte half is never
+        // exercised, so doubling it changes nothing observable.
+        let long = "y".repeat(200);
+        let lines: Vec<&str> = vec![long.as_str(); 5_000];
+        let out = take_both_ends(&lines, lines.len(), &None);
+
+        let kept: usize = out.lines().filter(|l| *l == long).map(|l| l.len() + 1).sum();
+        assert!(
+            kept <= MAX_OUTPUT_BYTES,
+            "half of the byte cap from each end is the whole cap, no more: {kept} > {MAX_OUTPUT_BYTES}"
+        );
+        assert!(kept > MAX_OUTPUT_BYTES / 2, "and it should actually fill it: {kept}");
+    }
+
+    #[test]
+    fn spilled_output_is_written_somewhere_the_model_can_read_it() {
+        // The spill file is the whole point of truncating: the model is told
+        // where the rest went. Returning None, or a path to nothing, silently
+        // turns a truncation into a loss.
+        let body = "the full output\n".repeat(100);
+        let path = spill_output(&body).expect("a spill path");
+
+        let written = std::fs::read_to_string(&path).expect("the file the path names");
+        assert_eq!(written, body, "the spill holds the untruncated output");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn collect_within_fills_the_budget_and_stops_exactly_there() {
+        // The existing truncation tests assert what the output *says*. Nothing
+        // asserted the bound itself, which is the only reason the cap exists:
+        // an oversized tool result is what blows the model's context.
+        //
+        // Each line here costs its length plus one for the newline, so a budget
+        // of 8 fits exactly two 3-byte lines and cannot fit a third.
+        let lines = ["aaa", "bbb", "ccc"];
+        assert_eq!(collect_within(lines.iter(), 100, 8), vec!["aaa", "bbb"]);
+
+        // One byte less and only one line fits — the boundary where `>` and
+        // `>=` diverge, and where a mis-signed `+` shows up.
+        assert_eq!(collect_within(lines.iter(), 100, 7), vec!["aaa"]);
+
+        // A budget below even one line yields nothing rather than one line over.
+        assert!(collect_within(lines.iter(), 100, 2).is_empty());
+
+        // The line cap binds independently of the byte cap.
+        assert_eq!(collect_within(lines.iter(), 2, 10_000), vec!["aaa", "bbb"]);
+        assert!(collect_within(lines.iter(), 0, 10_000).is_empty());
+    }
+
+    #[test]
+    fn a_truncated_body_never_exceeds_the_byte_budget() {
+        // The property, over a range of budgets rather than one example: the
+        // lines kept must fit, whichever end they are taken from.
+        let lines: Vec<&str> = ["alpha", "beta", "gamma", "delta", "epsilon"].to_vec();
+        for max_bytes in [1usize, 5, 6, 11, 17, 40, 1_000] {
+            for end in [End::Head, End::Tail] {
+                let body = take_end(&lines, lines.len(), 100, max_bytes, end, &None);
+                // Isolate the kept lines from the truncation note, which is
+                // deliberately outside the budget — it explains the cut.
+                let kept: usize = body
+                    .lines()
+                    .filter(|l| lines.contains(l))
+                    .map(|l| l.len() + 1)
+                    .sum();
+                assert!(
+                    kept <= max_bytes,
+                    "{end:?} kept {kept} bytes against a {max_bytes} budget: {body:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn find_line_trimmed_unique_locates_the_line_and_refuses_an_ambiguous_one() {
+        // This is how `edit` finds what to replace. An off-by-one here edits the
+        // wrong line of a user's file, which no other test would notice.
+        let content = "first\n  target  \nthird\n";
+        let (start, end) = find_line_trimmed_unique(content, "target").expect("a unique match");
+        assert_eq!(
+            &content[start..end], "  target  \n",
+            "the span covers the line's own spacing AND its newline, so a replacement \
+             substitutes the whole line rather than splicing into it"
+        );
+
+        // Two candidates must be refused rather than guessed between.
+        let ambiguous = "dup\nother\ndup\n";
+        assert!(find_line_trimmed_unique(ambiguous, "dup").is_none());
+
+        // No candidate at all.
+        assert!(find_line_trimmed_unique(content, "absent").is_none());
+
+        // A multi-line match, which is where the window arithmetic lives: the
+        // span must cover exactly the matched lines and no neighbour.
+        let multi = "keep\nfirst\nsecond\ntrailing\n";
+        let (start, end) = find_line_trimmed_unique(multi, "first\nsecond").expect("a two-line match");
+        assert_eq!(&multi[start..end], "first\nsecond\n", "exactly the window, not one line either side");
+
+        // A pattern longer than the file cannot match — the guard that stops
+        // the window arithmetic running off the end.
+        assert!(find_line_trimmed_unique("only\n", "only\nmore\n").is_none());
+
+        // A pattern spanning the WHOLE file must still match. This is the exact
+        // boundary of that guard: `window > len` allows it, `window >= len`
+        // rejects it, and rejecting it means `edit` cannot replace the entire
+        // contents of a short file.
+        let whole = "alpha\nbeta\n";
+        let (start, end) = find_line_trimmed_unique(whole, "alpha\nbeta").expect("a whole-file match");
+        assert_eq!(&whole[start..end], whole);
     }
 
     #[test]
