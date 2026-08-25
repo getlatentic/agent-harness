@@ -12,7 +12,10 @@
 #     documenting an API three releases stale. So a tag that is not an ancestor
 #     of `main` is refused outright.
 #
-# Requires a `CARGO_REGISTRY_TOKEN` secret with publish rights.
+# There is no publish token. crates.io accepts a short-lived credential minted
+# for THIS workflow in THIS repository (trusted publishing), exchanged at run
+# time and revoked when the job ends — so there is nothing to store, leak, or
+# rotate. Both crates must have the trusted publisher configured on crates.io.
 name: publish
 
 on:
@@ -21,6 +24,8 @@ on:
 
 permissions:
   contents: write
+  # The OIDC token crates.io exchanges for a 30-minute publish credential.
+  id-token: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -86,9 +91,16 @@ jobs:
       # itself. Each is skipped when that version is already up, so re-running
       # a half-finished release finishes it instead of failing on the first
       # crate.
+      # Exchanges GitHub's OIDC token for a crates.io credential valid for 30
+      # minutes. Its post step revokes the credential when the job ends, so a
+      # failed run leaves nothing usable behind.
+      - name: Authenticate with crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
       - name: Publish
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
           set -euo pipefail
           publish_if_new() {
