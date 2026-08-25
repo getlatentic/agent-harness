@@ -28,6 +28,12 @@ thiserror.workspace = true
 # time cli-stream reaches a version agent-harness already released.
 [package.metadata.release]
 tag-name = "cli-stream-v{{version}}"
+# Its own README pins its own version, and cli-stream versions independently of
+# the workspace — so the replacement belongs here rather than in release.toml,
+# where `{{version}}` would be agent-harness's.
+pre-release-replacements = [
+  { file = "README.md", search = 'cli-stream = "[0-9]+\.[0-9]+(\.[0-9]+)?"', replace = 'cli-stream = "{{version}}"', min = 0 },
+]
 
 [dev-dependencies]
 proptest.workspace = true

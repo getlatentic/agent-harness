@@ -138,5 +138,10 @@ required-features = ["openai-compatible"]
 [package.metadata.release]
 pre-release-replacements = [
   { file = "../../CHANGELOG.md", search = "## \\[Unreleased\\]", replace = "## [Unreleased]\n\n## [{{version}}] - {{date}}", exactly = 1 },
+  # The install snippets are part of the release, not documentation trailing
+  # it: they said `agent-harness = "0.4"` for three published versions, so
+  # following the README handed you the release before every type was renamed.
+  { file = "README.md", search = 'agent-harness = "[0-9]+\.[0-9]+(\.[0-9]+)?"', replace = 'agent-harness = "{{version}}"', min = 0 },
+  { file = "README.md", search = 'version = "[0-9]+\.[0-9]+(\.[0-9]+)?"', replace = 'version = "{{version}}"', min = 0 },
 ]
 
