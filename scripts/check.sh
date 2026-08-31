@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Local quality gate — run before pushing. The free stand-in for hosted CI:
-# the same checks a CI workflow would run, on your machine, no service needed.
+# Local quality gate — run before pushing. The same checks CI runs
+# (.github/workflows/ci.yml), on your machine, so a break costs a rebuild
+# rather than a full CI cycle. CI additionally covers macOS and Windows.
 #
 #   ./scripts/check.sh
 set -euo pipefail

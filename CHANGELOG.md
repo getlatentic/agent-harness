@@ -7,6 +7,28 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Disabling a built-in tool silently switched off MCP deferral.** `ToolSet`
+  picked out which tools were MCP-provided by position — everything after the
+  built-in count — but took that count *before* removing the tools the host had
+  disabled. A host that disables N built-ins therefore skipped past N MCP tools
+  as well, and one disabling as many built-ins as it has MCP tools got an empty
+  set: the `DEFER_MCP_ABOVE_BYTES` threshold could never trigger, so a large MCP
+  surface rode along in full in every request, and the `tool_search` discovery
+  index was built from the wrong tools. MCP tools are now identified by id,
+  which no removal can shift. Found in Compose, which disables 15 built-ins.
+
+### Added
+
+- **MCP tools may now be offered in read-only (`Ask`) runs.** Every MCP tool was
+  unconditionally treated as mutating, so a host mounting a read-only server
+  (docs, search, issue lookup) had to run in `Edit` to see any of its tools at
+  all. A server that sets the spec's `annotations.readOnlyHint` on a tool now
+  gets that tool offered in `Ask` too. The default is unchanged and still
+  conservative: no hint, a `false` hint, or a non-boolean one all keep the tool
+  withheld from a read-only run.
+
 ## [0.5.3] - 2026-08-23
 
 Documentation only — no code changed.

@@ -12,9 +12,11 @@ Before opening a PR, run the local gate:
 ./scripts/check.sh
 ```
 
-It runs format + clippy (`-D warnings`) + tests + the examples + the
-feature-gated build — the same things a CI would. There is **no hosted CI**, so
-this script is the gate; please make sure it passes.
+It runs clippy (`-D warnings`) + tests + the examples + the feature-gated
+build, so a PR fails on your machine rather than after a full CI cycle.
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) then runs the same
+checks on Linux, macOS and Windows, plus cargo-deny, a seed-replay fuzz pass
+and an advisory live-Ollama route test.
 
 ## Design principles (please keep these)
 
