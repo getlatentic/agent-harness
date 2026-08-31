@@ -55,7 +55,20 @@ impl ChatMessage {
 pub(crate) struct ToolCall {
     #[serde(default)]
     pub id: String,
+    /// Always `"function"`. The field is required when an assistant message
+    /// carrying tool calls is echoed back on the next turn: a provider that
+    /// validates its request body strictly rejects the whole message without
+    /// it (observed on a Bedrock OpenAI-compatible gateway as
+    /// `Invalid 'tool_calls': missing field \`type\``, HTTP 400, which fails
+    /// every multi-turn tool run on that endpoint). Defaulted on the way in,
+    /// because providers may omit it in streamed deltas.
+    #[serde(rename = "type", default = "function_kind")]
+    pub kind: String,
     pub function: FunctionCall,
+}
+
+fn function_kind() -> String {
+    "function".to_owned()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -448,7 +461,11 @@ fn partial_tag_suffix_len(buf: &str, tag: &str) -> usize {
 /// argument text.
 fn accumulate_tool_call(calls: &mut Vec<ToolCall>, delta: DeltaToolCall) {
     while calls.len() <= delta.index {
-        calls.push(ToolCall { id: String::new(), function: FunctionCall { name: String::new(), arguments: String::new() } });
+        calls.push(ToolCall {
+            id: String::new(),
+            kind: function_kind(),
+            function: FunctionCall { name: String::new(), arguments: String::new() },
+        });
     }
     let call = &mut calls[delta.index];
     if let Some(id) = delta.id.filter(|s| !s.is_empty()) {
@@ -572,6 +589,26 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn an_echoed_tool_call_carries_its_type() {
+        // The field is required when the assistant message is sent back on the
+        // next turn. Without it a strict provider rejects the request outright
+        // (HTTP 400), so every multi-turn tool run on that endpoint fails.
+        let call = ToolCall {
+            id: "c1".into(),
+            kind: function_kind(),
+            function: FunctionCall { name: "read".into(), arguments: "{}".into() },
+        };
+        let json = serde_json::to_value(&call).unwrap();
+        assert_eq!(json["type"], "function");
+
+        // And a provider that omits it in a streamed delta still yields a
+        // message we can legally echo.
+        let parsed: ToolCall =
+            serde_json::from_str(r#"{"id":"c1","function":{"name":"read","arguments":"{}"}}"#).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap()["type"], "function");
+    }
+
     fn drain_stream_assembles_text_tool_calls_and_usage() {
         let lines = vec![
             r#"data: {"choices":[{"delta":{"reasoning_content":"think"}}]}"#.to_string(),
