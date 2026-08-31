@@ -23,6 +23,8 @@ pub(crate) struct McpTool {
     remote_name: String,
     description: String,
     schema: Value,
+    /// Whether the server declared the tool read-only (`annotations.readOnlyHint`).
+    read_only: bool,
 }
 
 impl McpTool {
@@ -33,6 +35,7 @@ impl McpTool {
             remote_name: def.name,
             description: def.description,
             schema: def.input_schema,
+            read_only: def.read_only,
         }
     }
 }
@@ -51,10 +54,13 @@ impl Tool for McpTool {
         ToolKind::Other
     }
     fn mutating(&self) -> bool {
-        // An MCP tool's effect is opaque, so treat it as mutating: offered only
-        // in `RunMode::Edit`, never in read-only `Ask`. Conservative by design —
-        // we won't expose an arbitrary external side effect in a read-only run.
-        true
+        // An MCP tool's effect is opaque, so it is treated as mutating — offered
+        // only in `RunMode::Edit`, never in read-only `Ask` — unless the server
+        // declared it read-only via `annotations.readOnlyHint`. The hint is the
+        // server's own claim, so trusting it extends only as far as the server
+        // was trusted when the host mounted it; without the hint we won't expose
+        // an arbitrary external side effect in a read-only run.
+        !self.read_only
     }
     fn execute(&self, args: &Value, _ctx: &ToolCtx) -> ToolOutcome {
         // MCP arguments are an object; tolerate a missing/!object value as `{}`.
@@ -130,6 +136,7 @@ mod tests {
             name: name.to_owned(),
             description: format!("does {name}"),
             input_schema: json!({ "type": "object", "properties": { "q": { "type": "string" } } }),
+            read_only: false,
         }
     }
 
@@ -171,6 +178,19 @@ mod tests {
         let tool = McpTool::new(client(ScriptedConnection::new()), "s", def("anything"));
         assert!(tool.mutating());
         assert_eq!(tool.kind(), ToolKind::Other);
+    }
+
+    #[test]
+    fn a_tool_the_server_declares_read_only_is_offered_in_read_only_runs() {
+        // The spec's `annotations.readOnlyHint` is the server saying "this does
+        // not modify anything". A host mounting a read-only server (search,
+        // docs, issue lookup) should not need Edit mode to see any of its tools.
+        let tool = McpTool::new(
+            client(ScriptedConnection::new()),
+            "s",
+            McpToolDef { read_only: true, ..def("lookup") },
+        );
+        assert!(!tool.mutating());
     }
 
     #[test]

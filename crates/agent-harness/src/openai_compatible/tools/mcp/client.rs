@@ -33,6 +33,10 @@ pub(crate) struct McpToolDef {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    /// The server's `annotations.readOnlyHint`: `true` means the tool declares
+    /// it does not modify its environment. `false` when absent — untrusted by
+    /// the spec, but the basis for offering a tool in a read-only run.
+    pub read_only: bool,
 }
 
 /// One resource advertised by an MCP server (`resources/list` entry).
@@ -110,6 +114,10 @@ impl McpClient {
                         name: name.to_owned(),
                         description: t.get("description").and_then(Value::as_str).unwrap_or_default().to_owned(),
                         input_schema: t.get("inputSchema").cloned().unwrap_or_else(|| json!({ "type": "object" })),
+                        read_only: t
+                            .pointer("/annotations/readOnlyHint")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
                     });
                 }
             }
@@ -434,6 +442,23 @@ mod tests {
         );
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "search");
+    }
+
+    #[test]
+    fn the_read_only_hint_is_read_from_annotations_and_defaults_to_mutating() {
+        // `annotations.readOnlyHint: true` is what lets a tool be offered in a
+        // read-only run; anything else — false, missing, or a non-bool — must
+        // fall back to the conservative default.
+        let listed = json!({ "tools": [
+            { "name": "lookup", "inputSchema": { "type": "object" }, "annotations": { "readOnlyHint": true } },
+            { "name": "post", "inputSchema": { "type": "object" }, "annotations": { "readOnlyHint": false } },
+            { "name": "bare", "inputSchema": { "type": "object" } },
+            { "name": "odd", "inputSchema": { "type": "object" }, "annotations": { "readOnlyHint": "yes" } },
+        ] });
+        let conn = ScriptedConnection::new().on("initialize", json!({})).on("tools/list", listed);
+        let (_client, tools) = McpClient::handshake(Box::new(conn)).expect("handshake");
+        let read_only: Vec<(&str, bool)> = tools.iter().map(|t| (t.name.as_str(), t.read_only)).collect();
+        assert_eq!(read_only, [("lookup", true), ("post", false), ("bare", false), ("odd", false)]);
     }
 
     #[test]
