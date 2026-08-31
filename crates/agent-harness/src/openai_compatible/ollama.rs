@@ -124,7 +124,11 @@ pub(super) fn drain_native_stream(
                 // way, so re-serialize the native object form.
                 let arguments = serde_json::to_string(&tc.function.arguments).unwrap_or_else(|_| "{}".to_owned());
                 let id = tc.id.filter(|s| !s.is_empty()).unwrap_or_else(|| format!("call_{}", tool_calls.len()));
-                tool_calls.push(ToolCall { id, function: FunctionCall { name: tc.function.name, arguments } });
+                tool_calls.push(ToolCall {
+                    id,
+                    kind: "function".to_owned(),
+                    function: FunctionCall { name: tc.function.name, arguments },
+                });
             }
         }
         if chunk.done {
