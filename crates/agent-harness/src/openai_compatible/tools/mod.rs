@@ -200,22 +200,22 @@ impl ToolSet {
         disabled: &[String],
     ) -> Self {
         let mut tools = builtins();
-        let builtin_count = tools.len();
+        // Only MCP tools are candidates for deferral: the built-ins are a fixed
+        // handful that a coding task needs, where an MCP surface is open-ended
+        // and mostly irrelevant to any given request. Identified by id, not by
+        // position — the retain below can remove builtins, which would shift
+        // any positional split.
+        let mcp_ids: Vec<String> = mcp
+            .iter()
+            .map(|t| t.id().to_owned())
+            .filter(|id| !disabled.iter().any(|name| name == id))
+            .collect();
         tools.extend(mcp);
         // Withheld at construction, not refused at call time. A tool the host
         // disabled should never reach the model at all: an advertised-then-
         // refused tool still costs its schema in every request, and still
         // invites the model to try.
         tools.retain(|t| !disabled.iter().any(|name| name == t.id()));
-
-        // Only MCP tools are candidates: the built-ins are a fixed handful that
-        // a coding task needs, where an MCP surface is open-ended and mostly
-        // irrelevant to any given request.
-        let mcp_ids: Vec<String> = tools
-            .iter()
-            .skip(builtin_count)
-            .map(|t| t.id().to_owned())
-            .collect();
         let mcp_bytes: usize = tools
             .iter()
             .filter(|t| mcp_ids.iter().any(|id| id == t.id()))
@@ -921,6 +921,51 @@ mod tests {
         assert!(!names.iter().any(|n| n.starts_with("mcp_tool_")), "no MCP schema rides along: {names:?}");
         // The built-ins are not candidates — a coding task needs them.
         assert!(names.contains(&"read".to_owned()) && names.contains(&"list".to_owned()));
+    }
+
+    #[test]
+    fn disabled_builtins_do_not_break_mcp_deferral() {
+        // mcp_ids was once derived positionally (`skip(builtin_count)`) from a
+        // list the disabled-tool retain had already shortened: a host disabling
+        // N builtins skipped past N MCP tools, so a large surface silently
+        // stopped deferring. MCP tools are identified by id, not position.
+        let disabled: Vec<String> = ["bash", "write", "edit", "task", "webfetch"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let set = ToolSet::new(many_mcp_tools(), Vec::new(), None, &disabled);
+        let names = offered_names(&set);
+        assert!(names.contains(&TOOL_SEARCH.to_owned()), "deferral still triggers: {names:?}");
+        assert!(!names.iter().any(|n| n.starts_with("mcp_tool_")), "every MCP schema stays deferred: {names:?}");
+
+        // And the deferred tools are still reachable through the search.
+        let found = set.execute(
+            TOOL_SEARCH,
+            &json!({ "query": "file a github issue" }),
+            &search_ctx(&AtomicBool::new(false)),
+        );
+        assert!(found.ok, "{}", found.output);
+        let defs: Vec<Value> = serde_json::from_str(&found.output).expect("a JSON array of tool defs");
+        assert!(defs.iter().any(|d| d["function"]["name"].as_str().is_some_and(|n| n.starts_with("mcp_tool_"))));
+    }
+
+    #[test]
+    fn a_disabled_mcp_tool_is_neither_offered_nor_indexed() {
+        // The id filter has to apply to MCP tools too: a disabled MCP tool must
+        // not be discoverable through the search index it was removed from.
+        let disabled = ["mcp_tool_00".to_owned(), "bash".to_owned()];
+        let set = ToolSet::new(many_mcp_tools(), Vec::new(), None, &disabled);
+        assert!(!set.deferred.contains("mcp_tool_00"), "a disabled tool is not deferred, it is gone");
+        let found = set.execute(
+            TOOL_SEARCH,
+            &json!({ "query": "github issue" }),
+            &search_ctx(&AtomicBool::new(false)),
+        );
+        assert!(
+            !found.output.contains("mcp_tool_00"),
+            "a disabled MCP tool must not resurface via search: {}",
+            found.output
+        );
     }
 
     #[test]
