@@ -86,10 +86,11 @@ pub(super) fn drain_native_stream(
     reasoning_tag: Option<&str>,
     cancel: &AtomicBool,
     mut on_delta: impl FnMut(Fragment),
-) -> Result<(ChatMessage, Option<Usage>), String> {
+) -> Result<super::wire::Turn, String> {
     let mut content = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut usage = None;
+    let mut stop = None;
     let mut think = ThinkSplitter::new(reasoning_tag);
     for line in lines {
         // Stop-button responsiveness: a set flag ends the read NOW — dropping
@@ -133,6 +134,7 @@ pub(super) fn drain_native_stream(
         }
         if chunk.done {
             usage = native_usage(chunk.prompt_eval_count, chunk.eval_count);
+            stop = chunk.done_reason;
         }
     }
     content.push_str(&think.finish(&mut on_delta));
@@ -142,7 +144,7 @@ pub(super) fn drain_native_stream(
         tool_calls,
         tool_call_id: None,
     };
-    Ok((message, usage))
+    Ok(super::wire::Turn { message, usage, stop })
 }
 
 /// Map native token counters onto the OpenAI [`Usage`] shape (no cache counters).
@@ -166,6 +168,9 @@ struct NativeChunk {
     message: Option<NativeMessage>,
     #[serde(default)]
     done: bool,
+    /// Ollama's spelling of `finish_reason` — `stop`, `length`, `load`.
+    #[serde(default)]
+    done_reason: Option<String>,
     #[serde(default)]
     prompt_eval_count: Option<u64>,
     #[serde(default)]
@@ -367,6 +372,7 @@ struct PullChunk {
 
 #[cfg(test)]
 mod tests {
+    use super::super::wire::Turn;
     use super::*;
 
     #[test]
@@ -377,7 +383,7 @@ mod tests {
             r#"{"message":{"role":"assistant","content":""},"done":true,"prompt_eval_count":10,"eval_count":5}"#.to_string(),
         ];
         let mut text = String::new();
-        let (msg, usage) = drain_native_stream(lines.into_iter(), Some("think"), &AtomicBool::new(false), |f| {
+        let Turn { message: msg, usage, .. } = drain_native_stream(lines.into_iter(), Some("think"), &AtomicBool::new(false), |f| {
             if let Fragment::Text(t) = f {
                 text.push_str(t);
             }
@@ -401,7 +407,7 @@ mod tests {
             r#"{"message":{"role":"assistant","content":"Hi <think>plan</think>answer"},"done":true}"#.to_string(),
         ];
         let (mut text, mut reasoning) = (String::new(), String::new());
-        let (msg, _) = drain_native_stream(lines.into_iter(), Some("think"), &AtomicBool::new(false), |f| match f {
+        let Turn { message: msg, .. } = drain_native_stream(lines.into_iter(), Some("think"), &AtomicBool::new(false), |f| match f {
             Fragment::Text(t) => text.push_str(t),
             Fragment::Reasoning(r) => reasoning.push_str(r),
         })
@@ -424,6 +430,7 @@ mod tests {
             content: None,
             tool_calls: vec![ToolCall {
                 id: "c1".to_owned(),
+                kind: "function".into(),
                 function: FunctionCall { name: "calc".to_owned(), arguments: r#"{"expr":"2+2"}"#.to_owned() },
             }],
             tool_call_id: None,
@@ -541,7 +548,7 @@ mod tests {
             &cancel,
             |_| {},
         );
-        let (msg, _) = out.expect("early stop is not an error");
+        let Turn { message: msg, .. } = out.expect("early stop is not an error");
         assert_eq!(seen, 1, "the poll after the first pull saw the flag");
         assert!(msg.content.as_deref().unwrap_or("").is_empty());
     }
