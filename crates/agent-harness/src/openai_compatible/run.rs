@@ -298,7 +298,14 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
         cfg.permission_prompt.clone(),
         &disabled,
     );
-    let tool_defs = toolset.defs(cfg.mode, &cfg.model, tools::AgentContext::Main);
+    // `Answer` offers nothing at all: the caller has said everything needed is
+    // in the prompt, and a tool a model cannot see is one it cannot spend a
+    // turn on.
+    let tool_defs = if cfg.mode == RunMode::Answer {
+        Vec::new()
+    } else {
+        toolset.defs(cfg.mode, &cfg.model, tools::AgentContext::Main)
+    };
     // Structured-output schema (if set) as an OpenAI `response_format`, applied
     // each turn so the final answer conforms; tool-call turns carry null content
     // and stay unconstrained.

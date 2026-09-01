@@ -297,6 +297,13 @@ fn build_claude_args(
     // controls the mode — `bypassPermissions` for headless, `auto`, … — by
     // passing its own, with no adapter edit and no duplicate flag. In Ask mode
     // the CLI stays read-only by default.
+    // `Answer` means the prompt is the whole job. Naming an empty tool set is
+    // stronger than asking in prose not to call one, and the CLI honours the
+    // flag whatever the model decides it would like to do.
+    if matches!(mode, RunMode::Answer) && !extra_args_sets(&tuning.extra_args, "--allowedTools") {
+        args.push("--allowedTools".to_owned());
+        args.push(String::new());
+    }
     if matches!(mode, RunMode::Edit) && !extra_args_sets(&tuning.extra_args, "--permission-mode") {
         args.push("--permission-mode".to_owned());
         args.push("acceptEdits".to_owned());
@@ -543,6 +550,26 @@ mod tests {
             .position(|a| a == flag)
             .and_then(|i| args.get(i + 1))
             .map(String::as_str)
+    }
+
+    #[test]
+    fn answer_mode_names_an_empty_tool_set() {
+        let args = build_claude_args("hi".into(), RunMode::Answer, &RunTuning::default(), None);
+        let i = args.iter().position(|a| a == "--allowedTools").expect("the flag");
+        assert_eq!(args[i + 1], "", "an empty set, not an absent flag");
+        assert!(!args.iter().any(|a| a == "--permission-mode"), "nothing to permit");
+    }
+
+    #[test]
+    fn a_host_that_names_its_own_tools_keeps_them() {
+        let tuning = RunTuning {
+            extra_args: vec!["--allowedTools".into(), "WebSearch".into()],
+            ..Default::default()
+        };
+        let args = build_claude_args("hi".into(), RunMode::Answer, &tuning, None);
+        let flags = args.iter().filter(|a| *a == "--allowedTools").count();
+        assert_eq!(flags, 1, "exactly one, and it is the host's");
+        assert!(args.contains(&"WebSearch".to_owned()));
     }
 
     #[test]

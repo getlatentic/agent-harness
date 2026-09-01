@@ -197,6 +197,19 @@ pub enum RunMode {
     Ask,
     /// Propose edits to the workspace.
     Edit,
+    /// Answer from the prompt alone. No tools are offered at all.
+    ///
+    /// For work where everything needed is already in the message — classifying
+    /// a document, extracting a field, judging whether two things are the same.
+    /// `Ask` offers read-only file tools whether or not the task has any use for
+    /// them, and a prompt full of paths and URLs invites a model to go looking:
+    /// one host saw 228 records fail because a tool call consumed the only turn,
+    /// and later found a job spending 17 tool calls listing a repository it had
+    /// been asked nothing about.
+    ///
+    /// Asking a model in prose not to call tools works and is the weaker fix.
+    /// This removes the choice.
+    Answer,
 }
 
 /// How hard the model should think, in harness-neutral terms. Codex
