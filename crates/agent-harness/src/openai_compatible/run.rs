@@ -348,6 +348,10 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
     // One-shot model access for `summarize`'s map-reduce, over the same config.
     let model = Model { cfg: &cfg };
 
+    // Whether the model has said anything at all across the whole run, so the
+    // turn limit can tell "did the work, ran long" from "never answered".
+    let mut ever_said = false;
+
     for turn in 0..cfg.max_turns {
         if cancel.load(Ordering::SeqCst) {
             touch(&cfg, &session.id);
@@ -417,6 +421,7 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
         // request alongside our results).
         let calls = msg.tool_calls.clone();
         let said_nothing = msg.content.as_deref().unwrap_or_default().trim().is_empty();
+        ever_said |= !said_nothing;
         transcript.push(msg);
 
         if calls.is_empty() {
@@ -490,10 +495,17 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
 
     // Ran out of turns with the model still calling tools.
     touch(&cfg, &session.id);
-    (*on_event)(RunEvent::Activity {
-        run_id: rid.to_owned(),
-        message: format!("Reached the {}-turn limit.", cfg.max_turns),
-    });
+    let limit = format!("Reached the {}-turn limit.", cfg.max_turns);
+    // Having spent every turn and never once answered is a failure, and it
+    // exits like a success: the caller is handed an empty string and no reason.
+    if ever_said {
+        (*on_event)(RunEvent::Activity { run_id: rid.to_owned(), message: limit });
+    } else {
+        (*on_event)(RunEvent::Error {
+            run_id: rid.to_owned(),
+            message: format!("{limit} The model never answered."),
+        });
+    }
     (*on_event)(RunEvent::Exited { run_id: rid.to_owned(), exit_code: Some(0), cancelled: false });
 }
 
