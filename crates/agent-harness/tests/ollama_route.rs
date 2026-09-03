@@ -893,6 +893,46 @@ fn tool_access_none_refuses_a_call_the_model_makes_anyway() {
 }
 
 
+/// A run that ends with an error must not also report success.
+///
+/// A silent turn used to emit the error and exit 0 beside it — the two
+/// terminal signals contradicting each other, so a caller reading the exit
+/// code, which is the conventional one, still saw a success holding an empty
+/// string. That is the thing naming the stop reason was added to prevent, and
+/// naming it is only half of it.
+#[test]
+fn a_turn_that_says_nothing_ends_as_a_failure() {
+    let tags = json!({ "models": [ { "name": "test-model" } ] });
+    let silent = json!({
+        "message": { "role": "assistant", "content": "" },
+        "done": true,
+        "done_reason": "stop",
+        "prompt_eval_count": 5,
+        "eval_count": 0
+    })
+    .to_string();
+    let (base, _seen) = fake_ollama(tags, vec![silent]);
+
+    let events = collect(&OpenHarness::ollama_at(&base), "say something");
+
+    let message = events
+        .iter()
+        .find_map(|e| match e {
+            RunEvent::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("a turn that said nothing must say why: {events:?}"));
+    assert!(message.contains("no answer"), "the error must name the outcome: {message}");
+    assert!(message.contains("stop"), "and why the provider stopped: {message}");
+
+    let exit = events.iter().find_map(|e| match e {
+        RunEvent::Exited { exit_code, .. } => Some(*exit_code),
+        _ => None,
+    });
+    assert_eq!(exit, Some(Some(1)), "an errored run must not exit 0: {events:?}");
+}
+
+
 const PLANTED: &str = "quartzine-80417";
 
 /// Plant the token, run one live prompt under `tools`, and report which tools

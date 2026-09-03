@@ -32,7 +32,12 @@ these were found by hosts hitting them in production, not by tests.
   emitted `Exited { exit_code: 0 }`, so a consumer saw a successful run
   holding an empty string, and *ran out of budget* was indistinguishable from
   *declined to answer*. The stop reason now rides on a named `Turn`, and a turn
-  that ends having said nothing emits `RunEvent::Error` naming it. The
+  that ends having said nothing emits `RunEvent::Error` naming it — and the
+  run ends non-zero. Naming the reason while still exiting `0` left the two
+  terminal signals contradicting each other, so a caller reading the exit code,
+  which is the conventional one, still saw a success holding an empty string:
+  the very thing this was added to prevent. The same now holds for a run that
+  spends every turn without ever answering. The
   instrument earned its place immediately: the failing turns it was built for
   reported `stop`, not `length`, which killed the budget theory it was meant to
   confirm.
