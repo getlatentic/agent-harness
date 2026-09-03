@@ -7,27 +7,104 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
-### Fixed
+## [0.6.0] - 2026-09-03
 
-- **Disabling a built-in tool silently switched off MCP deferral.** `ToolSet`
-  picked out which tools were MCP-provided by position — everything after the
-  built-in count — but took that count *before* removing the tools the host had
-  disabled. A host that disables N built-ins therefore skipped past N MCP tools
-  as well, and one disabling as many built-ins as it has MCP tools got an empty
-  set: the `DEFER_MCP_ABOVE_BYTES` threshold could never trigger, so a large MCP
-  surface rode along in full in every request, and the `tool_search` discovery
-  index was built from the wrong tools. MCP tools are now identified by id,
-  which no removal can shift. Found in Compose, which disables 15 built-ins.
+A release about what a run *reports* and what it is *allowed to reach*. Two of
+these were found by hosts hitting them in production, not by tests.
+
+### Breaking
+
+- **`RunMode::Answer` is gone.** It conflated two questions: whether a run may
+  *change* things (`Ask`/`Edit`) and whether it may *reach outside the prompt*
+  at all. The second is now its own axis, `RunRequest.tools: ToolAccess`, which
+  is how every other SDK models it (`tool_choice`). Move `RunMode::Answer` to
+  `RunMode::Ask` plus `ToolAccess::None`.
+
+- **`RunRequest` gained a `tools` field.** It derives `Default`, so a call site
+  using `..Default::default()` is unaffected; an exhaustive struct literal must
+  add `tools`. `cargo-semver-checks` classes this as major, which is why this
+  is 0.6.0 rather than 0.5.4.
 
 ### Added
 
-- **MCP tools may now be offered in read-only (`Ask`) runs.** Every MCP tool was
+- **A turn that says nothing now says why.** `finish_reason` — and ollama's
+  `done_reason` — was never parsed. A turn with no content and no tool call
+  emitted `Exited { exit_code: 0 }`, so a consumer saw a successful run
+  holding an empty string, and *ran out of budget* was indistinguishable from
+  *declined to answer*. The stop reason now rides on a named `Turn`, and a turn
+  that ends having said nothing emits `RunEvent::Error` naming it. The
+  instrument earned its place immediately: the failing turns it was built for
+  reported `stop`, not `length`, which killed the budget theory it was meant to
+  confirm.
+
+- **`ToolAccess::None` — answer from the prompt, with no tools offered.** For
+  work where everything needed is already in the message: classifying a
+  document, extracting a field, judging whether two things match. Not
+  `tool_choice: "none"`, which still sends every schema and merely forbids the
+  call — nothing is sent, because the tokens and the temptation were both the
+  problem. Honoured by the `openai-compatible` and `claude` adapters; `codex`
+  and `acp` ignore it, since neither can withhold an agent's own tools.
+
+- **MCP tools may be offered in read-only (`Ask`) runs.** Every MCP tool was
   unconditionally treated as mutating, so a host mounting a read-only server
-  (docs, search, issue lookup) had to run in `Edit` to see any of its tools at
-  all. A server that sets the spec's `annotations.readOnlyHint` on a tool now
-  gets that tool offered in `Ask` too. The default is unchanged and still
-  conservative: no hint, a `false` hint, or a non-boolean one all keep the tool
-  withheld from a read-only run.
+  (docs, search, issue lookup) had to run in `Edit` to see any tools at all. A
+  server that sets the spec's `annotations.readOnlyHint` now gets that tool
+  offered in `Ask`. The default is unchanged and still conservative: no hint, a
+  `false` hint, and a non-boolean one all stay withheld. The MCP spec scopes
+  its warning to annotations from *untrusted* servers; mounting one is the
+  host's trust decision.
+
+- **An unknown tool name now says what to call instead.** `unknown tool `x``
+  gives a model nothing to act on, and a small one answers by calling `x`
+  again — one host burned eight of fifteen turns on a single wrong name, then
+  ended with no answer. The error now names the closest deferred matches and
+  the offered ids, so the next turn is a recovery rather than a repeat.
+
+### Fixed
+
+- **Disabling a built-in silently switched off MCP deferral.** `ToolSet` picked
+  out MCP tools by position — everything past the built-in count — but took
+  that count *before* removing the host's disabled tools. A host disabling N
+  built-ins skipped past N MCP tools, and one disabling as many built-ins as it
+  had MCP tools got an empty set: `DEFER_MCP_ABOVE_BYTES` could never trigger,
+  so a large MCP surface rode along in full in every request, and the
+  `tool_search` index was built from the wrong tools. MCP tools are identified
+  by id now, which no removal can shift. Found in Compose, which disables 15
+  built-ins.
+
+- **`ToolAccess::None` on the `claude` adapter withheld nothing.** It passed
+  `--allowedTools ""`, which is the *auto-approve* list rather than an
+  availability gate — under `-p` the read tools are permitted regardless.
+  Measured against the CLI, planting a unique token per run because `claude -p`
+  repeating an earlier answer is indistinguishable from a successful read:
+
+  | flag | result |
+  |---|---|
+  | no flag | read it, 2/2 |
+  | `--allowedTools ""` | read it, 2/2 |
+  | `--disallowedTools <10 names>` | read it, 1/1 |
+  | `--disallowedTools <19 names>` | read it, 2/3 |
+  | `--disallowedTools "*"` | blocked, 4/4 |
+
+  A name list is a speed bump: given turns the model routes around whatever is
+  not on it, and any list is a guess the next built-in invalidates. The
+  wildcard ships.
+
+  What it does **not** promise: with no tools available a model may write the
+  call as prose *and invent its output* — one run reported a directory empty
+  that held the planted file. Nothing ran, which is the guarantee; but a caller
+  that scrapes an answer for tool syntax, or trusts a transcript quoted inside
+  one, will find both there.
+
+- **Echoed tool calls carry `type`.** A strict provider rejects an assistant
+  message whose `tool_calls` omit it (`Invalid 'tool_calls': missing field
+  `type``, HTTP 400), which failed every multi-turn tool run on that endpoint.
+  Set on both the streamed and the native-ollama paths.
+
+- **The `openai-compatible` test suite did not compile.** Three `ToolCall`
+  literals predated the `type` field, and `cargo test -p agent-harness` passes
+  without the feature, so it stayed invisible. `scripts/check.sh` now tests with
+  the features CI tests with, so that class cannot recur silently.
 
 ## [0.5.3] - 2026-08-23
 
