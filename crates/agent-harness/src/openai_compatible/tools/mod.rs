@@ -364,6 +364,15 @@ impl ToolSet {
         // `plane_propose_fact` on the words it shares.
         let near = self.index.search(&name.replace('_', " "), NEAR_MISSES_SUGGESTED);
         let mut msg = format!("unknown tool `{name}` — nothing by that name is registered.");
+        // With nothing to point at, "call one of those instead" names nothing
+        // and is the same dead end `unknown tool x` was on its own: a model
+        // given no way forward answers by retrying the name. This is the
+        // `ToolAccess::None` case, where the honest instruction is to stop
+        // reaching and answer.
+        if near.is_empty() && offered.is_empty() {
+            msg.push_str(" This run has no tools at all. Answer from the prompt; do not retry.");
+            return msg;
+        }
         if !near.is_empty() {
             msg.push_str(&format!(" Closest available: {}.", near.join(", ")));
         }
@@ -854,6 +863,25 @@ mod tests {
         assert!(!names.contains(&"bash".to_string()));
         // Everything else survives — disabling one tool is not a mode switch.
         assert!(names.contains(&"read".to_string()) && names.contains(&"edit".to_string()));
+    }
+
+    /// A refusal has to leave the model somewhere to go. Naming alternatives
+    /// is what makes the next turn a recovery — but under `ToolAccess::None`
+    /// there are none, and telling a model to "call one of those" with nothing
+    /// named is the dead end that cost one host eight of fifteen turns on a
+    /// single wrong name.
+    #[test]
+    fn a_run_with_no_tools_at_all_is_told_to_answer_not_to_pick_one() {
+        let all_withheld = ToolSet::builtin_tool_names();
+        let set = ToolSet::new(vec![], vec![], None, &all_withheld);
+        let message = set.no_such_tool("list");
+
+        assert!(
+            !message.contains("Call one of those"),
+            "nothing was named, so there is no `those`: {message}"
+        );
+        assert!(message.contains("no tools at all"), "say so plainly: {message}");
+        assert!(message.contains("do not retry"), "and still discourage the retry: {message}");
     }
 
     #[test]

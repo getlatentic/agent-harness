@@ -55,6 +55,17 @@ these were found by hosts hitting them in production, not by tests.
   reported `stop`, not `length`, which killed the budget theory it was meant to
   confirm.
 
+- **A refused tool call reads as one.** `ToolStart` is an *attempt*: a call
+  withheld under `ToolAccess::None`, refused as mutating in a read-only run, or
+  denied by permissions still starts, because a host should see what the model
+  reached for. Whether it ran is `ok` on the matching `ToolEnd`. That is now
+  said on the event, because counting starts to mean "tools ran" overcounts
+  precisely where it matters — a correctly sandboxed run still reports every
+  attempt — and because a refusal with nothing left to offer used to end
+  "Call one of those instead" having named nothing, which is the dead end
+  `unknown tool x` was on its own. It now says the run has no tools and to
+  answer from the prompt.
+
 - **`Features::withheld_tools` — ask before you rely on it.** A host offering a
   no-tools mode can now read whether an adapter honours it, instead of meeting
   the refusal as a failed run. A registry test holds the flag and the behaviour
