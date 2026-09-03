@@ -55,7 +55,20 @@ impl ChatMessage {
 pub(crate) struct ToolCall {
     #[serde(default)]
     pub id: String,
+    /// Always `"function"`. The field is required when an assistant message
+    /// carrying tool calls is echoed back on the next turn: a provider that
+    /// validates its request body strictly rejects the whole message without
+    /// it (observed on a Bedrock OpenAI-compatible gateway as
+    /// `Invalid 'tool_calls': missing field \`type\``, HTTP 400, which fails
+    /// every multi-turn tool run on that endpoint). Defaulted on the way in,
+    /// because providers may omit it in streamed deltas.
+    #[serde(rename = "type", default = "function_kind")]
+    pub kind: String,
     pub function: FunctionCall,
+}
+
+fn function_kind() -> String {
+    "function".to_owned()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -279,6 +292,17 @@ fn base64_encode(data: &[u8]) -> String {
     out
 }
 
+/// One assistant turn as it came off the wire.
+#[derive(Debug)]
+pub(crate) struct Turn {
+    pub message: ChatMessage,
+    pub usage: Option<Usage>,
+    /// Why the provider stopped. `length` means the turn ran out of budget
+    /// before it could answer — in the assembled message that is indis-
+    /// tinguishable from a model that simply declined to say anything.
+    pub stop: Option<String>,
+}
+
 /// Parse an OpenAI SSE chat stream into the assembled assistant message + usage,
 /// invoking `on_delta` per text fragment. Split out from the HTTP so it's unit-
 /// testable without a live endpoint.
@@ -287,10 +311,11 @@ pub(super) fn drain_stream(
     reasoning_tag: Option<&str>,
     cancel: &AtomicBool,
     mut on_delta: impl FnMut(Fragment),
-) -> (ChatMessage, Option<Usage>) {
+) -> Turn {
     let mut content = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut usage = None;
+    let mut stop = None;
     let mut think = ThinkSplitter::new(reasoning_tag);
     for line in lines {
         // Stop-button responsiveness (#115): end the read now; dropping the
@@ -312,6 +337,9 @@ pub(super) fn drain_stream(
             usage = chunk.usage;
         }
         if let Some(choice) = chunk.choices.into_iter().next() {
+            if choice.finish_reason.is_some() {
+                stop = choice.finish_reason;
+            }
             if let Some(text) = choice.delta.content {
                 if !text.is_empty() {
                     // Models that inline reasoning as `<think>…</think>` in the
@@ -340,7 +368,7 @@ pub(super) fn drain_stream(
         tool_calls,
         tool_call_id: None,
     };
-    (message, usage)
+    Turn { message, usage, stop }
 }
 
 /// Splits streamed content into visible-output and `<think>…</think>` reasoning
@@ -448,7 +476,11 @@ fn partial_tag_suffix_len(buf: &str, tag: &str) -> usize {
 /// argument text.
 fn accumulate_tool_call(calls: &mut Vec<ToolCall>, delta: DeltaToolCall) {
     while calls.len() <= delta.index {
-        calls.push(ToolCall { id: String::new(), function: FunctionCall { name: String::new(), arguments: String::new() } });
+        calls.push(ToolCall {
+            id: String::new(),
+            kind: function_kind(),
+            function: FunctionCall { name: String::new(), arguments: String::new() },
+        });
     }
     let call = &mut calls[delta.index];
     if let Some(id) = delta.id.filter(|s| !s.is_empty()) {
@@ -476,6 +508,8 @@ struct StreamChunk {
 struct StreamChoice {
     #[serde(default)]
     delta: Delta,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -522,7 +556,7 @@ mod tests {
             "data: [DONE]".to_string(),
         ];
         let (mut text, mut reasoning) = (String::new(), String::new());
-        let (msg, _) = drain_stream(lines.into_iter(), Some("think"), &AtomicBool::new(false), |f| match f {
+        let Turn { message: msg, .. } = drain_stream(lines.into_iter(), Some("think"), &AtomicBool::new(false), |f| match f {
             Fragment::Text(t) => text.push_str(t),
             Fragment::Reasoning(r) => reasoning.push_str(r),
         });
@@ -539,7 +573,7 @@ mod tests {
             "data: [DONE]".to_string(),
         ];
         let mut text = String::new();
-        let (msg, _) = drain_stream(lines.into_iter(), None, &AtomicBool::new(false), |f| {
+        let Turn { message: msg, .. } = drain_stream(lines.into_iter(), None, &AtomicBool::new(false), |f| {
             if let Fragment::Text(t) = f {
                 text.push_str(t);
             }
@@ -572,6 +606,40 @@ mod tests {
     }
 
     #[test]
+    fn an_echoed_tool_call_carries_its_type() {
+        // The field is required when the assistant message is sent back on the
+        // next turn. Without it a strict provider rejects the request outright
+        // (HTTP 400), so every multi-turn tool run on that endpoint fails.
+        let call = ToolCall {
+            id: "c1".into(),
+            kind: function_kind(),
+            function: FunctionCall { name: "read".into(), arguments: "{}".into() },
+        };
+        let json = serde_json::to_value(&call).unwrap();
+        assert_eq!(json["type"], "function");
+
+        // And a provider that omits it in a streamed delta still yields a
+        // message we can legally echo.
+        let parsed: ToolCall =
+            serde_json::from_str(r#"{"id":"c1","function":{"name":"read","arguments":"{}"}}"#).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap()["type"], "function");
+    }
+
+    #[test]
+    fn drain_stream_reports_why_the_provider_stopped() {
+        // A turn that ran out of budget arrives as empty content with
+        // `finish_reason: length`. Without the reason it is indistinguishable
+        // from a model that simply declined to answer.
+        let lines = vec![
+            r#"data: {"choices":[{"delta":{"reasoning_content":"weighing it up"}}]}"#.to_string(),
+            r#"data: {"choices":[{"delta":{},"finish_reason":"length"}]}"#.to_string(),
+        ];
+        let turn = drain_stream(lines.into_iter(), None, &AtomicBool::new(false), |_| {});
+        assert_eq!(turn.stop.as_deref(), Some("length"));
+        assert!(turn.message.content.is_none(), "reasoning is not the answer");
+    }
+
+    #[test]
     fn drain_stream_assembles_text_tool_calls_and_usage() {
         let lines = vec![
             r#"data: {"choices":[{"delta":{"reasoning_content":"think"}}]}"#.to_string(),
@@ -584,7 +652,7 @@ mod tests {
         ];
         let mut text = String::new();
         let mut reasoning = String::new();
-        let (msg, usage) = drain_stream(lines.into_iter(), Some("think"), &AtomicBool::new(false), |f| match f {
+        let Turn { message: msg, usage, .. } = drain_stream(lines.into_iter(), Some("think"), &AtomicBool::new(false), |f| match f {
             Fragment::Text(t) => text.push_str(t),
             Fragment::Reasoning(r) => reasoning.push_str(r),
         });
@@ -605,7 +673,7 @@ mod tests {
             String::new(),
             r#"data: {"choices":[{"delta":{"content":"hi"}}]}"#.to_string(),
         ];
-        let (msg, usage) = drain_stream(lines.into_iter(), Some("think"), &AtomicBool::new(false), |_| {});
+        let Turn { message: msg, usage, .. } = drain_stream(lines.into_iter(), Some("think"), &AtomicBool::new(false), |_| {});
         assert_eq!(msg.content.as_deref(), Some("hi"));
         assert!(usage.is_none());
     }
@@ -670,7 +738,7 @@ mod tests {
             .map(|i| format!(r#"data: {{"choices":[{{"delta":{{"content":"c{i}"}}}}]}}"#))
             .collect();
         let mut seen = 0;
-        let (msg, _) = drain_stream(
+        let Turn { message: msg, .. } = drain_stream(
             lines.into_iter().inspect(|_| {
                 seen += 1;
                 cancel.store(true, Ordering::SeqCst);

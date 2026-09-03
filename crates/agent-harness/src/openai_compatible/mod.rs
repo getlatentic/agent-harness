@@ -764,7 +764,7 @@ impl Harness for OpenHarness {
     }
 
     fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
-        let RunRequest { run_id, prompt, cwd, mode, tuning, resume, attachments } = request;
+        let RunRequest { run_id, prompt, cwd, mode, tools, tuning, resume, attachments } = request;
         let model = tuning
             .model
             .as_deref()
@@ -798,6 +798,7 @@ impl Harness for OpenHarness {
             prompt,
             cwd: cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
             mode,
+            tools,
             max_turns: run::LoopConfig::max_turns_or_default(tuning.max_turns),
             resume,
             store: self.session_dir.clone().map(session::FileStore::new),

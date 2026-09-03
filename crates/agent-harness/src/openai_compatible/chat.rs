@@ -20,7 +20,7 @@ use std::sync::atomic::AtomicBool;
 use serde_json::{json, Value};
 
 use super::ollama;
-use super::wire::{self, ChatMessage, Fragment, Usage};
+use super::wire::{self, ChatMessage, Fragment};
 use super::PromptCache;
 
 /// One chat exchange, independent of the dialect it will be sent in.
@@ -135,7 +135,7 @@ impl Dialect {
         reasoning_tag: Option<&str>,
         cancel: &AtomicBool,
         on_delta: impl FnMut(Fragment),
-    ) -> Result<(ChatMessage, Option<Usage>), String> {
+    ) -> Result<wire::Turn, String> {
         match self {
             Self::OpenAi => Ok(wire::drain_stream(lines, reasoning_tag, cancel, on_delta)),
             Self::OllamaNative { .. } => {
@@ -154,7 +154,7 @@ pub(crate) fn post_chat_stream(
     dialect: Dialect,
     cancel: &AtomicBool,
     on_delta: impl FnMut(Fragment),
-) -> Result<(ChatMessage, Option<Usage>), String> {
+) -> Result<wire::Turn, String> {
     let url = format!("{}{}", request.base, dialect.path());
     let body = dialect.body(&request);
     let api_key = request.api_key;

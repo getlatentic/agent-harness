@@ -71,6 +71,8 @@ pub(crate) struct LoopConfig {
     pub prompt: String,
     pub cwd: PathBuf,
     pub mode: RunMode,
+    /// Whether any tool is offered at all. Orthogonal to `mode`.
+    pub tools: crate::ToolAccess,
     pub max_turns: u32,
     /// The session to resume — its stored transcript is replayed before the new
     /// prompt; `None` starts a fresh session.
@@ -232,7 +234,7 @@ fn send_turn(
     cancel: &AtomicBool,
     on_event: &RunCallback,
     rid: &str,
-) -> Result<(ChatMessage, Option<wire::Usage>), String> {
+) -> Result<wire::Turn, String> {
     let request = chat::ChatRequest {
         base: &cfg.base_url,
         model: &cfg.model,
@@ -298,7 +300,14 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
         cfg.permission_prompt.clone(),
         &disabled,
     );
-    let tool_defs = toolset.defs(cfg.mode, &cfg.model, tools::AgentContext::Main);
+    // `ToolAccess::None` offers nothing at all: the caller has said everything
+    // needed is in the prompt, and a tool a model cannot see is one it cannot
+    // spend a turn on.
+    let tool_defs = if cfg.tools == crate::ToolAccess::None {
+        Vec::new()
+    } else {
+        toolset.defs(cfg.mode, &cfg.model, tools::AgentContext::Main)
+    };
     // Structured-output schema (if set) as an OpenAI `response_format`, applied
     // each turn so the final answer conforms; tool-call turns carry null content
     // and stay unconstrained.
@@ -340,6 +349,10 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
         Subagent { cfg: &cfg, parent_session_id: &session.id, skills: &skills, on_event: &on_event, toolset: &toolset };
     // One-shot model access for `summarize`'s map-reduce, over the same config.
     let model = Model { cfg: &cfg };
+
+    // Whether the model has said anything at all across the whole run, so the
+    // turn limit can tell "did the work, ran long" from "never answered".
+    let mut ever_said = false;
 
     for turn in 0..cfg.max_turns {
         if cancel.load(Ordering::SeqCst) {
@@ -394,8 +407,8 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
             }
             other => other,
         };
-        let (msg, usage) = match streamed {
-            Ok(pair) => pair,
+        let wire::Turn { message: msg, usage, stop } = match streamed {
+            Ok(turn) => turn,
             Err(message) => return finish_error(&on_event, rid, message),
         };
         // A cancel that fired MID-STREAM returns a truncated turn — exit as
@@ -409,12 +422,24 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
         // (the history must keep the tool_calls so the model sees its own
         // request alongside our results).
         let calls = msg.tool_calls.clone();
+        let said_nothing = msg.content.as_deref().unwrap_or_default().trim().is_empty();
+        ever_said |= !said_nothing;
         transcript.push(msg);
 
         if calls.is_empty() {
             persist(&cfg, &session.id, &transcript, &mut saved, &on_event, rid);
             touch(&cfg, &session.id);
             emit_usage(&on_event, rid, usage, cfg.model_cost);
+            // A turn that says nothing and asks for nothing is a failure, but it
+            // exits like a success. Report why the provider stopped, so a budget
+            // that ran out is distinguishable from a model that declined.
+            if said_nothing {
+                let why = stop.as_deref().unwrap_or("no reason given");
+                (*on_event)(RunEvent::Error {
+                    run_id: rid.to_owned(),
+                    message: format!("the model returned no answer (stopped: {why})"),
+                });
+            }
             (*on_event)(RunEvent::Exited { run_id: rid.to_owned(), exit_code: Some(0), cancelled: false });
             return;
         }
@@ -472,10 +497,17 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
 
     // Ran out of turns with the model still calling tools.
     touch(&cfg, &session.id);
-    (*on_event)(RunEvent::Activity {
-        run_id: rid.to_owned(),
-        message: format!("Reached the {}-turn limit.", cfg.max_turns),
-    });
+    let limit = format!("Reached the {}-turn limit.", cfg.max_turns);
+    // Having spent every turn and never once answered is a failure, and it
+    // exits like a success: the caller is handed an empty string and no reason.
+    if ever_said {
+        (*on_event)(RunEvent::Activity { run_id: rid.to_owned(), message: limit });
+    } else {
+        (*on_event)(RunEvent::Error {
+            run_id: rid.to_owned(),
+            message: format!("{limit} The model never answered."),
+        });
+    }
     (*on_event)(RunEvent::Exited { run_id: rid.to_owned(), exit_code: Some(0), cancelled: false });
 }
 
@@ -703,8 +735,7 @@ fn chat_once(cfg: &LoopConfig, model: &str, messages: &[ChatMessage], tools: &[V
         api_key: cfg.api_key.as_deref(),
         extras: chat::RequestExtras { cache: cfg.prompt_cache, ..Default::default() },
     };
-    let (message, _usage) = chat::post_chat_stream(request, cfg.dialect, cancel, |_| {})?;
-    Ok(message)
+    Ok(chat::post_chat_stream(request, cfg.dialect, cancel, |_| {})?.message)
 }
 
 /// When the windowed request would near the model's context limit, summarize the
@@ -1014,6 +1045,7 @@ mod tests {
                 content: None,
                 tool_calls: vec![ToolCall {
                     id: "call_1".into(),
+                    kind: "function".into(),
                     function: FunctionCall { name, arguments },
                 }],
                 tool_call_id: None,
@@ -1172,6 +1204,7 @@ mod tests {
             prompt: prompt.into(),
             cwd: PathBuf::from("/tmp"),
             mode: RunMode::Edit,
+            tools: crate::ToolAccess::Default,
             max_turns: 1,
             resume,
             store,
@@ -1215,6 +1248,7 @@ mod tests {
             content: Some("on it".to_owned()),
             tool_calls: vec![wire::ToolCall {
                 id: "c1".to_owned(),
+                kind: "function".into(),
                 function: wire::FunctionCall { name: name.to_owned(), arguments: arguments.to_owned() },
             }],
             tool_call_id: None,

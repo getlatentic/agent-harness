@@ -37,7 +37,7 @@ pub use harness::{
     Info, ModelChoice, Readiness, InstallCallback, InstalledModel, InstallHint,
     ModelManagement,
     PullProgress, PullProgressAggregator, PullProgressCallback, ReasoningEffort, RunCallback,
-    RunControl, RunHandle, RunMode, RunRequest, RunTuning,
+    RunControl, RunHandle, RunMode, RunRequest, RunTuning, ToolAccess,
 };
 // The generic subprocess engine + the install/process event shapes live in
 // the `cli-stream` leaf; re-export them so adapters + consumers reach them

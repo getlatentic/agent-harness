@@ -151,7 +151,11 @@ impl Harness for CodexHarness {
 
     fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
         // `attachments` ignored: codex exec is a text CLI (no image input here).
-        let RunRequest { run_id, prompt, cwd, mode, tuning, resume, attachments: _ } = request;
+        let RunRequest { run_id, prompt, cwd, mode,
+            // Ignored: the Codex CLI has no flag that withholds its tools.
+            // See [`ToolAccess`] for which adapters honour it.
+            tools: _,
+            tuning, resume, attachments: _ } = request;
         let args = build_codex_args(prompt, mode, &tuning, resume.as_deref());
         let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
