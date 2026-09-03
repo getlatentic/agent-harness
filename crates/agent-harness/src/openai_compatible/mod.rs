@@ -678,6 +678,7 @@ impl Harness for OpenHarness {
     fn features(&self) -> Features {
         Features {
             credential_required: self.api_key.is_needed(),
+            withheld_tools: true,
             // Dynamic discovery surfaces models via list_models(); a
             // static instance lists them here.
             models: match &self.discovery {
