@@ -319,6 +319,13 @@ fn build_claude_args(
     // around whatever is not on it, and every arm above was a guess at a list
     // that a new built-in would invalidate anyway. The wildcard needs no list
     // and still answers an ordinary question (`pong`, one turn, no error).
+    //
+    // What it guarantees is that no tool *runs*, not that no tool-shaped text
+    // comes back. Under the wildcard the model wrote the call out as prose —
+    // `<invoke name="Bash">…` — and then invented its output, reporting a
+    // directory as empty that held the planted file. Nothing was read, which
+    // is the guarantee; but a caller that scrapes an answer for tool syntax,
+    // or trusts a transcript quoted inside one, will find both there.
     if tools == ToolAccess::None && !extra_args_sets(&tuning.extra_args, "--disallowedTools") {
         args.push("--disallowedTools".to_owned());
         args.push("*".to_owned());
