@@ -42,8 +42,13 @@ these were found by hosts hitting them in production, not by tests.
   document, extracting a field, judging whether two things match. Not
   `tool_choice: "none"`, which still sends every schema and merely forbids the
   call — nothing is sent, because the tokens and the temptation were both the
-  problem. Honoured by the `openai-compatible` and `claude` adapters; `codex`
-  and `acp` ignore it, since neither can withhold an agent's own tools.
+  problem. Nothing is dispatched either: a model trained with its own tool
+  syntax calls one regardless of what it was offered, and withholding only the
+  schemas left those calls running — `gpt-oss`, handed an empty tool array,
+  asked for `glob`, `list`, `read` and `bash`, and got a real directory
+  listing back. Honoured by the `openai-compatible` and `claude` adapters;
+  `codex` and `acp` ignore it, since neither can withhold an agent's own
+  tools.
 
 - **MCP tools may be offered in read-only (`Ask`) runs.** Every MCP tool was
   unconditionally treated as mutating, so a host mounting a read-only server

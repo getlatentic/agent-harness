@@ -128,12 +128,26 @@ fn collect(harness: &dyn Harness, prompt: &str) -> Vec<RunEvent> {
     collect_resuming(harness, prompt, None)
 }
 
-/// As [`collect`], continuing a stored session.
-fn collect_resuming(harness: &dyn Harness, prompt: &str, resume: Option<String>) -> Vec<RunEvent> {
-    collect_inner(harness, prompt, resume)
+/// As [`collect`], with the run's tool access spelled out.
+fn collect_with_tools(
+    harness: &dyn Harness,
+    prompt: &str,
+    tools: harness::ToolAccess,
+) -> Vec<RunEvent> {
+    collect_inner(harness, prompt, None, tools)
 }
 
-fn collect_inner(harness: &dyn Harness, prompt: &str, resume: Option<String>) -> Vec<RunEvent> {
+/// As [`collect`], continuing a stored session.
+fn collect_resuming(harness: &dyn Harness, prompt: &str, resume: Option<String>) -> Vec<RunEvent> {
+    collect_inner(harness, prompt, resume, harness::ToolAccess::Default)
+}
+
+fn collect_inner(
+    harness: &dyn Harness,
+    prompt: &str,
+    resume: Option<String>,
+    tools: harness::ToolAccess,
+) -> Vec<RunEvent> {
     let events: Arc<Mutex<Vec<RunEvent>>> = Arc::default();
     let sink = Arc::clone(&events);
     let done = Arc::new(AtomicBool::new(false));
@@ -145,7 +159,7 @@ fn collect_inner(harness: &dyn Harness, prompt: &str, resume: Option<String>) ->
                 prompt: prompt.to_owned(),
                 cwd: Some(std::env::temp_dir()),
                 mode: RunMode::Ask,
-                tools: harness::ToolAccess::Default,
+                tools,
                 tuning: RunTuning { model: Some("test-model".to_owned()), ..Default::default() },
                 resume,
                 attachments: Vec::new(),
@@ -835,4 +849,176 @@ fn live_ollama_streams_a_real_completion() {
         );
     }
     assert!(events.iter().any(|e| matches!(e, RunEvent::Exited { .. })), "must terminate");
+}
+
+/// Not a word, so a model cannot guess it, and absent from the prompt, so it
+/// cannot be echoed. It reaches an answer only by way of the file.
+/// `ToolAccess::None` has to hold at dispatch, not only at the offer. A model
+/// trained with its own tool syntax calls one whether or not any was offered,
+/// so "nothing advertised" is not the same guarantee as "nothing reachable" —
+/// and it was the weaker one that shipped: gpt-oss, handed an empty tool array,
+/// asked for `glob`, `list`, `read` and `bash`, and every call ran.
+///
+/// Scripted here rather than left to the live job, which is advisory: this is a
+/// sandbox promise, so it needs a test that cannot be skipped or shrugged off.
+#[test]
+fn tool_access_none_refuses_a_call_the_model_makes_anyway() {
+    let tags = json!({ "models": [ { "name": "test-model" } ] });
+    let unbidden_call = json!({
+        "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [ { "function": { "name": "list", "arguments": { "path": "." } } } ]
+        },
+        "done": true,
+        "prompt_eval_count": 5,
+        "eval_count": 2
+    })
+    .to_string();
+    let (base, seen) =
+        fake_ollama(tags, vec![unbidden_call, done_line("Nothing was available.")]);
+
+    let events = collect_with_tools(
+        &OpenHarness::ollama_at(&base),
+        "what is here?",
+        harness::ToolAccess::None,
+    );
+
+    assert!(offered_tools(&seen).is_empty(), "nothing may be offered");
+    // The call is reported — a host should see what the model reached for —
+    // but it must come back refused. `ok: true` here means it ran.
+    let ran: Vec<&RunEvent> =
+        events.iter().filter(|e| matches!(e, RunEvent::ToolEnd { ok: true, .. })).collect();
+    assert!(ran.is_empty(), "a tool ran that was never offered: {ran:?}");
+}
+
+
+const PLANTED: &str = "quartzine-80417";
+
+/// Plant the token, run one live prompt under `tools`, and report which tools
+/// actually *ran* and what the model said. Attempts are not the measure: a
+/// refused call is still reported as a start, so only a `ToolEnd` that
+/// succeeded counts. Shared by the two tests below, which differ only in what
+/// the run was allowed to reach.
+fn live_tool_run(tools: harness::ToolAccess) -> (Vec<String>, String) {
+    let base = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_owned());
+    let base = if base.starts_with("http") { base } else { format!("http://{base}") };
+    let model = std::env::var("OLLAMA_TEST_MODEL").unwrap_or_else(|_| "qwen2.5:0.5b".to_owned());
+
+    let harness = OpenHarness::ollama_at(&base);
+    let readiness = harness.readiness();
+    assert!(readiness.ready, "no Ollama at {base}: {:?}", readiness.error);
+    assert!(
+        harness.list_models().unwrap().iter().any(|m| m.value == model),
+        "pull {model} first (`ollama pull {model}`)"
+    );
+
+    // Rebuilt per run: a leftover from the previous one would let a model that
+    // never called a tool still find the token.
+    let workspace = std::env::temp_dir().join(format!("agent-harness-live-tool-{tools:?}"));
+    let _ = std::fs::remove_dir_all(&workspace);
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::write(workspace.join("note.txt"), format!("code: {PLANTED}\n")).expect("planted file");
+
+    let events: Arc<Mutex<Vec<RunEvent>>> = Arc::default();
+    let sink = Arc::clone(&events);
+    let done = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&done);
+    let _handle = harness
+        .start(
+            RunRequest {
+                run_id: "live-tool".to_owned(),
+                prompt: "Read the file note.txt in the working directory and reply with \
+                         the code it contains, and nothing else."
+                    .to_owned(),
+                cwd: Some(workspace.clone()),
+                mode: RunMode::Ask,
+                tools,
+                tuning: RunTuning { model: Some(model.clone()), ..Default::default() },
+                resume: None,
+                attachments: Vec::new(),
+            },
+            Arc::new(move |event| {
+                if matches!(event, RunEvent::Exited { .. } | RunEvent::Error { .. }) {
+                    flag.store(true, Ordering::SeqCst);
+                }
+                sink.lock().unwrap().push(event);
+            }),
+        )
+        .expect("run should start");
+
+    for _ in 0..12_000 {
+        if done.load(Ordering::SeqCst) {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(done.load(Ordering::SeqCst), "live run did not finish within 10 minutes");
+
+    let events = events.lock().unwrap().clone();
+    if let Some(RunEvent::Error { message, .. }) = events.iter().find(|e| matches!(e, RunEvent::Error { .. })) {
+        panic!("live run errored: {message}");
+    }
+    assert!(events.iter().any(|e| matches!(e, RunEvent::Exited { .. })), "must terminate");
+    let started: std::collections::HashMap<&str, &str> = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::ToolStart { tool_call_id, title, .. } => {
+                Some((tool_call_id.as_str(), title.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    let ran = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::ToolEnd { tool_call_id, ok: true, .. } => {
+                Some(started.get(tool_call_id.as_str()).copied().unwrap_or("?").to_owned())
+            }
+            _ => None,
+        })
+        .collect();
+    let text = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::Text { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    let _ = std::fs::remove_dir_all(&workspace);
+    (ran, text)
+}
+
+/// The tool loop against a **real** model — the half the scripted test above
+/// cannot reach. `a_tool_call_round_trips_its_result_back_to_the_model` proves
+/// the harness runs a tool and carries its output into the next turn, but the
+/// model there is a fixture: it says nothing about a real one, handed these
+/// schemas, choosing a tool and using what comes back.
+///
+/// The assertion is the round trip, not the wording: a token that appears
+/// nowhere in the prompt reaches the answer only through the file.
+#[test]
+#[ignore = "live: needs a running Ollama with OLLAMA_TEST_MODEL pulled"]
+fn live_ollama_uses_a_tool_and_answers_from_its_output() {
+    let (ran, text) = live_tool_run(harness::ToolAccess::Default);
+    assert!(!ran.is_empty(), "offered tools and ran none; it cannot have read the file");
+    assert!(
+        text.contains(PLANTED),
+        "the answer must carry what the tool read. ran {ran:?}, answered {text:?}"
+    );
+}
+
+/// `ToolAccess::None` against a real model, and the negative control for the
+/// test above: with nothing offered, the token is out of reach, so an answer
+/// carrying it would mean the withholding leaked — and a green positive test
+/// would have been proving nothing.
+#[test]
+#[ignore = "live: needs a running Ollama with OLLAMA_TEST_MODEL pulled"]
+fn live_ollama_offered_no_tools_cannot_reach_the_file() {
+    let (ran, text) = live_tool_run(harness::ToolAccess::None);
+    assert!(ran.is_empty(), "nothing was offered, yet these tools ran: {ran:?}");
+    assert!(
+        !text.contains(PLANTED),
+        "the file was reached with no tools offered: {text:?}"
+    );
 }

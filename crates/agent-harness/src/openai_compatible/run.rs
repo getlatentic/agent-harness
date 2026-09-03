@@ -278,9 +278,21 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
         model: Some(cfg.model.clone()),
     });
 
+    // `ToolAccess::None` has to reach dispatch, not just the offer. A model
+    // trained with its own tool syntax emits a call whether or not one was
+    // offered — gpt-oss asked for `glob`, `list` and `read` against an empty
+    // tool array — and withholding only the schemas left every one of those
+    // calls running, so a caller sandboxing a classification job still had its
+    // files read. Nothing offered, nothing dispatched, and no server connected:
+    // there is nothing for one to serve.
+    let no_tools = cfg.tools == crate::ToolAccess::None;
     // Connect any configured MCP servers (best-effort) and build the run's tool
     // set: built-ins + MCP tools, offered + dispatched as one set.
-    let (mcp_tools, mcp_status) = tools::mcp::connect_all(&cfg.mcp_servers, &cfg.cwd);
+    let (mcp_tools, mcp_status) = if no_tools {
+        (Vec::new(), Vec::new())
+    } else {
+        tools::mcp::connect_all(&cfg.mcp_servers, &cfg.cwd)
+    };
     for message in mcp_status {
         (*on_event)(RunEvent::Activity { run_id: rid.to_owned(), message });
     }
@@ -294,20 +306,16 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
     });
     let mut disabled = cfg.disabled_tools.clone();
     disabled.extend(profile.withheld_tools(&tools::ToolSet::builtin_tool_names()));
+    if no_tools {
+        disabled.extend(tools::ToolSet::builtin_tool_names());
+    }
     let toolset = tools::ToolSet::new(
         mcp_tools,
         cfg.permissions.clone(),
         cfg.permission_prompt.clone(),
         &disabled,
     );
-    // `ToolAccess::None` offers nothing at all: the caller has said everything
-    // needed is in the prompt, and a tool a model cannot see is one it cannot
-    // spend a turn on.
-    let tool_defs = if cfg.tools == crate::ToolAccess::None {
-        Vec::new()
-    } else {
-        toolset.defs(cfg.mode, &cfg.model, tools::AgentContext::Main)
-    };
+    let tool_defs = toolset.defs(cfg.mode, &cfg.model, tools::AgentContext::Main);
     // Structured-output schema (if set) as an OpenAI `response_format`, applied
     // each turn so the final answer conforms; tool-call turns carry null content
     // and stay unconstrained.
