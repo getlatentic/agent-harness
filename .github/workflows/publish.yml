@@ -11,6 +11,10 @@
 #   * Six versions shipped from a branch that was never merged, leaving `main`
 #     documenting an API three releases stale. So a tag that is not an ancestor
 #     of `main` is refused outright.
+#   * The version that reaches crates.io comes from the manifest, not the tag,
+#     so a tag naming a different one publishes something nobody asked for and
+#     only fails afterwards, on the release notes. The two have to agree before
+#     anything is published.
 #
 # There is no publish token. crates.io accepts a short-lived credential minted
 # for THIS workflow in THIS repository (trusted publishing), exchanged at run
@@ -36,7 +40,7 @@ jobs:
   # reviewed. Publishing from one puts code on crates.io that the default
   # branch does not have — which is exactly what happened, six times.
   guard:
-    name: tag is on main
+    name: tag is releasable
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +55,21 @@ jobs:
             exit 1
           fi
           echo "$GITHUB_REF_NAME is on main"
+      - name: Refuse a tag that names a version the manifest does not carry
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF_NAME" in
+            cli-stream-v*) crate=cli-stream ;    tagged="${GITHUB_REF_NAME#cli-stream-v}" ;;
+            v*)            crate=agent-harness ; tagged="${GITHUB_REF_NAME#v}" ;;
+          esac
+          manifest=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "import sys,json;print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='$crate'))")
+          if [ "$tagged" != "$manifest" ]; then
+            echo "::error::$GITHUB_REF_NAME would publish $crate $manifest, not $tagged."
+            echo "::error::Bump the manifest to $tagged, or retag the version it carries."
+            exit 1
+          fi
+          echo "$GITHUB_REF_NAME matches $crate $manifest"
 
   test:
     name: test (${{ matrix.os }})
@@ -144,6 +163,12 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          # A version with a pre-release suffix is not what someone landing on
+          # the repo should be handed as the current release.
+          case "$version" in
+            *-*) echo "prerelease=--prerelease" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=" >> "$GITHUB_OUTPUT" ;;
+          esac
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -151,4 +176,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "agent-harness ${{ steps.notes.outputs.version }}" \
             --notes-file release-notes.md \
-            --verify-tag
+            --verify-tag ${{ steps.notes.outputs.prerelease }}

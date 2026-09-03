@@ -445,17 +445,8 @@ mod tests {
     use super::*;
     use crate::Harness;
 
-    /// A throwaway CLI standing in for an ACP agent's own binary.
     #[cfg(unix)]
-    fn fake_cli(tag: &str, script: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("hl-acp-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("cli");
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
-    }
+    use crate::test_support::fake_cli;
 
     #[cfg(unix)]
     #[test]
@@ -515,13 +506,9 @@ mod tests {
     /// matched, so the run hangs with no error to explain it.
     #[cfg(unix)]
     fn fake_acp_agent(reply: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("hl-acpagent-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("agent");
+        let path = crate::test_support::fixture_dir("acpagent").join("agent");
         let script = format!(
-            r#"#!/bin/sh
-while IFS= read -r line; do
+            r#"while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
   case "$line" in
     *'"initialize"'*)
@@ -535,8 +522,7 @@ while IFS= read -r line; do
 done
 "#
         );
-        std::fs::write(&path, script).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::install_script(&path, &script);
         path
     }
 

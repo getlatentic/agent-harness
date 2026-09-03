@@ -314,17 +314,14 @@ mod tests {
     /// actually received rather than what the pure builder returned.
     #[cfg(unix)]
     fn fake_codex(tag: &str, signed_in: bool, emits: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("codex-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::fixture_dir(tag);
         let argv = dir.join("argv");
         let cli = dir.join("codex");
         let login_exit = i32::from(!signed_in);
-        std::fs::write(
+        crate::test_support::install_script(
             &cli,
-            format!(
-                "#!/bin/sh\n\
-                 case \"$1\" in\n\
+            &format!(
+                "case \"$1\" in\n\
                  --version) echo 'codex-cli 9.9.9'; exit 0 ;;\n\
                  login) exit {login_exit} ;;\n\
                  exec) : > '{argv}'; for a in \"$@\"; do printf '%s\\n' \"$a\" >> '{argv}'; done\n\
@@ -334,9 +331,7 @@ mod tests {
                  exit 1\n",
                 argv = argv.display(),
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         (cli, argv)
     }
 
@@ -458,17 +453,8 @@ mod tests {
     }
     use crate::ReasoningEffort;
 
-    /// A throwaway CLI standing in for `codex login status`.
     #[cfg(unix)]
-    fn fake_cli(tag: &str, script: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("hl-codex-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("cli");
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
-    }
+    use crate::test_support::fake_cli;
 
     #[cfg(unix)]
     #[test]
