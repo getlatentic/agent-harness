@@ -224,7 +224,9 @@ pub enum ToolAccess {
     /// mutating ones in `Edit`.
     #[default]
     Default,
-    /// No tools are offered at all.
+    /// No tools are offered, and none can be reached. A model trained with its
+    /// own tool syntax calls one whether or not any was offered, so the offer
+    /// alone is not the guarantee: a call made anyway is refused, not served.
     ///
     /// For work where everything needed is already in the message — classifying
     /// a document, extracting a field, judging whether two things are the same.
