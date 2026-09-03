@@ -374,7 +374,7 @@ impl ToolSet {
         msg
     }
 
-    /// Execute one tool call. `ctx.mode` is re-checked so a model that    /// Execute one tool call. `ctx.mode` is re-checked so a model that
+    /// Execute one tool call. `ctx.mode` is re-checked so a model that
     /// hallucinates a mutating tool in `Ask` mode is refused even though it
     /// wasn't offered. Output past the caps is truncated (+ spilled) here.
     pub(crate) fn execute(&self, name: &str, args: &Value, ctx: &ToolCtx) -> ToolOutcome {
