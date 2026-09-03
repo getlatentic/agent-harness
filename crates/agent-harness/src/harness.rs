@@ -213,9 +213,10 @@ pub enum RunMode {
 /// temptation were both the problem.
 ///
 /// Honoured by the `openai-compatible` adapter (an empty tool list) and the
-/// `claude` adapter (`--allowedTools ""`). The `codex` and `acp` adapters
-/// ignore it: neither the Codex CLI nor the ACP protocol can withhold an
-/// agent's own tools.
+/// `claude` adapter (`--disallowedTools "*"`; an empty *allow* list is the
+/// CLI's auto-approve list, not an availability gate, and withholds nothing).
+/// The `codex` and `acp` adapters ignore it: neither the Codex CLI nor the ACP
+/// protocol can withhold an agent's own tools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolAccess {
