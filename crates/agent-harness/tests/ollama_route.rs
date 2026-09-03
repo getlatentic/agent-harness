@@ -989,36 +989,45 @@ fn live_tool_run(tools: harness::ToolAccess) -> (Vec<String>, String) {
     (ran, text)
 }
 
-/// The tool loop against a **real** model — the half the scripted test above
-/// cannot reach. `a_tool_call_round_trips_its_result_back_to_the_model` proves
-/// the harness runs a tool and carries its output into the next turn, but the
-/// model there is a fixture: it says nothing about a real one, handed these
-/// schemas, choosing a tool and using what comes back.
+/// The tool loop against a **real** model, both arms in one test — the half the
+/// scripted tests cannot reach. `a_tool_call_round_trips_its_result_back_to_the_model`
+/// proves the loop runs a tool and carries its output into the next turn, and
+/// `tool_access_none_refuses_a_call_the_model_makes_anyway` proves a call is
+/// refused when nothing was offered. Both script the model, so neither says
+/// anything about a real one choosing a tool.
 ///
-/// The assertion is the round trip, not the wording: a token that appears
-/// nowhere in the prompt reaches the answer only through the file.
+/// The two arms belong together, in this order, because the second is only
+/// evidence given the first. A model that never calls a tool passes the
+/// withheld arm for the wrong reason — which is exactly what CI's 0.5b model
+/// did — so proving the token is reachable *with* tools is what makes proving
+/// it unreachable *without* them mean anything.
+///
+/// The assertion is the round trip, not the wording: a token appearing nowhere
+/// in the prompt reaches the answer only by way of the file.
+///
+/// Run by hand, not by CI, and that is a measurement rather than a preference:
+/// a tool round trip needs a model a CPU runner cannot host. qwen2.5:0.5b never
+/// calls a tool; llama3.2:3b loops to the turn limit without answering; what
+/// worked was gpt-oss:20b, at 13GB. So the promise this covers is guarded
+/// deterministically by `tool_access_none_refuses_a_call_the_model_makes_anyway`
+/// in the normal suite, and this stays the check a human runs against a real
+/// model before a release:
+///
+/// ```text
+/// OLLAMA_TEST_MODEL=gpt-oss:20b cargo test --all-features --test ollama_route \
+///   -- --ignored live_ollama_reaches
+/// ```
 #[test]
-#[ignore = "live: needs a running Ollama with OLLAMA_TEST_MODEL pulled"]
-fn live_ollama_uses_a_tool_and_answers_from_its_output() {
+#[ignore = "live: needs Ollama with a tool-capable OLLAMA_TEST_MODEL (gpt-oss:20b)"]
+fn live_ollama_reaches_the_file_with_tools_and_cannot_without_them() {
     let (ran, text) = live_tool_run(harness::ToolAccess::Default);
     assert!(!ran.is_empty(), "offered tools and ran none; it cannot have read the file");
     assert!(
         text.contains(PLANTED),
         "the answer must carry what the tool read. ran {ran:?}, answered {text:?}"
     );
-}
 
-/// `ToolAccess::None` against a real model, and the negative control for the
-/// test above: with nothing offered, the token is out of reach, so an answer
-/// carrying it would mean the withholding leaked — and a green positive test
-/// would have been proving nothing.
-#[test]
-#[ignore = "live: needs a running Ollama with OLLAMA_TEST_MODEL pulled"]
-fn live_ollama_offered_no_tools_cannot_reach_the_file() {
     let (ran, text) = live_tool_run(harness::ToolAccess::None);
     assert!(ran.is_empty(), "nothing was offered, yet these tools ran: {ran:?}");
-    assert!(
-        !text.contains(PLANTED),
-        "the file was reached with no tools offered: {text:?}"
-    );
+    assert!(!text.contains(PLANTED), "the file was reached with no tools offered: {text:?}");
 }

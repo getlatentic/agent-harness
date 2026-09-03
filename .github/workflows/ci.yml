@@ -78,8 +78,16 @@ jobs:
           curl -sf http://localhost:11434/api/tags >/dev/null || { echo "ollama did not start"; exit 1; }
       - name: Pull the test model
         run: ollama pull "$OLLAMA_TEST_MODEL"
+      # Named rather than `--ignored` wholesale: the tool contrast test needs a
+      # model that can actually complete a tool round trip, and a CPU runner
+      # cannot host one. Measured — qwen2.5:0.5b never calls a tool, llama3.2:3b
+      # loops to the turn limit without answering, and the model that does work
+      # is 13GB. The guarantee it covers has a deterministic test that runs on
+      # every platform in the normal suite; this job is for vendor drift.
       - name: Live route test
-        run: cargo test --all-features --test ollama_route -- --ignored --nocapture
+        run: |
+          cargo test --all-features --test ollama_route -- --ignored --nocapture \
+            live_ollama_streams_a_real_completion
 
   lint:
     name: clippy
