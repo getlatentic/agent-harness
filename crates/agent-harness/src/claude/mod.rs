@@ -299,12 +299,29 @@ fn build_claude_args(
     // controls the mode — `bypassPermissions` for headless, `auto`, … — by
     // passing its own, with no adapter edit and no duplicate flag. In Ask mode
     // the CLI stays read-only by default.
-    // `ToolAccess::None` means the prompt is the whole job. Naming an empty tool
-    // set is stronger than asking in prose not to call one, and the CLI honours
-    // the flag whatever the model decides it would like to do.
-    if tools == ToolAccess::None && !extra_args_sets(&tuning.extra_args, "--allowedTools") {
-        args.push("--allowedTools".to_owned());
-        args.push(String::new());
+    // `ToolAccess::None` means the prompt is the whole job.
+    //
+    // Measured against the CLI, planting a unique string in a file and asking
+    // for it back — each arm in a fresh directory, because a stale session
+    // repeating an earlier answer looks exactly like a successful read:
+    //
+    //   no flag                          read it   2/2
+    //   --allowedTools ""                read it   2/2   (auto-approve list,
+    //                                                     not an availability
+    //                                                     gate; `-p` permits
+    //                                                     reads anyway)
+    //   --disallowedTools <10 names>     read it   1/1   (10 turns — it looked
+    //                                                     for another way in)
+    //   --disallowedTools <19 names>     read it   2/3
+    //   --disallowedTools "*"            blocked   4/4   (1 turn, no attempt)
+    //
+    // A name list is a speed bump, not a gate: given turns, the model routes
+    // around whatever is not on it, and every arm above was a guess at a list
+    // that a new built-in would invalidate anyway. The wildcard needs no list
+    // and still answers an ordinary question (`pong`, one turn, no error).
+    if tools == ToolAccess::None && !extra_args_sets(&tuning.extra_args, "--disallowedTools") {
+        args.push("--disallowedTools".to_owned());
+        args.push("*".to_owned());
     }
     if matches!(mode, RunMode::Edit) && !extra_args_sets(&tuning.extra_args, "--permission-mode") {
         args.push("--permission-mode".to_owned());
@@ -554,11 +571,16 @@ mod tests {
             .map(String::as_str)
     }
 
+    /// `--allowedTools ""` was the obvious spelling and does nothing — measured
+    /// against the CLI, a run with it set still read a file and reported the
+    /// contents. It is the auto-approve list, not an availability gate.
     #[test]
-    fn withheld_tools_name_an_empty_tool_set() {
-        let args = build_claude_args("hi".into(), RunMode::Ask, ToolAccess::None, &RunTuning::default(), None);
-        let i = args.iter().position(|a| a == "--allowedTools").expect("the flag");
-        assert_eq!(args[i + 1], "", "an empty set, not an absent flag");
+    fn withheld_tools_are_denied_by_name_not_by_an_empty_allowlist() {
+        let args =
+            build_claude_args("hi".into(), RunMode::Ask, ToolAccess::None, &RunTuning::default(), None);
+        assert!(!args.iter().any(|a| a == "--allowedTools"), "that flag does not gate anything");
+        let i = args.iter().position(|a| a == "--disallowedTools").expect("the flag");
+        assert_eq!(args[i + 1], "*", "a wildcard: a name list leaked 2 of 3 live runs");
         assert!(!args.iter().any(|a| a == "--permission-mode"), "nothing to permit");
     }
 
@@ -569,8 +591,8 @@ mod tests {
     fn write_permission_and_tool_access_are_independent() {
         let args =
             build_claude_args("hi".into(), RunMode::Edit, ToolAccess::None, &RunTuning::default(), None);
-        let i = args.iter().position(|a| a == "--allowedTools").expect("no tools offered");
-        assert_eq!(args[i + 1], "");
+        let i = args.iter().position(|a| a == "--disallowedTools").expect("no tools offered");
+        assert_eq!(args[i + 1], "*");
         let j = args.iter().position(|a| a == "--permission-mode").expect("still an edit run");
         assert_eq!(args[j + 1], "acceptEdits");
     }
@@ -578,13 +600,13 @@ mod tests {
     #[test]
     fn a_host_that_names_its_own_tools_keeps_them() {
         let tuning = RunTuning {
-            extra_args: vec!["--allowedTools".into(), "WebSearch".into()],
+            extra_args: vec!["--disallowedTools".into(), "Bash".into()],
             ..Default::default()
         };
         let args = build_claude_args("hi".into(), RunMode::Ask, ToolAccess::None, &tuning, None);
-        let flags = args.iter().filter(|a| *a == "--allowedTools").count();
+        let flags = args.iter().filter(|a| *a == "--disallowedTools").count();
         assert_eq!(flags, 1, "exactly one, and it is the host's");
-        assert!(args.contains(&"WebSearch".to_owned()));
+        assert!(args.contains(&"Bash".to_owned()));
     }
 
     #[test]
