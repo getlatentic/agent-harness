@@ -264,6 +264,19 @@ pub enum ToolAccess {
     ///
     /// Asking a model in prose not to call tools works and is the weaker fix.
     /// This removes the choice.
+    ///
+    /// **What the model *says* still differs by adapter, and the answer text is
+    /// not evidence of a lookup.** The `openai-compatible` adapter refuses a
+    /// call the model makes anyway with a message saying the run has no tools,
+    /// so the model reports that it cannot look. The `claude` CLI withholds
+    /// silently, so the model narrates the call it wanted into its answer —
+    /// observed emitting `Bash: {"command":"ls -la"}` as prose, and elsewhere
+    /// continuing past that into invented output, reporting `total 0` for a
+    /// directory that held a file. Nothing ran in either case; the guarantee
+    /// holds. But a caller scraping an answer for tool syntax, or reading
+    /// "I checked and found nothing" as a finding, will be misled — and for
+    /// judging work an invented absence can flip the judgement. Treat the text
+    /// as the model's own words.
     None,
 }
 

@@ -12,6 +12,13 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 A release about what a run *reports* and what it is *allowed to reach*. Two of
 these were found by hosts hitting them in production, not by tests.
 
+> **Releasing this:** the publish workflow's tag-matches-manifest guard has
+> never executed — it only runs on a tag push, and this is the first tag since
+> it was added. Its logic was exercised locally against the real manifest, not
+> in CI. Whoever pushes the tag should watch the `tag is releasable` job rather
+> than assume it. The platform tests gate the publish job, so a failure there
+> costs a retag, not a bad release.
+
 ### Breaking
 
 - **`RunMode::Answer` is gone.** It conflated two questions: whether a run may
