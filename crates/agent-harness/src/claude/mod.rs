@@ -358,16 +358,13 @@ mod tests {
     /// records the argv it was handed.
     #[cfg(unix)]
     fn fake_claude(tag: &str, signed_in: bool, emits: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("claude-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::fixture_dir(tag);
         let argv = dir.join("argv");
         let cli = dir.join("claude");
-        std::fs::write(
+        crate::test_support::install_script(
             &cli,
-            format!(
-                "#!/bin/sh\n\
-                 case \"$1\" in\n\
+            &format!(
+                "case \"$1\" in\n\
                  --version) echo '1.2.3 (Claude Code)'; exit 0 ;;\n\
                  auth) echo '{{\"loggedIn\":{signed_in}}}'; exit 0 ;;\n\
                  -p) : > '{argv}'; for a in \"$@\"; do printf '%s\\n' \"$a\" >> '{argv}'; done\n\
@@ -377,9 +374,7 @@ mod tests {
                  exit 1\n",
                 argv = argv.display(),
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         (cli, argv)
     }
 
@@ -505,19 +500,8 @@ mod tests {
         assert_eq!(ClaudeHarness::default().command, DEFAULT_CLAUDE_COMMAND);
     }
 
-    /// A throwaway CLI that behaves however the test needs. The probes take the
-    /// command as an argument, so no PATH juggling is involved — the same trick
-    /// the MCP client uses to test a protocol against a real process.
     #[cfg(unix)]
-    fn fake_cli(tag: &str, script: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("hl-claude-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("cli");
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
-    }
+    use crate::test_support::fake_cli;
 
     #[cfg(unix)]
     #[test]

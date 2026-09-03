@@ -545,17 +545,8 @@ mod tests {
         }
     }
 
-    /// A throwaway CLI that answers however the test needs.
     #[cfg(unix)]
-    fn fake_cli(tag: &str, script: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("cs-probe-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("cli");
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
-    }
+    use crate::test_support::fake_cli;
 
     #[cfg(unix)]
     #[test]
@@ -899,12 +890,8 @@ mod spawned {
     /// A CLI that prints the PATH it was handed, so a test can see what the
     /// child really received rather than what we meant to send.
     fn path_echoing_cli(tag: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("hl-spawn-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let cli = dir.join("fake-agent");
-        std::fs::write(&cli, "#!/bin/sh\nprintf '%s\\n' \"$PATH\"\n").unwrap();
-        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cli = crate::test_support::fixture_dir(tag).join("fake-agent");
+        crate::test_support::install_script(&cli, "printf '%s\\n' \"$PATH\"");
         cli
     }
 
@@ -912,19 +899,14 @@ mod spawned {
     /// and answers the way a real one does: startup chatter first, then the
     /// sentinel, then an `env` dump — the shape the parser has to survive.
     fn fake_login_shell(tag: &str, path_line: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("hl-shell-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let shell = dir.join("fake-shell");
-        std::fs::write(
+        let shell = crate::test_support::fixture_dir(tag).join("fake-shell");
+        crate::test_support::install_script(
             &shell,
-            format!(
-                "#!/bin/sh\nprintf 'rc chatter\\n'\nprintf '\\n__CLI_STREAM_PATH__\\n'\n\
-                 printf 'HOME=/x\\n{path_line}\\nTERM=xterm\\n'\n"
+            &format!(
+                "printf 'rc chatter\\n'\nprintf '\\n__CLI_STREAM_PATH__\\n'\n\
+                 printf 'HOME=/x\\n{path_line}\\nTERM=xterm\\n'"
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         shell
     }
 

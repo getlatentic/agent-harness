@@ -25,6 +25,8 @@ pub mod harness;
 pub mod raw;
 pub mod models_dev;
 mod program_path;
+#[cfg(all(test, unix))]
+mod test_support;
 
 pub use events::{
     normalize_process_event, run_events_from_parsed, ByteRange, ParsedLine, PlanEntry,
