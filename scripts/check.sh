@@ -14,8 +14,10 @@ cd "$(dirname "$0")/.."
 echo "==> clippy (all targets, all features, warnings = errors)"
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+# `--all-features` because that is what CI runs. Without it the ACP adapter is
+# not compiled, and a change to a shared type can pass here and fail there.
 echo "==> tests"
-cargo test --workspace
+cargo test --workspace --all-features
 
 echo "==> build all targets (incl. examples)"
 cargo build --workspace --all-targets
