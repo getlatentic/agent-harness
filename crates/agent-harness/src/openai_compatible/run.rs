@@ -71,6 +71,8 @@ pub(crate) struct LoopConfig {
     pub prompt: String,
     pub cwd: PathBuf,
     pub mode: RunMode,
+    /// Whether any tool is offered at all. Orthogonal to `mode`.
+    pub tools: crate::ToolAccess,
     pub max_turns: u32,
     /// The session to resume — its stored transcript is replayed before the new
     /// prompt; `None` starts a fresh session.
@@ -298,10 +300,10 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
         cfg.permission_prompt.clone(),
         &disabled,
     );
-    // `Answer` offers nothing at all: the caller has said everything needed is
-    // in the prompt, and a tool a model cannot see is one it cannot spend a
-    // turn on.
-    let tool_defs = if cfg.mode == RunMode::Answer {
+    // `ToolAccess::None` offers nothing at all: the caller has said everything
+    // needed is in the prompt, and a tool a model cannot see is one it cannot
+    // spend a turn on.
+    let tool_defs = if cfg.tools == crate::ToolAccess::None {
         Vec::new()
     } else {
         toolset.defs(cfg.mode, &cfg.model, tools::AgentContext::Main)
@@ -1202,6 +1204,7 @@ mod tests {
             prompt: prompt.into(),
             cwd: PathBuf::from("/tmp"),
             mode: RunMode::Edit,
+            tools: crate::ToolAccess::Default,
             max_turns: 1,
             resume,
             store,

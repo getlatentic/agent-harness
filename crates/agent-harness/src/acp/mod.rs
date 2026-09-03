@@ -169,7 +169,11 @@ impl Harness for AcpHarness {
     fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
         // resume (session/load) is a follow-up; this first cut runs a fresh
         // session. `attachments` ignored: a text prompt only.
-        let RunRequest { run_id, prompt, cwd, mode, tuning, resume: _, attachments: _ } = request;
+        // `tools` is ignored: an ACP agent owns its own tool surface, and the
+        // protocol has no way to say "offer none". Honoured by the
+        // openai-compatible and claude adapters only — see [`ToolAccess`].
+        let RunRequest { run_id, prompt, cwd, mode, tools: _, tuning, resume: _, attachments: _ } =
+            request;
         // ACP carries no model. For a config-file vendor (opencode), select the
         // chosen model out-of-band: write a temp JSON config `{ <field>: <model> }`
         // and point the agent's config env var at it for this spawn. Other tuning

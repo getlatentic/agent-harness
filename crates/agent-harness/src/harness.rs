@@ -197,19 +197,45 @@ pub enum RunMode {
     Ask,
     /// Propose edits to the workspace.
     Edit,
-    /// Answer from the prompt alone. No tools are offered at all.
+}
+
+/// Whether a run may call tools at all — the question of *reach*, kept apart
+/// from [`RunMode`]'s question of *write permission*.
+///
+/// Every other agent SDK expresses this as a per-call parameter rather than a
+/// mode: `ModelSettings.tool_choice = "none"` in the OpenAI Agents SDK,
+/// `tool_choice: "none"` on the OpenAI and Anthropic APIs, `toolChoice: 'none'`
+/// in the Vercel AI SDK. It is not a third rung on the Ask/Edit ladder, and
+/// modelling it as one made `Ask` and `Answer` two names for adjacent ideas.
+///
+/// This is not `tool_choice: "none"`, which still *sends* every schema and
+/// only forbids the call. Nothing is sent, because the tokens and the
+/// temptation were both the problem.
+///
+/// Honoured by the `openai-compatible` adapter (an empty tool list) and the
+/// `claude` adapter (`--allowedTools ""`). The `codex` and `acp` adapters
+/// ignore it: neither the Codex CLI nor the ACP protocol can withhold an
+/// agent's own tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolAccess {
+    /// Whatever the mode offers: read-only tools in `Ask`, those plus the
+    /// mutating ones in `Edit`.
+    #[default]
+    Default,
+    /// No tools are offered at all.
     ///
     /// For work where everything needed is already in the message — classifying
     /// a document, extracting a field, judging whether two things are the same.
-    /// `Ask` offers read-only file tools whether or not the task has any use for
-    /// them, and a prompt full of paths and URLs invites a model to go looking:
-    /// one host saw 228 records fail because a tool call consumed the only turn,
-    /// and later found a job spending 17 tool calls listing a repository it had
-    /// been asked nothing about.
+    /// A run is offered read-only file tools whether or not the task has any use
+    /// for them, and a prompt full of paths and URLs invites a model to go
+    /// looking: one host saw 228 records fail because a tool call consumed the
+    /// only turn, and later found a job spending 17 tool calls listing a
+    /// repository it had been asked nothing about.
     ///
     /// Asking a model in prose not to call tools works and is the weaker fix.
     /// This removes the choice.
-    Answer,
+    None,
 }
 
 /// How hard the model should think, in harness-neutral terms. Codex
@@ -307,6 +333,9 @@ pub struct RunRequest {
     /// harness's tool calls land inside the user's vault.
     pub cwd: Option<PathBuf>,
     pub mode: RunMode,
+    /// Whether this run may call tools at all. Defaults to whatever `mode`
+    /// offers.
+    pub tools: ToolAccess,
     /// Optional, harness-neutral run-shaping knobs (model, effort,
     /// turn cap). Adapters honor the subset their CLI supports.
     pub tuning: RunTuning,
@@ -1084,6 +1113,7 @@ mod tests {
             prompt: "hi".to_owned(),
             cwd: None,
             mode: RunMode::Ask,
+            tools: ToolAccess::Default,
             tuning: RunTuning::default(),
             resume: None,
             attachments: Vec::new(),

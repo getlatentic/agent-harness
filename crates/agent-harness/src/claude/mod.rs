@@ -21,6 +21,7 @@ use crate::{
     normalize_process_event, probe_version, Command, ResolveCli, CredentialSpec, Harness,
     Features, Error, Info, ModelChoice, Readiness,
     InstallCallback, InstallHint, RunCallback, RunHandle, RunMode, RunRequest, RunTuning,
+    ToolAccess,
 };
 
 mod parser;
@@ -171,8 +172,8 @@ impl Harness for ClaudeHarness {
 
     fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
         // `attachments` ignored: Claude Code is a text CLI (no image input here).
-        let RunRequest { run_id, prompt, cwd, mode, tuning, resume, attachments: _ } = request;
-        let args = build_claude_args(prompt, mode, &tuning, resume.as_deref());
+        let RunRequest { run_id, prompt, cwd, mode, tools, tuning, resume, attachments: _ } = request;
+        let args = build_claude_args(prompt, mode, tools, &tuning, resume.as_deref());
         let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
         // No env injected — Claude Code uses its own auth. PATH
@@ -267,6 +268,7 @@ fn resolved_details(command: &str) -> Value {
 fn build_claude_args(
     prompt: String,
     mode: RunMode,
+    tools: ToolAccess,
     tuning: &RunTuning,
     resume: Option<&str>,
 ) -> Vec<String> {
@@ -297,10 +299,10 @@ fn build_claude_args(
     // controls the mode — `bypassPermissions` for headless, `auto`, … — by
     // passing its own, with no adapter edit and no duplicate flag. In Ask mode
     // the CLI stays read-only by default.
-    // `Answer` means the prompt is the whole job. Naming an empty tool set is
-    // stronger than asking in prose not to call one, and the CLI honours the
-    // flag whatever the model decides it would like to do.
-    if matches!(mode, RunMode::Answer) && !extra_args_sets(&tuning.extra_args, "--allowedTools") {
+    // `ToolAccess::None` means the prompt is the whole job. Naming an empty tool
+    // set is stronger than asking in prose not to call one, and the CLI honours
+    // the flag whatever the model decides it would like to do.
+    if tools == ToolAccess::None && !extra_args_sets(&tuning.extra_args, "--allowedTools") {
         args.push("--allowedTools".to_owned());
         args.push(String::new());
     }
@@ -553,11 +555,24 @@ mod tests {
     }
 
     #[test]
-    fn answer_mode_names_an_empty_tool_set() {
-        let args = build_claude_args("hi".into(), RunMode::Answer, &RunTuning::default(), None);
+    fn withheld_tools_name_an_empty_tool_set() {
+        let args = build_claude_args("hi".into(), RunMode::Ask, ToolAccess::None, &RunTuning::default(), None);
         let i = args.iter().position(|a| a == "--allowedTools").expect("the flag");
         assert_eq!(args[i + 1], "", "an empty set, not an absent flag");
         assert!(!args.iter().any(|a| a == "--permission-mode"), "nothing to permit");
+    }
+
+    /// The two questions are separate: `Edit` says the run may change things,
+    /// `ToolAccess::None` says it has nothing to change them with. Modelling
+    /// them as one enum made that combination unsayable.
+    #[test]
+    fn write_permission_and_tool_access_are_independent() {
+        let args =
+            build_claude_args("hi".into(), RunMode::Edit, ToolAccess::None, &RunTuning::default(), None);
+        let i = args.iter().position(|a| a == "--allowedTools").expect("no tools offered");
+        assert_eq!(args[i + 1], "");
+        let j = args.iter().position(|a| a == "--permission-mode").expect("still an edit run");
+        assert_eq!(args[j + 1], "acceptEdits");
     }
 
     #[test]
@@ -566,7 +581,7 @@ mod tests {
             extra_args: vec!["--allowedTools".into(), "WebSearch".into()],
             ..Default::default()
         };
-        let args = build_claude_args("hi".into(), RunMode::Answer, &tuning, None);
+        let args = build_claude_args("hi".into(), RunMode::Ask, ToolAccess::None, &tuning, None);
         let flags = args.iter().filter(|a| *a == "--allowedTools").count();
         assert_eq!(flags, 1, "exactly one, and it is the host's");
         assert!(args.contains(&"WebSearch".to_owned()));
@@ -574,7 +589,7 @@ mod tests {
 
     #[test]
     fn claude_args_default_omit_model_and_turn_cap() {
-        let args = build_claude_args("hi".to_owned(), RunMode::Ask, &RunTuning::default(), None);
+        let args = build_claude_args("hi".to_owned(), RunMode::Ask, ToolAccess::Default, &RunTuning::default(), None);
         // Prompt is the positional right after `-p`.
         assert_eq!(args[0], "-p");
         assert_eq!(args[1], "hi");
@@ -586,7 +601,7 @@ mod tests {
     #[test]
     fn claude_resume_adds_session_flag() {
         let args =
-            build_claude_args("hi".to_owned(), RunMode::Ask, &RunTuning::default(), Some("sess-123"));
+            build_claude_args("hi".to_owned(), RunMode::Ask, ToolAccess::Default, &RunTuning::default(), Some("sess-123"));
         assert_eq!(flag_value(&args, "--resume"), Some("sess-123"));
         // The prompt + headless stream flags are untouched.
         assert_eq!(args[0], "-p");
@@ -601,7 +616,7 @@ mod tests {
             max_turns: Some(5),
             ..RunTuning::default()
         };
-        let args = build_claude_args("hi".to_owned(), RunMode::Ask, &tuning, None);
+        let args = build_claude_args("hi".to_owned(), RunMode::Ask, ToolAccess::Default, &tuning, None);
         assert_eq!(flag_value(&args, "--model"), Some("opus"));
         assert_eq!(flag_value(&args, "--max-turns"), Some("5"));
         // Claude Code has no reasoning-effort `-p` flag — it must not leak.
@@ -611,14 +626,14 @@ mod tests {
     #[test]
     fn claude_blank_model_is_treated_as_unset() {
         let tuning = RunTuning { model: Some("   ".to_owned()), ..RunTuning::default() };
-        let args = build_claude_args("hi".to_owned(), RunMode::Ask, &tuning, None);
+        let args = build_claude_args("hi".to_owned(), RunMode::Ask, ToolAccess::Default, &tuning, None);
         assert!(!args.iter().any(|a| a == "--model"));
     }
 
     #[test]
     fn claude_edit_mode_defaults_to_accept_edits() {
         // Conservative built-in default; a host overrides via extra_args.
-        let args = build_claude_args("hi".to_owned(), RunMode::Edit, &RunTuning::default(), None);
+        let args = build_claude_args("hi".to_owned(), RunMode::Edit, ToolAccess::Default, &RunTuning::default(), None);
         assert_eq!(flag_value(&args, "--permission-mode"), Some("acceptEdits"));
     }
 
@@ -629,7 +644,7 @@ mod tests {
             extra_args: vec!["--add-dir".to_owned(), "/extra".to_owned()],
             ..RunTuning::default()
         };
-        let args = build_claude_args("hi".to_owned(), RunMode::Ask, &tuning, None);
+        let args = build_claude_args("hi".to_owned(), RunMode::Ask, ToolAccess::Default, &tuning, None);
         assert!(args.ends_with(&["--add-dir".to_owned(), "/extra".to_owned()]));
     }
 
@@ -641,7 +656,7 @@ mod tests {
             extra_args: vec!["--permission-mode".to_owned(), "bypassPermissions".to_owned()],
             ..RunTuning::default()
         };
-        let args = build_claude_args("hi".to_owned(), RunMode::Edit, &tuning, None);
+        let args = build_claude_args("hi".to_owned(), RunMode::Edit, ToolAccess::Default, &tuning, None);
         let modes: Vec<usize> = args
             .iter()
             .enumerate()

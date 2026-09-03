@@ -59,6 +59,7 @@ fn exercise(provider: &str, base_url: &str, key_env: &str, model: &str) {
                 cwd: Some(std::env::temp_dir()),
                 // Read-only: a live test must never be able to touch the disk.
                 mode: RunMode::Ask,
+                tools: harness::ToolAccess::Default,
                 tuning: RunTuning { model: Some(model.to_owned()), ..Default::default() },
                 resume: None,
                 attachments: Vec::new(),

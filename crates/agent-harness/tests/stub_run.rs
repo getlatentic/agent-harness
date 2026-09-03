@@ -79,6 +79,7 @@ fn request() -> RunRequest {
         prompt: String::new(),
         cwd: None,
         mode: RunMode::Ask,
+        tools: harness::ToolAccess::Default,
         tuning: RunTuning::default(),
         resume: None,
         attachments: Vec::new(),
