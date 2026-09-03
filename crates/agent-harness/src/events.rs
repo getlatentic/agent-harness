@@ -168,6 +168,14 @@ pub enum RunEvent {
     /// A tool call started — render a state-ful card keyed by id. Mirrors ACP's
     /// `ToolCall`: `title` + `kind` + `locations` (files it touches) + the raw
     /// arguments (`raw_input`, omitted when streamed separately, e.g. Claude).
+    ///
+    /// **An attempt, not an execution.** A call that is refused — withheld
+    /// under [`crate::ToolAccess::None`], mutating in a read-only run, denied
+    /// by permissions — still starts here, because a host should see what the
+    /// model reached for. Whether it *ran* is `ok` on the matching
+    /// [`RunEvent::ToolEnd`]. Counting starts to mean "tools ran" therefore
+    /// overcounts exactly where it matters most: a correctly sandboxed run
+    /// still reports every attempt.
     ToolStart {
         run_id: String,
         tool_call_id: String,
