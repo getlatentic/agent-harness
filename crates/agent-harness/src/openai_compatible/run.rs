@@ -438,15 +438,17 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
             persist(&cfg, &session.id, &transcript, &mut saved, &on_event, rid);
             touch(&cfg, &session.id);
             emit_usage(&on_event, rid, usage, cfg.model_cost);
-            // A turn that says nothing and asks for nothing is a failure, but it
-            // exits like a success. Report why the provider stopped, so a budget
-            // that ran out is distinguishable from a model that declined.
+            // A turn that says nothing and asks for nothing is a failure, and
+            // ends like one: the error names why the provider stopped, so a
+            // budget that ran out is distinguishable from a model that
+            // declined, and the exit code agrees with it. Reporting the reason
+            // while still exiting 0 left the two terminal signals contradicting
+            // each other, and a caller reading the exit code — the conventional
+            // one — saw a success holding an empty string.
             if said_nothing {
                 let why = stop.as_deref().unwrap_or("no reason given");
-                (*on_event)(RunEvent::Error {
-                    run_id: rid.to_owned(),
-                    message: format!("the model returned no answer (stopped: {why})"),
-                });
+                finish_error(&on_event, rid, format!("the model returned no answer (stopped: {why})"));
+                return;
             }
             (*on_event)(RunEvent::Exited { run_id: rid.to_owned(), exit_code: Some(0), cancelled: false });
             return;
@@ -506,15 +508,14 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
     // Ran out of turns with the model still calling tools.
     touch(&cfg, &session.id);
     let limit = format!("Reached the {}-turn limit.", cfg.max_turns);
-    // Having spent every turn and never once answered is a failure, and it
-    // exits like a success: the caller is handed an empty string and no reason.
+    // Running long is not the same as never answering. The first did the work
+    // and is worth narrating; the second hands the caller an empty string, and
+    // ends as the failure it is rather than exiting 0 beside its own error.
     if ever_said {
         (*on_event)(RunEvent::Activity { run_id: rid.to_owned(), message: limit });
     } else {
-        (*on_event)(RunEvent::Error {
-            run_id: rid.to_owned(),
-            message: format!("{limit} The model never answered."),
-        });
+        finish_error(&on_event, rid, format!("{limit} The model never answered."));
+        return;
     }
     (*on_event)(RunEvent::Exited { run_id: rid.to_owned(), exit_code: Some(0), cancelled: false });
 }
