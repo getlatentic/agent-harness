@@ -165,6 +165,14 @@ const TOOL_SEARCH_LIMIT: usize = 8;
 /// the same call with a character threshold behind `ENABLE_TOOL_SEARCH=auto:N`.
 const DEFER_MCP_ABOVE_BYTES: usize = 4_096;
 
+/// How many registered names an unknown-tool error lists. Enough to choose
+/// from; short enough that a large surface does not paste itself into the
+/// transcript on every miss.
+const NAMES_IN_UNKNOWN_TOOL_ERROR: usize = 12;
+
+/// How many deferred near-misses it suggests.
+const NEAR_MISSES_SUGGESTED: usize = 3;
+
 pub(crate) struct ToolSet {
     tools: Vec<Box<dyn Tool>>,
     permissions: Vec<crate::openai_compatible::PermissionRule>,
@@ -335,7 +343,38 @@ impl ToolSet {
             .map_or(ToolKind::Other, |t| t.kind())
     }
 
-    /// Execute one tool call. `ctx.mode` is re-checked so a model that
+    /// What to say when a model calls a name nothing registered.
+    ///
+    /// `unknown tool `x`` on its own gives the model nothing to act on, and a
+    /// small one answers by calling `x` again. Observed: a host whose prompt
+    /// named a tool the server did not mount spent eight of its fifteen turns
+    /// retrying that one name, then ended the run with no answer at all. The
+    /// read-only refusal below has always said what to do instead; this now
+    /// does too — the offered names, and the closest deferred ones, which is
+    /// what makes the next turn a recovery rather than a repeat.
+    fn no_such_tool(&self, name: &str) -> String {
+        let offered: Vec<&str> = self
+            .tools
+            .iter()
+            .map(|t| t.id())
+            .filter(|id| !self.deferred.contains(*id))
+            .take(NAMES_IN_UNKNOWN_TOOL_ERROR)
+            .collect();
+        // A name is its own best query: `plane_create_proposal` finds
+        // `plane_propose_fact` on the words it shares.
+        let near = self.index.search(&name.replace('_', " "), NEAR_MISSES_SUGGESTED);
+        let mut msg = format!("unknown tool `{name}` — nothing by that name is registered.");
+        if !near.is_empty() {
+            msg.push_str(&format!(" Closest available: {}.", near.join(", ")));
+        }
+        if !offered.is_empty() {
+            msg.push_str(&format!(" Offered here: {}.", offered.join(", ")));
+        }
+        msg.push_str(" Call one of those instead; do not retry this name.");
+        msg
+    }
+
+    /// Execute one tool call. `ctx.mode` is re-checked so a model that    /// Execute one tool call. `ctx.mode` is re-checked so a model that
     /// hallucinates a mutating tool in `Ask` mode is refused even though it
     /// wasn't offered. Output past the caps is truncated (+ spilled) here.
     pub(crate) fn execute(&self, name: &str, args: &Value, ctx: &ToolCtx) -> ToolOutcome {
@@ -343,7 +382,7 @@ impl ToolSet {
             return self.search_tools(args);
         }
         let Some(tool) = self.tools.iter().find(|t| t.id() == name) else {
-            return ToolOutcome::err(format!("unknown tool `{name}`"));
+            return ToolOutcome::err(self.no_such_tool(name));
         };
         if tool.mutating() && !matches!(ctx.mode, RunMode::Edit) {
             return ToolOutcome::err(format!(
@@ -1061,6 +1100,34 @@ mod tests {
         }
     }
 
+    /// The failure this was written for: a host's prompt named
+    /// `plane_create_proposal`; the server mounts `plane_propose_fact`. The
+    /// model called the name it was given, was told only that it was unknown,
+    /// and called it again — eight times across one run.
+    #[test]
+    fn a_near_miss_on_a_deferred_tool_is_named_in_the_error() {
+        let ids = ["plane_propose_fact", "plane_search_saved_items"];
+        let entries: Vec<discovery::Entry> = ids
+            .iter()
+            .map(|id| discovery::Entry {
+                id: (*id).to_string(),
+                text: format!("{} propose a fact about a saved item", id.replace('_', " ")),
+            })
+            .collect();
+        let set = ToolSet {
+            tools: builtins(),
+            permissions: Vec::new(),
+            permission_prompt: None,
+            deferred: ids.iter().map(|id| (*id).to_string()).collect(),
+            index: discovery::Index::build(entries),
+        };
+        let msg = set.no_such_tool("plane_create_proposal");
+        assert!(
+            msg.contains("plane_propose_fact"),
+            "the tool it meant is suggested: {msg}"
+        );
+    }
+
     #[test]
     fn mutating_tools_refused_in_ask_mode() {
         for name in ["write", "edit", "bash"] {
@@ -1088,10 +1155,18 @@ mod tests {
     }
 
     #[test]
-    fn unknown_tool_is_an_error() {
+    fn unknown_tool_is_an_error_that_says_what_to_call_instead() {
         let out = run("nope", json!({}), any_cwd(), RunMode::Edit);
         assert!(!out.ok);
         assert!(out.output.contains("unknown tool"));
+        // The bare error made a small model retry the same wrong name. It has
+        // to carry the way out: real names, and an instruction not to repeat.
+        assert!(out.output.contains("read"), "names what is offered: {}", out.output);
+        assert!(
+            out.output.contains("do not retry this name"),
+            "says not to repeat it: {}",
+            out.output
+        );
     }
 
     #[test]
