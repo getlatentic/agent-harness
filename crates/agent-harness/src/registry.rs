@@ -167,6 +167,31 @@ mod tests {
         assert!(harness_by_id("nope").is_none());
     }
 
+    /// The flag and the behaviour have to agree, or the flag is worse than
+    /// nothing: a host reads `withheld_tools: false` and picks another adapter,
+    /// or reads `true` and trusts a sandbox. An adapter that advertises it
+    /// cannot withhold tools must actually refuse to try.
+    #[test]
+    fn an_adapter_that_cannot_withhold_tools_refuses_to_pretend() {
+        for listing in default_registry().catalog() {
+            let id = &listing.manifest.id;
+            if listing.capabilities.withheld_tools {
+                continue;
+            }
+            let harness = harness_by_id(id).expect("catalogued");
+            let refused = harness
+                .start(
+                    crate::RunRequest {
+                        tools: crate::ToolAccess::None,
+                        ..crate::RunRequest::default()
+                    },
+                    std::sync::Arc::new(|_| {}),
+                )
+                .is_err();
+            assert!(refused, "{id} advertises no withholding but accepted the request anyway");
+        }
+    }
+
     #[test]
     fn capabilities_match_each_adapter_and_back_credential_required() {
         let caps = |id: &str| harness_by_id(id).unwrap().features();

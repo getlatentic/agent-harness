@@ -118,6 +118,7 @@ impl Harness for ClaudeHarness {
                 ModelChoice { value: "haiku".to_owned(), label: "Haiku (latest)".to_owned() },
             ],
             max_turns: true,
+            withheld_tools: true,
             login: true,
             ..Default::default()
         }

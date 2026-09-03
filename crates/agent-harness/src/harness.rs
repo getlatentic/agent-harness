@@ -215,8 +215,34 @@ pub enum RunMode {
 /// Honoured by the `openai-compatible` adapter (an empty tool list) and the
 /// `claude` adapter (`--disallowedTools "*"`; an empty *allow* list is the
 /// CLI's auto-approve list, not an availability gate, and withholds nothing).
-/// The `codex` and `acp` adapters ignore it: neither the Codex CLI nor the ACP
-/// protocol can withhold an agent's own tools.
+/// The `codex` and `acp` adapters cannot honour it — neither the Codex CLI nor
+/// the ACP protocol can withhold an agent's own tools — so they refuse the run
+/// rather than accept the request and ignore it.
+/// Refuse a run asking for a tool guarantee this adapter cannot make.
+///
+/// Taking [`ToolAccess::None`] and running with tools anyway hands a caller a
+/// sandbox that is not one, and silence is what makes it dangerous: a host
+/// adopted the no-tools mode for a judging task and, ten hours later, 14 runs
+/// had made 46 tool calls between them. Nothing said otherwise, because the
+/// adapters took the field and dropped it.
+///
+/// So an adapter that cannot honour it says so at the call, where the caller
+/// can still choose, rather than at the end of a run that was never sandboxed.
+pub(crate) fn refuse_withheld_tools(
+    adapter: &str,
+    tools: ToolAccess,
+    because: &str,
+) -> Result<(), Error> {
+    if tools == ToolAccess::None {
+        return Err(Error::Other(format!(
+            "{adapter}: ToolAccess::None asks for a guarantee this adapter cannot make — \
+             {because}. Run it on an adapter that honours it (claude, openai-compatible), or \
+             ask for ToolAccess::Default and treat every tool as reachable."
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolAccess {
@@ -334,6 +360,11 @@ pub struct RunRequest {
     pub attachments: Vec<Attachment>,
     /// Working directory for the run — the workspace path, so the
     /// harness's tool calls land inside the user's vault.
+    ///
+    /// `None` inherits the host process's working directory, which is seldom
+    /// what a caller means: an agent holding tools then has reach over
+    /// wherever the host happened to be started from. Name a directory chosen
+    /// for the run.
     pub cwd: Option<PathBuf>,
     pub mode: RunMode,
     /// Whether this run may call tools at all. Defaults to whatever `mode`
@@ -511,6 +542,11 @@ pub struct Features {
     pub effort: bool,
     /// Honors [`RunTuning::max_turns`] (claude turn cap).
     pub max_turns: bool,
+    /// Honors [`ToolAccess::None`]. `false` means the adapter cannot withhold
+    /// its agent's tools and **refuses** such a run rather than pretending —
+    /// so a host offering a no-tools mode asks here first, instead of meeting
+    /// it as a failed run. True for `claude` and `openai-compatible`.
+    pub withheld_tools: bool,
     /// Supports an interactive [`Harness::login`] flow (the CLI's own
     /// OAuth, e.g. `claude auth login` / `codex login`). Drives the
     /// picker's "Sign in" affordance when installed-but-not-signed-in.

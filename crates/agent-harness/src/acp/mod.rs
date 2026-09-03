@@ -169,11 +169,13 @@ impl Harness for AcpHarness {
     fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
         // resume (session/load) is a follow-up; this first cut runs a fresh
         // session. `attachments` ignored: a text prompt only.
-        // `tools` is ignored: an ACP agent owns its own tool surface, and the
-        // protocol has no way to say "offer none". Honoured by the
-        // openai-compatible and claude adapters only — see [`ToolAccess`].
-        let RunRequest { run_id, prompt, cwd, mode, tools: _, tuning, resume: _, attachments: _ } =
+        let RunRequest { run_id, prompt, cwd, mode, tools, tuning, resume: _, attachments: _ } =
             request;
+        crate::harness::refuse_withheld_tools(
+            "acp",
+            tools,
+            "an ACP agent owns its own tool surface and the protocol has no way to say \"offer none\"",
+        )?;
         // ACP carries no model. For a config-file vendor (opencode), select the
         // chosen model out-of-band: write a temp JSON config `{ <field>: <model> }`
         // and point the agent's config env var at it for this spawn. Other tuning
@@ -444,6 +446,26 @@ fn is_allow(kind: &acp::schema::PermissionOptionKind) -> bool {
 mod tests {
     use super::*;
     use crate::Harness;
+
+    /// As with codex: an agent that owns its own tool surface cannot promise to
+    /// offer none, so it says so at the call rather than running unsandboxed.
+    #[test]
+    fn a_request_for_no_tools_is_refused_rather_than_run_with_them() {
+        let harness = AcpHarness::custom(AcpHarnessConfig {
+            id: "fake".to_owned(),
+            display_name: "Fake".to_owned(),
+            command: "agent".to_owned(),
+            args: Vec::new(),
+            install_hint: None,
+        });
+        let Err(error) = harness.start(
+            RunRequest { tools: crate::ToolAccess::None, ..RunRequest::default() },
+            std::sync::Arc::new(|_| {}),
+        ) else {
+            panic!("an ACP agent cannot withhold its own tools");
+        };
+        assert!(error.to_string().contains("ToolAccess::None"), "{error}");
+    }
 
     #[cfg(unix)]
     use crate::test_support::fake_cli;

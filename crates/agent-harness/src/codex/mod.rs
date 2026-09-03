@@ -151,11 +151,13 @@ impl Harness for CodexHarness {
 
     fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
         // `attachments` ignored: codex exec is a text CLI (no image input here).
-        let RunRequest { run_id, prompt, cwd, mode,
-            // Ignored: the Codex CLI has no flag that withholds its tools.
-            // See [`ToolAccess`] for which adapters honour it.
-            tools: _,
-            tuning, resume, attachments: _ } = request;
+        let RunRequest { run_id, prompt, cwd, mode, tools, tuning, resume, attachments: _ } =
+            request;
+        crate::harness::refuse_withheld_tools(
+            "codex",
+            tools,
+            "the Codex CLI has no flag that withholds its tools",
+        )?;
         let args = build_codex_args(prompt, mode, &tuning, resume.as_deref());
         let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
@@ -452,6 +454,24 @@ mod tests {
         assert_eq!(CodexHarness::default().command, DEFAULT_CODEX_COMMAND);
     }
     use crate::ReasoningEffort;
+
+    /// Silence is the dangerous part. A host that adopted the no-tools mode for
+    /// a judging task had 14 runs make 46 tool calls between them, because the
+    /// adapters took the field and dropped it. Refusing keeps the caller's
+    /// choice in front of them.
+    #[test]
+    fn a_request_for_no_tools_is_refused_rather_than_run_with_them() {
+        let harness = CodexHarness::custom(CodexHarnessConfig { command: "codex".to_owned() });
+        let Err(error) = harness.start(
+            RunRequest { tools: crate::ToolAccess::None, ..RunRequest::default() },
+            std::sync::Arc::new(|_| {}),
+        ) else {
+            panic!("an adapter that cannot withhold tools must not accept the request");
+        };
+        let message = error.to_string();
+        assert!(message.contains("ToolAccess::None"), "the error must name what was asked: {message}");
+        assert!(message.contains("codex"), "and which adapter refused: {message}");
+    }
 
     #[cfg(unix)]
     use crate::test_support::fake_cli;

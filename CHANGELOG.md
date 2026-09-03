@@ -20,10 +20,23 @@ these were found by hosts hitting them in production, not by tests.
   is how every other SDK models it (`tool_choice`). Move `RunMode::Answer` to
   `RunMode::Ask` plus `ToolAccess::None`.
 
+- **`codex` and `acp` refuse `ToolAccess::None`.** Neither can withhold an
+  agent's own tools, and both used to accept the request and drop it — which
+  reads as a sandbox and is not one. A run asking for it now fails at the call
+  with an error naming the adapter. Ask for `ToolAccess::Default` and treat
+  every tool as reachable, or run it on an adapter that honours it.
+
 - **`RunRequest` gained a `tools` field.** It derives `Default`, so a call site
   using `..Default::default()` is unaffected; an exhaustive struct literal must
   add `tools`. `cargo-semver-checks` classes this as major, which is why this
   is 0.6.0 rather than 0.5.4.
+
+### Changed
+
+- **`RunRequest.cwd: None` is documented, not changed.** It inherits the host
+  process's working directory, so an agent holding tools has reach over
+  wherever the host was started from — seldom what a caller means, and written
+  down nowhere until now. Name a directory chosen for the run.
 
 ### Added
 
@@ -42,6 +55,11 @@ these were found by hosts hitting them in production, not by tests.
   reported `stop`, not `length`, which killed the budget theory it was meant to
   confirm.
 
+- **`Features::withheld_tools` — ask before you rely on it.** A host offering a
+  no-tools mode can now read whether an adapter honours it, instead of meeting
+  the refusal as a failed run. A registry test holds the flag and the behaviour
+  together, so an adapter cannot advertise one and do the other.
+
 - **`ToolAccess::None` — answer from the prompt, with no tools offered.** For
   work where everything needed is already in the message: classifying a
   document, extracting a field, judging whether two things match. Not
@@ -52,8 +70,12 @@ these were found by hosts hitting them in production, not by tests.
   schemas left those calls running — `gpt-oss`, handed an empty tool array,
   asked for `glob`, `list`, `read` and `bash`, and got a real directory
   listing back. Honoured by the `openai-compatible` and `claude` adapters;
-  `codex` and `acp` ignore it, since neither can withhold an agent's own
-  tools.
+  `codex` and `acp` cannot honour it — neither the Codex CLI nor the ACP
+  protocol can withhold an agent's own tools — so they now **refuse the run**
+  rather than accept the request and ignore it. Accepting silently is what made
+  the two no-ops expensive: a host adopted the mode for a judging task and, ten
+  hours later, 14 runs had made 46 tool calls between them, with nothing
+  anywhere saying the guarantee was not in force.
 
 - **MCP tools may be offered in read-only (`Ask`) runs.** Every MCP tool was
   unconditionally treated as mutating, so a host mounting a read-only server
