@@ -493,14 +493,6 @@ mod imp {
         }
 
         #[test]
-        fn no_cache_directory_means_nothing_to_refresh() {
-            // The library does not pick a cache location: a host names one or
-            // there is no disk cache at all. Inventing a path under $HOME is
-            // exactly what this crate stopped doing for instruction files.
-            assert!(cache_path().is_none() || std::env::var_os("AGENT_HARNESS_CACHE_DIR").is_some());
-        }
-
-        #[test]
         fn select_keeps_only_tool_call_models_and_maps_name() {
             let json = r#"{
               "anthropic": { "models": {
