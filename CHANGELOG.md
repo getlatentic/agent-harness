@@ -7,7 +7,7 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
-## [0.6.0] - 2026-09-03
+## [0.6.0-alpha.1] - 2026-09-03
 
 A release about what a run *reports* and what it is *allowed to reach*. Two of
 these were found by hosts hitting them in production, not by tests.
@@ -21,22 +21,27 @@ these were found by hosts hitting them in production, not by tests.
 
 ### Breaking
 
-- **`RunMode::Answer` is gone.** It conflated two questions: whether a run may
-  *change* things (`Ask`/`Edit`) and whether it may *reach outside the prompt*
-  at all. The second is now its own axis, `RunRequest.tools: ToolAccess`, which
-  is how every other SDK models it (`tool_choice`). Move `RunMode::Answer` to
-  `RunMode::Ask` plus `ToolAccess::None`.
+Two, and both are the same shape: a new public field on a struct callers build
+with a literal. `..Default::default()` is unaffected; an exhaustive literal
+must name the field. Measured rather than assumed — against the 0.5.3 baseline
+`cargo-semver-checks` reports `constructible_struct_adds_field` for both, which
+is why this is 0.6 and not 0.5.4:
 
-- **`codex` and `acp` refuse `ToolAccess::None`.** Neither can withhold an
-  agent's own tools, and both used to accept the request and drop it — which
-  reads as a sandbox and is not one. A run asking for it now fails at the call
-  with an error naming the adapter. Ask for `ToolAccess::Default` and treat
-  every tool as reachable, or run it on an adapter that honours it.
+- **`RunRequest` gained `tools: ToolAccess`** — whether a run may reach outside
+  the prompt at all. Folded into the run mode this was conflated with whether a
+  run may *change* things, so it is its own axis now, the way every other SDK
+  models it (`tool_choice`).
 
-- **`RunRequest` gained a `tools` field.** It derives `Default`, so a call site
-  using `..Default::default()` is unaffected; an exhaustive struct literal must
-  add `tools`. `cargo-semver-checks` classes this as major, which is why this
-  is 0.6.0 rather than 0.5.4.
+- **`Features` gained `withheld_tools`** — whether an adapter honours
+  `ToolAccess::None`, so a host can ask before relying on it.
+
+Nothing else here breaks a 0.5.x caller, and two things that read like breaks
+are not. The `codex`/`acp` refusal below cannot break code that had no way to
+name `ToolAccess`, which is new in this release. And `RunMode::Answer` — which
+earlier drafts of these notes led with — was added and removed inside this
+cycle and never appeared in a published version; only a `main` tracker between
+`118cc9e` and `5a9d793` ever had it, and moves it to `RunMode::Ask` plus
+`ToolAccess::None`.
 
 ### Changed
 
