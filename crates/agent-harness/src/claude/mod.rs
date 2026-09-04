@@ -331,6 +331,21 @@ fn build_claude_args(
         args.push("--disallowedTools".to_owned());
         args.push("*".to_owned());
     }
+    // A run that may call nothing has no use for connected MCP servers, and
+    // pays for them: their definitions are assembled for every invocation. On
+    // one host's judging prompt, total input tokens per run, measured:
+    //
+    //   8,638  with tools withheld
+    //   7,369  and their servers not connected either
+    //
+    // Skipped when the host manages MCP itself, since it may be mounting a
+    // server for a *later* turn or another run in the same configuration.
+    if tools == ToolAccess::None
+        && !extra_args_sets(&tuning.extra_args, "--strict-mcp-config")
+        && !extra_args_sets(&tuning.extra_args, "--mcp-config")
+    {
+        args.push("--strict-mcp-config".to_owned());
+    }
     if matches!(mode, RunMode::Edit) && !extra_args_sets(&tuning.extra_args, "--permission-mode") {
         args.push("--permission-mode".to_owned());
         args.push("acceptEdits".to_owned());
@@ -587,6 +602,32 @@ mod tests {
         assert_eq!(args[i + 1], "*");
         let j = args.iter().position(|a| a == "--permission-mode").expect("still an edit run");
         assert_eq!(args[j + 1], "acceptEdits");
+    }
+
+    /// Nothing may be called, so nothing needs connecting. The cost is real —
+    /// MCP definitions are assembled per invocation — and it cannot change what
+    /// a run can do, because the tools were already refused.
+    #[test]
+    fn withheld_tools_do_not_connect_mcp_servers_either() {
+        let args =
+            build_claude_args("hi".into(), RunMode::Ask, ToolAccess::None, &RunTuning::default(), None);
+        assert!(args.iter().any(|a| a == "--strict-mcp-config"), "{args:?}");
+        // …and an ordinary run is untouched: a host mounting servers keeps them.
+        let open =
+            build_claude_args("hi".into(), RunMode::Ask, ToolAccess::Default, &RunTuning::default(), None);
+        assert!(!open.iter().any(|a| a == "--strict-mcp-config"), "{open:?}");
+    }
+
+    /// A host that manages MCP itself is left alone: it may be mounting a
+    /// server for another run sharing this configuration.
+    #[test]
+    fn a_host_that_configures_mcp_itself_is_not_overridden() {
+        let tuning = RunTuning {
+            extra_args: vec!["--mcp-config".into(), "servers.json".into()],
+            ..Default::default()
+        };
+        let args = build_claude_args("hi".into(), RunMode::Ask, ToolAccess::None, &tuning, None);
+        assert!(!args.iter().any(|a| a == "--strict-mcp-config"), "{args:?}");
     }
 
     #[test]
