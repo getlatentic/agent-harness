@@ -7,7 +7,7 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
-## [0.6.0-alpha.1] - 2026-09-03
+## [0.6.0-alpha.1] - 2026-09-04
 
 A release about what a run *reports* and what it is *allowed to reach*. Two of
 these were found by hosts hitting them in production, not by tests.
