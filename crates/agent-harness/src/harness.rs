@@ -223,12 +223,14 @@ pub enum RunMode {
 /// Refused by `codex` and `acp`, for narrower reasons than "no mechanism" —
 /// each has one, and neither reaches far enough. Codex has per-tool switches
 /// (`features.shell_tool`, `web_search`, `--disable <feature>`) but none for
-/// all of them: with the shell off, `apply_patch` still writes, and the set
+/// all of them: with the shell off, `apply_patch` still writes — 4 of 4 runs,
+/// with the sandbox opened so it was not the thing refusing — and the set
 /// drifts by version, so an enumeration here could not be checked against
 /// anything. ACP can stop a call — `session/request_permission` runs agent to
-/// client, and a client denying every request stops execution — but cannot
-/// un-offer, and this crate implements no such handler. The first is a limit of
-/// the tool; the second is a limit of this crate, and could be lifted.
+/// client with the call and the options, and the client answers — but it cannot
+/// un-offer, and this crate implements no such handler. What an agent does when
+/// every request is denied has not been observed here, so the schema is the
+/// claim and the behaviour is not.
 /// Refuse a run asking for a tool guarantee this adapter cannot make.
 ///
 /// Taking [`ToolAccess::None`] and running with tools anyway hands a caller a
@@ -650,6 +652,14 @@ pub struct Info {
 /// | Advertise | always | a [`Features`] flag, so a host asks before it runs |
 /// | Refuse | a guarantee this adapter cannot keep | `Err` from [`start`](Harness::start), naming the adapter |
 /// | Ignore | a preference | honour nothing, and say so in the doc comment |
+/// | Say it is missing | the request cannot be *expressed* here | neither — add the capability, or decline to |
+///
+/// The fourth row is not a way of handling a request; it is noticing that there
+/// was no request. A host wanting its system prompt to *replace* the agent's is
+/// not being refused a guarantee or ignored a preference — [`RunTuning`] offers
+/// `extra_instructions`, additive by name, and replacement has never been on
+/// offer. Reach for this row when the tiers feel stretched: usually the thing
+/// being classified is a missing capability wearing a request's clothes.
 ///
 /// A *preference* changes what a run costs or how well it goes, and not
 /// honouring it shows up in the result: a turn cap ignored means more turns,
@@ -667,9 +677,16 @@ pub struct Info {
 /// record; a [`Features`] flag read at startup is one decision. Refusal is the
 /// backstop for a host that named this adapter anyway.
 ///
-/// A comment is not a third answer. `tools: _` with an explanation of why reads
-/// as diligence and behaves exactly like silence: no flag, no error, and
+/// A comment is not one of these answers. `tools: _` with an explanation of why
+/// reads as diligence and behaves exactly like silence: no flag, no error, and
 /// nothing said at the only moment a caller could act on it.
+///
+/// What counts instead is an artifact. A guarantee ships as a [`Features`] flag
+/// *and* a row in the test that holds the flag to the behaviour, so an adapter
+/// that advertises one and does the other fails rather than reads well. This
+/// rule cannot make the classification mechanical — an author still picks the
+/// tier — but it makes a wrong pick show up as a missing artifact instead of a
+/// plausible paragraph, which is the whole difference from the comment above.
 pub trait Harness: Send + Sync {
     /// Who this harness is — identity and presentation, for the picker.
     fn info(&self) -> Info;
@@ -1265,21 +1282,47 @@ mod tests {
         assert_eq!(rx.into_iter().count(), 0); // closes immediately, doesn't hang
     }
 
-    /// The contract on `Harness` says a guarantee is refused, never dropped.
-    /// This holds the two adapters that cannot keep `ToolAccess::None` to it —
-    /// including for a mode they *can* serve, since the two are separate axes
-    /// and refusing only the read-only case would leave the hole open in Edit.
+    /// One row per guarantee the crate makes: the flag that advertises it, and
+    /// a request that an adapter without it must refuse. The contract on
+    /// [`Harness`] says a guarantee ships as a flag *and* a row here, so adding
+    /// the flag alone leaves this table short and the omission is visible.
+    ///
+    /// `Features` is exhaustively destructured on purpose. A new flag makes
+    /// this fail to compile, which is the question being asked at the only
+    /// moment anyone will think about it: is this a guarantee, and if so where
+    /// is its row?
+    fn guarantees() -> Vec<&'static str> {
+        let Features {
+            credential_required: _,
+            previews_edits: _,
+            models: _,
+            custom_model: _,
+            effort: _,
+            max_turns: _,
+            withheld_tools: _,
+            login: _,
+            custom_instructions: _,
+        } = Features::default();
+        vec!["withheld_tools"]
+    }
+
+    /// A guarantee is refused, never dropped. Held for every adapter the
+    /// registry knows, including ones not yet written: if the flag says no, the
+    /// run must fail rather than proceed unguarded.
     #[test]
-    fn an_adapter_that_cannot_keep_the_guarantee_refuses_rather_than_dropping_it() {
-        for adapter in ["codex", "acp"] {
-            for mode in [RunMode::Ask, RunMode::Edit] {
-                let refused = refuse_withheld_tools(adapter, ToolAccess::None, "cannot");
-                assert!(refused.is_err(), "{adapter} in {mode:?} must refuse, not drop");
-                let message = format!("{}", refused.unwrap_err());
-                assert!(
-                    message.contains(adapter),
-                    "the error names the adapter, so a host knows which one: {message}"
-                );
+    fn an_adapter_that_cannot_keep_a_guarantee_refuses_rather_than_dropping_it() {
+        assert!(!guarantees().is_empty(), "the crate makes at least one guarantee");
+        for name in guarantees() {
+            assert_eq!(name, "withheld_tools", "a new guarantee needs its own arm below");
+            for adapter in ["codex", "acp"] {
+                for mode in [RunMode::Ask, RunMode::Edit] {
+                    let refused = refuse_withheld_tools(adapter, ToolAccess::None, "cannot");
+                    assert!(refused.is_err(), "{adapter} in {mode:?} must refuse, not drop");
+                    assert!(
+                        format!("{}", refused.unwrap_err()).contains(adapter),
+                        "the error names the adapter, so a host knows which one"
+                    );
+                }
             }
         }
         // …and a run that asked for nothing special is never refused.
