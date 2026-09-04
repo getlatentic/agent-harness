@@ -332,11 +332,16 @@ fn build_claude_args(
         args.push("*".to_owned());
     }
     // A run that may call nothing has no use for connected MCP servers, and
-    // pays for them: their definitions are assembled for every invocation. On
-    // one host's judging prompt, total input tokens per run, measured:
+    // pays for them: their definitions are assembled for every invocation, so
+    // the saving scales with what is mounted and is nothing on a machine with
+    // none. Measured twice, two prompts, against the same two root servers —
+    // total input tokens per run:
     //
-    //   8,638  with tools withheld
-    //   7,369  and their servers not connected either
+    //   8,638 -> 7,369   a judging prompt   (-1,269)
+    //   8,249 -> 6,984   a trivial prompt   (-1,265)
+    //
+    // The saving replicates; its size is a property of that server set rather
+    // than of the flag, which is why the conditions are written beside it.
     //
     // Skipped when the host manages MCP itself, since it may be mounting a
     // server for a *later* turn or another run in the same configuration.
