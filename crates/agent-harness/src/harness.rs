@@ -212,12 +212,25 @@ pub enum RunMode {
 /// only forbids the call. Nothing is sent, because the tokens and the
 /// temptation were both the problem.
 ///
-/// Honoured by the `openai-compatible` adapter (an empty tool list) and the
-/// `claude` adapter (`--disallowedTools "*"`; an empty *allow* list is the
-/// CLI's auto-approve list, not an availability gate, and withholds nothing).
-/// The `codex` and `acp` adapters cannot honour it — neither the Codex CLI nor
-/// the ACP protocol can withhold an agent's own tools — so they refuse the run
-/// rather than accept the request and ignore it.
+/// A *guarantee*, in the tiers on [`Harness`]: a caller acts on it being true,
+/// so an adapter that cannot keep it refuses rather than running unsandboxed,
+/// and says which it is through [`Features::withheld_tools`] beforehand.
+///
+/// Kept by `openai-compatible` (nothing offered, dispatched or connected) and
+/// `claude` (`--disallowedTools "*"`; an empty *allow* list is the CLI's
+/// auto-approve list, not an availability gate, and withholds nothing).
+///
+/// Refused by `codex` and `acp`, for narrower reasons than "no mechanism" —
+/// each has one, and neither reaches far enough. Codex has per-tool switches
+/// (`features.shell_tool`, `web_search`, `--disable <feature>`) but none for
+/// all of them: with the shell off, `apply_patch` still writes — 4 of 4 runs,
+/// with the sandbox opened so it was not the thing refusing — and the set
+/// drifts by version, so an enumeration here could not be checked against
+/// anything. ACP can stop a call — `session/request_permission` runs agent to
+/// client with the call and the options, and the client answers — but it cannot
+/// un-offer, and this crate implements no such handler. What an agent does when
+/// every request is denied has not been observed here, so the schema is the
+/// claim and the behaviour is not.
 /// Refuse a run asking for a tool guarantee this adapter cannot make.
 ///
 /// Taking [`ToolAccess::None`] and running with tools anyway hands a caller a
@@ -318,8 +331,14 @@ pub struct RunTuning {
     /// `-m`). `None` → let the CLI use its configured default.
     pub model: Option<String>,
     /// Reasoning effort (Codex: `-c model_reasoning_effort`).
+    ///
+    /// A preference, in the tiers on [`Harness`]: ignored where an adapter has
+    /// no equivalent, because the answer is the same shape either way.
     pub effort: Option<ReasoningEffort>,
     /// Cap on agentic turns (Claude: `--max-turns`).
+    ///
+    /// A preference. Ignored by Codex and ACP, which have no turn cap: a run
+    /// then takes more turns than asked, which the caller sees in the result.
     pub max_turns: Option<u32>,
     /// Raw CLI args the host appends verbatim **after** the adapter's own,
     /// so a host can add a flag (`--settings`, `--add-dir`) or override one
@@ -619,6 +638,55 @@ pub struct Info {
 /// A pluggable agent backend. Implementors are cheap to construct
 /// (they hold config, not connections) so a registry can hand out
 /// fresh boxes on demand.
+///
+/// # What an adapter owes a request it cannot honour
+///
+/// No adapter supports everything: `max_turns` has no Codex flag, `effort` has
+/// no ACP equivalent, and neither of those two can withhold their agent's own
+/// tools. There are three honest answers, and which applies is decided by one
+/// question — **if this is silently not honoured, does the caller end up
+/// believing something untrue?**
+///
+/// | | when | how |
+/// |---|---|---|
+/// | Advertise | always | a [`Features`] flag, so a host asks before it runs |
+/// | Refuse | a guarantee this adapter cannot keep | `Err` from [`start`](Harness::start), naming the adapter |
+/// | Ignore | a preference | honour nothing, and say so in the doc comment |
+/// | Say it is missing | the request cannot be *expressed* here | neither — add the capability, or decline to |
+///
+/// The fourth row is not a way of handling a request; it is noticing that there
+/// was no request. A host wanting its system prompt to *replace* the agent's is
+/// not being refused a guarantee or ignored a preference — [`RunTuning`] offers
+/// `extra_instructions`, additive by name, and replacement has never been on
+/// offer. Reach for this row when the tiers feel stretched: usually the thing
+/// being classified is a missing capability wearing a request's clothes.
+///
+/// A *preference* changes what a run costs or how well it goes, and not
+/// honouring it shows up in the result: a turn cap ignored means more turns,
+/// which the caller can see and pay for.
+///
+/// A *guarantee* is something the caller acts on being true. Not honouring it
+/// silently leaves them holding a false belief, and the belief is the damage. A
+/// host that asked for [`ToolAccess::None`] and got tools anyway will classify
+/// documents with a live filesystem underneath and never know — which is not
+/// hypothetical: it ran for ten hours downstream, 46 tool calls across 14 runs
+/// that had asked for none, defended by a flag that parsed and did nothing and
+/// by a comment that described the gap accurately.
+///
+/// Prefer advertising to refusing. An `Err` mid-sweep is one failure per
+/// record; a [`Features`] flag read at startup is one decision. Refusal is the
+/// backstop for a host that named this adapter anyway.
+///
+/// A comment is not one of these answers. `tools: _` with an explanation of why
+/// reads as diligence and behaves exactly like silence: no flag, no error, and
+/// nothing said at the only moment a caller could act on it.
+///
+/// What counts instead is an artifact. A guarantee ships as a [`Features`] flag
+/// *and* a row in the test that holds the flag to the behaviour, so an adapter
+/// that advertises one and does the other fails rather than reads well. This
+/// rule cannot make the classification mechanical — an author still picks the
+/// tier — but it makes a wrong pick show up as a missing artifact instead of a
+/// plausible paragraph, which is the whole difference from the comment above.
 pub trait Harness: Send + Sync {
     /// Who this harness is — identity and presentation, for the picker.
     fn info(&self) -> Info;
