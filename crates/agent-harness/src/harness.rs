@@ -212,12 +212,23 @@ pub enum RunMode {
 /// only forbids the call. Nothing is sent, because the tokens and the
 /// temptation were both the problem.
 ///
-/// Honoured by the `openai-compatible` adapter (an empty tool list) and the
-/// `claude` adapter (`--disallowedTools "*"`; an empty *allow* list is the
-/// CLI's auto-approve list, not an availability gate, and withholds nothing).
-/// The `codex` and `acp` adapters cannot honour it — neither the Codex CLI nor
-/// the ACP protocol can withhold an agent's own tools — so they refuse the run
-/// rather than accept the request and ignore it.
+/// A *guarantee*, in the tiers on [`Harness`]: a caller acts on it being true,
+/// so an adapter that cannot keep it refuses rather than running unsandboxed,
+/// and says which it is through [`Features::withheld_tools`] beforehand.
+///
+/// Kept by `openai-compatible` (nothing offered, dispatched or connected) and
+/// `claude` (`--disallowedTools "*"`; an empty *allow* list is the CLI's
+/// auto-approve list, not an availability gate, and withholds nothing).
+///
+/// Refused by `codex` and `acp`, for narrower reasons than "no mechanism" —
+/// each has one, and neither reaches far enough. Codex has per-tool switches
+/// (`features.shell_tool`, `web_search`, `--disable <feature>`) but none for
+/// all of them: with the shell off, `apply_patch` still writes, and the set
+/// drifts by version, so an enumeration here could not be checked against
+/// anything. ACP can stop a call — `session/request_permission` runs agent to
+/// client, and a client denying every request stops execution — but cannot
+/// un-offer, and this crate implements no such handler. The first is a limit of
+/// the tool; the second is a limit of this crate, and could be lifted.
 /// Refuse a run asking for a tool guarantee this adapter cannot make.
 ///
 /// Taking [`ToolAccess::None`] and running with tools anyway hands a caller a
@@ -318,8 +329,14 @@ pub struct RunTuning {
     /// `-m`). `None` → let the CLI use its configured default.
     pub model: Option<String>,
     /// Reasoning effort (Codex: `-c model_reasoning_effort`).
+    ///
+    /// A preference, in the tiers on [`Harness`]: ignored where an adapter has
+    /// no equivalent, because the answer is the same shape either way.
     pub effort: Option<ReasoningEffort>,
     /// Cap on agentic turns (Claude: `--max-turns`).
+    ///
+    /// A preference. Ignored by Codex and ACP, which have no turn cap: a run
+    /// then takes more turns than asked, which the caller sees in the result.
     pub max_turns: Option<u32>,
     /// Raw CLI args the host appends verbatim **after** the adapter's own,
     /// so a host can add a flag (`--settings`, `--add-dir`) or override one
@@ -619,6 +636,40 @@ pub struct Info {
 /// A pluggable agent backend. Implementors are cheap to construct
 /// (they hold config, not connections) so a registry can hand out
 /// fresh boxes on demand.
+///
+/// # What an adapter owes a request it cannot honour
+///
+/// No adapter supports everything: `max_turns` has no Codex flag, `effort` has
+/// no ACP equivalent, and neither of those two can withhold their agent's own
+/// tools. There are three honest answers, and which applies is decided by one
+/// question — **if this is silently not honoured, does the caller end up
+/// believing something untrue?**
+///
+/// | | when | how |
+/// |---|---|---|
+/// | Advertise | always | a [`Features`] flag, so a host asks before it runs |
+/// | Refuse | a guarantee this adapter cannot keep | `Err` from [`start`](Harness::start), naming the adapter |
+/// | Ignore | a preference | honour nothing, and say so in the doc comment |
+///
+/// A *preference* changes what a run costs or how well it goes, and not
+/// honouring it shows up in the result: a turn cap ignored means more turns,
+/// which the caller can see and pay for.
+///
+/// A *guarantee* is something the caller acts on being true. Not honouring it
+/// silently leaves them holding a false belief, and the belief is the damage. A
+/// host that asked for [`ToolAccess::None`] and got tools anyway will classify
+/// documents with a live filesystem underneath and never know — which is not
+/// hypothetical: it ran for ten hours downstream, 46 tool calls across 14 runs
+/// that had asked for none, defended by a flag that parsed and did nothing and
+/// by a comment that described the gap accurately.
+///
+/// Prefer advertising to refusing. An `Err` mid-sweep is one failure per
+/// record; a [`Features`] flag read at startup is one decision. Refusal is the
+/// backstop for a host that named this adapter anyway.
+///
+/// A comment is not a third answer. `tools: _` with an explanation of why reads
+/// as diligence and behaves exactly like silence: no flag, no error, and
+/// nothing said at the only moment a caller could act on it.
 pub trait Harness: Send + Sync {
     /// Who this harness is — identity and presentation, for the picker.
     fn info(&self) -> Info;
@@ -1212,6 +1263,27 @@ mod tests {
         let harness = MockHarness { events: Vec::new() };
         let (_handle, rx) = harness.run(demo_request()).expect("run ok");
         assert_eq!(rx.into_iter().count(), 0); // closes immediately, doesn't hang
+    }
+
+    /// The contract on `Harness` says a guarantee is refused, never dropped.
+    /// This holds the two adapters that cannot keep `ToolAccess::None` to it —
+    /// including for a mode they *can* serve, since the two are separate axes
+    /// and refusing only the read-only case would leave the hole open in Edit.
+    #[test]
+    fn an_adapter_that_cannot_keep_the_guarantee_refuses_rather_than_dropping_it() {
+        for adapter in ["codex", "acp"] {
+            for mode in [RunMode::Ask, RunMode::Edit] {
+                let refused = refuse_withheld_tools(adapter, ToolAccess::None, "cannot");
+                assert!(refused.is_err(), "{adapter} in {mode:?} must refuse, not drop");
+                let message = format!("{}", refused.unwrap_err());
+                assert!(
+                    message.contains(adapter),
+                    "the error names the adapter, so a host knows which one: {message}"
+                );
+            }
+        }
+        // …and a run that asked for nothing special is never refused.
+        assert!(refuse_withheld_tools("codex", ToolAccess::Default, "cannot").is_ok());
     }
 
     #[test]
