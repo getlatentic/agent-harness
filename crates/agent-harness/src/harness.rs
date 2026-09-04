@@ -1282,53 +1282,6 @@ mod tests {
         assert_eq!(rx.into_iter().count(), 0); // closes immediately, doesn't hang
     }
 
-    /// One row per guarantee the crate makes: the flag that advertises it, and
-    /// a request that an adapter without it must refuse. The contract on
-    /// [`Harness`] says a guarantee ships as a flag *and* a row here, so adding
-    /// the flag alone leaves this table short and the omission is visible.
-    ///
-    /// `Features` is exhaustively destructured on purpose. A new flag makes
-    /// this fail to compile, which is the question being asked at the only
-    /// moment anyone will think about it: is this a guarantee, and if so where
-    /// is its row?
-    fn guarantees() -> Vec<&'static str> {
-        let Features {
-            credential_required: _,
-            previews_edits: _,
-            models: _,
-            custom_model: _,
-            effort: _,
-            max_turns: _,
-            withheld_tools: _,
-            login: _,
-            custom_instructions: _,
-        } = Features::default();
-        vec!["withheld_tools"]
-    }
-
-    /// A guarantee is refused, never dropped. Held for every adapter the
-    /// registry knows, including ones not yet written: if the flag says no, the
-    /// run must fail rather than proceed unguarded.
-    #[test]
-    fn an_adapter_that_cannot_keep_a_guarantee_refuses_rather_than_dropping_it() {
-        assert!(!guarantees().is_empty(), "the crate makes at least one guarantee");
-        for name in guarantees() {
-            assert_eq!(name, "withheld_tools", "a new guarantee needs its own arm below");
-            for adapter in ["codex", "acp"] {
-                for mode in [RunMode::Ask, RunMode::Edit] {
-                    let refused = refuse_withheld_tools(adapter, ToolAccess::None, "cannot");
-                    assert!(refused.is_err(), "{adapter} in {mode:?} must refuse, not drop");
-                    assert!(
-                        format!("{}", refused.unwrap_err()).contains(adapter),
-                        "the error names the adapter, so a host knows which one"
-                    );
-                }
-            }
-        }
-        // …and a run that asked for nothing special is never refused.
-        assert!(refuse_withheld_tools("codex", ToolAccess::Default, "cannot").is_ok());
-    }
-
     #[test]
     fn harness_error_preserves_typed_source_and_flattened_message() {
         use std::error::Error as _;

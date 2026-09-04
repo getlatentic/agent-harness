@@ -171,8 +171,35 @@ mod tests {
     /// nothing: a host reads `withheld_tools: false` and picks another adapter,
     /// or reads `true` and trusts a sandbox. An adapter that advertises it
     /// cannot withhold tools must actually refuse to try.
+    /// One name per guarantee the crate makes — the contract on
+    /// [`crate::Harness`] says a guarantee ships as a [`crate::Features`] flag
+    /// *and* enforcement here, so this list and the assertions below have to
+    /// move together.
+    ///
+    /// `Features` is destructured exhaustively on purpose, with no `..`: a new
+    /// flag fails to compile until someone says whether it is a guarantee and,
+    /// if so, adds the arm that holds adapters to it. The question gets asked
+    /// at the only moment anyone will think about it.
+    fn guarantees() -> Vec<&'static str> {
+        let crate::Features {
+            credential_required: _,
+            previews_edits: _,
+            models: _,
+            custom_model: _,
+            effort: _,
+            max_turns: _,
+            withheld_tools: _,
+            login: _,
+            custom_instructions: _,
+        } = crate::Features::default();
+        vec!["withheld_tools"]
+    }
+
     #[test]
     fn an_adapter_that_cannot_withhold_tools_refuses_to_pretend() {
+        for name in guarantees() {
+            assert_eq!(name, "withheld_tools", "a new guarantee needs its own arm below");
+        }
         for listing in default_registry().catalog() {
             let id = &listing.manifest.id;
             if listing.capabilities.withheld_tools {
