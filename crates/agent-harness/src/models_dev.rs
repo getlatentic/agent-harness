@@ -494,6 +494,12 @@ mod imp {
 
         #[test]
         fn no_cache_directory_means_nothing_to_refresh() {
+            // Under the same lock as `with_cache_dir`: this reads the global the
+            // others set, so without it the assertion races a sibling that has
+            // the variable pointed at a temp directory — observed failing on
+            // macOS while every other test passed, which reads as flake and is
+            // a missing lock.
+            let _guard = CACHE_ENV.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             // The library does not pick a cache location: a host names one or
             // there is no disk cache at all. Inventing a path under $HOME is
             // exactly what this crate stopped doing for instruction files.
