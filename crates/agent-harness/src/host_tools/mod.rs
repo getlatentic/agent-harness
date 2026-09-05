@@ -175,16 +175,26 @@ impl ToolServer {
         self.tools.iter().find(|tool| tool.name() == name)
     }
 
-    /// Run `name` with `arguments`, catching a panic in host code so a bug in
-    /// one tool is reported as a failed call rather than ending the run.
+    /// Run `name` with `arguments` — see [`call_guarded`].
     #[cfg(any(feature = "claude", feature = "openai-compatible"))]
     pub(crate) fn call(&self, name: &str, arguments: Value) -> Result<String, String> {
-        let Some(tool) = self.tool(name) else {
-            return Err(format!("no tool named `{name}` on server `{}`", self.name));
-        };
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tool.call(arguments)))
-            .unwrap_or_else(|payload| Err(format!("tool `{name}` panicked: {}", panic_text(&payload))))
+        match self.tool(name) {
+            Some(tool) => call_guarded(tool.as_ref(), arguments),
+            None => Err(format!("no tool named `{name}` on server `{}`", self.name)),
+        }
     }
+}
+
+/// Call a host tool so that a panic in it is a failed call, not a dead thread.
+///
+/// The adapters run tools on threads whose only job is to write the result
+/// back; a panic there would leave the agent waiting for a reply that never
+/// comes. `catch_unwind` turns it into an error the agent can read instead.
+#[cfg(any(feature = "claude", feature = "openai-compatible"))]
+pub(crate) fn call_guarded(tool: &dyn HostTool, arguments: Value) -> Result<String, String> {
+    let name = tool.name().to_owned();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tool.call(arguments)))
+        .unwrap_or_else(|payload| Err(format!("tool `{name}` panicked: {}", panic_text(payload.as_ref()))))
 }
 
 impl fmt::Debug for ToolServer {
@@ -198,7 +208,7 @@ impl fmt::Debug for ToolServer {
 
 /// The message a panic carried, when it was a string.
 #[cfg(any(feature = "claude", feature = "openai-compatible"))]
-fn panic_text(payload: &Box<dyn std::any::Any + Send>) -> String {
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
     payload
         .downcast_ref::<String>()
         .cloned()

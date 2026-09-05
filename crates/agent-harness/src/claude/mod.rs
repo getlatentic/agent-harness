@@ -192,14 +192,13 @@ impl Harness for ClaudeHarness {
     fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
         // `attachments` ignored: Claude Code is a text CLI (no image input here).
         let RunRequest { run_id, prompt, cwd, mode, tools, tuning, resume, attachments: _ } = request;
-        // Host tools ride the control channel, and the prompt rides it too, as a
+        // Host tools ride the control channel, and so does the prompt, as a
         // message — under stream-json input the CLI ignores the positional. A
         // run that may call nothing has no use for the channel and keeps the
         // one-way spawn.
-        let serve_host_tools = !self.tool_servers.is_empty() && tools != ToolAccess::None;
-        let (prompt_arg, prompt_message) =
-            if serve_host_tools { (None, Some(prompt)) } else { (Some(prompt), None) };
-        let args = build_claude_args(prompt_arg, mode, tools, &tuning, resume.as_deref());
+        let over_control_channel = !self.tool_servers.is_empty() && tools != ToolAccess::None;
+        let positional = if over_control_channel { None } else { Some(prompt.clone()) };
+        let args = build_claude_args(positional, mode, tools, &tuning, resume.as_deref());
         let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
         // No env injected — Claude Code uses its own auth. PATH
@@ -207,7 +206,7 @@ impl Harness for ClaudeHarness {
         // found for a Finder-launched .app.
         let program = tuning.binary_path.clone().unwrap_or_else(|| PathBuf::from(&self.command));
         let command = Command::new(program).cwd(cwd).run_id(run_id.clone()).args(args).resolve_cli();
-        if let Some(prompt) = prompt_message {
+        if over_control_channel {
             let handle = control::start(command, &run_id, prompt, self.tool_servers.clone(), on_event)?;
             return Ok(Box::new(handle));
         }
@@ -302,12 +301,13 @@ fn build_claude_args(
     // is how the control channel is opened — see [`control`]. The CLI ignores
     // a positional prompt in that mode, so none is sent.
     let mut args = vec!["-p".to_owned()];
-    args.extend(prompt);
-    args.extend(["--output-format".to_owned(), "stream-json".to_owned()]);
-    if args.len() == 3 {
-        args.extend(["--input-format".to_owned(), "stream-json".to_owned()]);
+    match prompt {
+        Some(prompt) => args.push(prompt),
+        None => args.extend(["--input-format".to_owned(), "stream-json".to_owned()]),
     }
-    args.extend(["--verbose".to_owned(), "--include-partial-messages".to_owned()]);
+    args.extend(
+        ["--output-format", "stream-json", "--verbose", "--include-partial-messages"].map(str::to_owned),
+    );
     // Continue a prior session instead of replaying history in the prompt.
     if let Some(session_id) = resume {
         args.push("--resume".to_owned());
@@ -744,10 +744,10 @@ mod tests {
     #[test]
     fn a_prompt_on_stdin_opens_the_control_channel_and_sends_no_positional() {
         let args = build_claude_args(None, RunMode::Ask, ToolAccess::Default, &RunTuning::default(), None);
-        assert_eq!(&args[..5], &["-p", "--output-format", "stream-json", "--input-format", "stream-json"]);
+        assert_eq!(&args[..3], &["-p", "--input-format", "stream-json"], "no positional, input on stdin");
         // The ordinary spawn is untouched: prompt positional, no input format.
         let args = build_claude_args(Some("hi".into()), RunMode::Ask, ToolAccess::Default, &RunTuning::default(), None);
-        assert_eq!(&args[..4], &["-p", "hi", "--output-format", "stream-json"]);
+        assert_eq!(&args[..2], &["-p", "hi"]);
         assert!(!args.iter().any(|a| a == "--input-format"));
     }
 

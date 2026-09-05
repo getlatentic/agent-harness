@@ -57,9 +57,9 @@ pub(super) fn start(
         "message": { "role": "user", "content": prompt },
         "parent_tool_use_id": null,
     }))?;
-    let pump_handle = handle.clone();
+    let reader = handle.clone();
     let servers = Arc::new(servers);
-    std::thread::spawn(move || pump(events, pump_handle, servers, on_event));
+    std::thread::spawn(move || relay(events, reader, servers, on_event));
     Ok(handle)
 }
 
@@ -72,7 +72,7 @@ fn write(handle: &ProcessHandle, message: &Value) -> Result<(), Error> {
 /// What one stdout line is, from the control channel's point of view.
 enum Line {
     /// The CLI asks the host something; answered off this thread.
-    Request { request_id: String, request: Value },
+    Request { id: String, request: Value },
     /// The answer to our own `initialize`, or a cancel for a request already
     /// answered. Neither reaches the consumer.
     Housekeeping,
@@ -84,52 +84,45 @@ enum Line {
 }
 
 fn classify(line: &str) -> Line {
-    let trimmed = line.trim_start();
-    // A cheap gate before parsing: control lines and the result carry these
-    // markers; stream deltas mostly do not, and one that does simply gets
-    // parsed and classified correctly.
-    if !trimmed.starts_with('{') || !(trimmed.contains("control_") || trimmed.contains("\"result\"")) {
-        return Line::Other;
-    }
-    let Ok(value) = serde_json::from_str::<Value>(trimmed) else { return Line::Other };
-    match value.get("type").and_then(Value::as_str) {
-        Some("control_request") => match (value.get("request_id").and_then(Value::as_str), value.get("request")) {
-            (Some(id), Some(request)) => Line::Request { request_id: id.to_owned(), request: request.clone() },
-            _ => Line::Housekeeping,
-        },
-        Some("control_response") | Some("control_cancel_request") | Some("keep_alive") => Line::Housekeeping,
-        Some("result") => Line::Result,
+    let Ok(value) = serde_json::from_str::<Value>(line) else { return Line::Other };
+    match (value["type"].as_str(), value["request_id"].as_str()) {
+        (Some("control_request"), Some(id)) => Line::Request { id: id.to_owned(), request: value["request"].clone() },
+        (Some("control_response" | "control_cancel_request" | "keep_alive"), _) => Line::Housekeeping,
+        (Some("result"), _) => Line::Result,
         _ => Line::Other,
     }
 }
 
 /// Read the child until it exits: answer control requests, forward everything
 /// else as the adapter always has.
-fn pump(events: Receiver<Event>, handle: ProcessHandle, servers: Arc<Vec<ToolServer>>, on_event: RunCallback) {
+fn relay(events: Receiver<Event>, handle: ProcessHandle, servers: Arc<Vec<ToolServer>>, on_event: RunCallback) {
     for event in events {
-        let mut close_after = false;
-        if let Event::Stdout { line, .. } = &event {
-            match classify(line) {
-                Line::Request { request_id, request } => {
-                    // Off this thread: a host tool may take as long as it likes,
-                    // and the reader must keep draining the pipe meanwhile.
-                    let (handle, servers) = (handle.clone(), Arc::clone(&servers));
-                    std::thread::spawn(move || answer(&handle, &servers, request_id, &request));
-                    continue;
-                }
-                Line::Housekeeping => continue,
-                Line::Result => close_after = true,
-                Line::Other => {}
+        let line = match &event {
+            Event::Stdout { line, .. } => classify(line),
+            _ => Line::Other,
+        };
+        match line {
+            Line::Request { id, request } => {
+                // Off this thread: a host tool may take as long as it likes,
+                // and the reader must keep draining the pipe meanwhile.
+                let (handle, servers) = (handle.clone(), Arc::clone(&servers));
+                std::thread::spawn(move || answer(&handle, &servers, id, &request));
             }
+            Line::Housekeeping => {}
+            Line::Result => {
+                forward(event, &on_event);
+                // Best-effort: a child that already exited has no stdin to
+                // close, and its `Exited` is on its way regardless.
+                let _ = handle.close_stdin();
+            }
+            Line::Other => forward(event, &on_event),
         }
-        for normalized in normalize_process_event(event, parse_claude_line) {
-            (*on_event)(normalized);
-        }
-        if close_after {
-            // Best-effort: a child that already exited has no stdin to close,
-            // and its `Exited` is on its way regardless.
-            let _ = handle.close_stdin();
-        }
+    }
+}
+
+fn forward(event: Event, on_event: &RunCallback) {
+    for normalized in normalize_process_event(event, parse_claude_line) {
+        (*on_event)(normalized);
     }
 }
 
@@ -177,15 +170,15 @@ mod tests {
     #[test]
     fn lines_are_sorted_into_what_the_channel_needs_to_do_with_them() {
         let req = line(json!({"type":"control_request","request_id":"r1","request":{"subtype":"mcp_message"}}));
-        assert!(matches!(classify(&req), Line::Request { request_id, .. } if request_id == "r1"));
+        assert!(matches!(classify(&req), Line::Request { id, .. } if id == "r1"));
         assert!(matches!(classify(&line(json!({"type":"control_response","response":{}}))), Line::Housekeeping));
         assert!(matches!(classify(&line(json!({"type":"control_cancel_request","request_id":"r1"}))), Line::Housekeeping));
         assert!(matches!(classify(&line(json!({"type":"result","is_error":false}))), Line::Result));
         assert!(matches!(classify(&line(json!({"type":"assistant","message":{}}))), Line::Other));
         assert!(matches!(classify("not json"), Line::Other));
-        // A text delta that merely mentions the marker is still an ordinary line.
-        let delta = line(json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"see \"result\" and control_"}}}));
-        assert!(matches!(classify(&delta), Line::Other));
+        // A request nobody could answer — no id to answer it under — is left to
+        // the parser like any other line rather than swallowed.
+        assert!(matches!(classify(&line(json!({"type":"control_request","request":{}}))), Line::Other));
     }
 
     fn shop() -> Vec<ToolServer> {

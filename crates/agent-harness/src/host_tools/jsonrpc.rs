@@ -19,11 +19,14 @@ const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
 /// adapter acknowledges on its own protocol. `Some` for a request — a result or
 /// a JSON-RPC error, both carrying the request's `id`.
 pub(crate) fn serve(server: &ToolServer, message: &Value) -> Option<Value> {
-    let id = message.get("id").filter(|id| !id.is_null())?.clone();
-    let Some(method) = message.get("method").and_then(Value::as_str) else {
+    let id = message["id"].clone();
+    if id.is_null() {
+        return None;
+    }
+    let Some(method) = message["method"].as_str() else {
         return Some(error(id, -32600, "invalid request: no method"));
     };
-    let params = message.get("params").cloned().unwrap_or(Value::Null);
+    let params = message["params"].clone();
     Some(match method {
         "initialize" => result(id, initialize(server, &params)),
         "ping" => result(id, json!({})),
@@ -36,10 +39,7 @@ pub(crate) fn serve(server: &ToolServer, message: &Value) -> Option<Value> {
 fn initialize(server: &ToolServer, params: &Value) -> Value {
     // Echo the client's revision: the tool surface here is the same under every
     // revision so far, and a mismatch is what makes a client refuse the server.
-    let version = params
-        .get("protocolVersion")
-        .and_then(Value::as_str)
-        .unwrap_or(DEFAULT_PROTOCOL_VERSION);
+    let version = params["protocolVersion"].as_str().unwrap_or(DEFAULT_PROTOCOL_VERSION);
     json!({
         "protocolVersion": version,
         "capabilities": { "tools": {} },
@@ -63,7 +63,7 @@ fn tool_list(server: &ToolServer) -> Vec<Value> {
 }
 
 fn tools_call(server: &ToolServer, id: Value, params: &Value) -> Value {
-    let Some(name) = params.get("name").and_then(Value::as_str) else {
+    let Some(name) = params["name"].as_str() else {
         return error(id, -32602, "invalid params: tools/call needs a tool name");
     };
     if server.tool(name).is_none() {
@@ -71,7 +71,10 @@ fn tools_call(server: &ToolServer, id: Value, params: &Value) -> Value {
         // a result with `isError`, below, so the model can read the failure.
         return error(id, -32602, &format!("unknown tool: {name}"));
     }
-    let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let arguments = match &params["arguments"] {
+        Value::Null => json!({}),
+        given => given.clone(),
+    };
     let (text, is_error) = match server.call(name, arguments) {
         Ok(text) => (text, false),
         Err(text) => (text, true),

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::host_tools::call_guarded;
 use crate::{HostTool, ToolKind, ToolServer};
 
 use super::{Tool, ToolCtx, ToolOutcome};
@@ -14,7 +15,6 @@ use super::{Tool, ToolCtx, ToolOutcome};
 /// (`<server>_<tool>`), so a host can move a tool between an in-process server
 /// and an external one without the model seeing a different name.
 pub(crate) struct HostToolAdapter {
-    server: ToolServer,
     tool: Arc<dyn HostTool>,
     id: String,
 }
@@ -39,8 +39,9 @@ impl Tool for HostToolAdapter {
     }
     fn execute(&self, args: &Value, _ctx: &ToolCtx) -> ToolOutcome {
         let arguments = if args.is_object() { args.clone() } else { Value::Object(Default::default()) };
-        match self.server.call(self.tool.name(), arguments) {
-            Ok(text) => ToolOutcome::ok(if text.trim().is_empty() { "(no content)".to_owned() } else { text }),
+        match call_guarded(self.tool.as_ref(), arguments) {
+            Ok(text) if text.trim().is_empty() => ToolOutcome::ok("(no content)"),
+            Ok(text) => ToolOutcome::ok(text),
             Err(text) => ToolOutcome::err(text),
         }
     }
@@ -48,18 +49,14 @@ impl Tool for HostToolAdapter {
 
 /// Every tool on every server, as [`Tool`]s for the run's set.
 pub(crate) fn tools(servers: &[ToolServer]) -> Vec<Box<dyn Tool>> {
-    servers
-        .iter()
-        .flat_map(|server| {
-            server.tools().iter().map(move |tool| {
-                Box::new(HostToolAdapter {
-                    server: server.clone(),
-                    tool: Arc::clone(tool),
-                    id: format!("{}_{}", server.name(), tool.name()),
-                }) as Box<dyn Tool>
-            })
-        })
-        .collect()
+    let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+    for server in servers {
+        for tool in server.tools() {
+            let id = format!("{}_{}", server.name(), tool.name());
+            tools.push(Box::new(HostToolAdapter { tool: Arc::clone(tool), id }));
+        }
+    }
+    tools
 }
 
 #[cfg(test)]
