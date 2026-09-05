@@ -292,6 +292,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "claude")]
     #[test]
     fn custom_harness_registers_and_resolves_alongside_builtins() {
         let reg = Registry::new().register(Claude::new()).register(Acme);
