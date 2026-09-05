@@ -56,7 +56,7 @@ pub fn provider_models(provider: &str) -> Vec<ModelChoice> {
 mod imp {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
-    use std::sync::OnceLock;
+    use std::sync::LazyLock;
     use std::time::Duration;
 
     use serde::Deserialize;
@@ -128,8 +128,8 @@ mod imp {
     /// with no cache it fetches once and persists it. A miss caches `None`, so
     /// callers fall back without retrying every call.
     fn catalog() -> Option<&'static Catalog> {
-        static CACHE: OnceLock<Option<Catalog>> = OnceLock::new();
-        CACHE.get_or_init(|| load_or_fetch(fetch_remote)).as_ref()
+        static CACHE: LazyLock<Option<Catalog>> = LazyLock::new(|| load_or_fetch(fetch_remote));
+        CACHE.as_ref()
     }
 
     /// Prefer the on-disk cache — instant, and works offline — refreshing it in
@@ -137,7 +137,7 @@ mod imp {
     /// once and persist.
     ///
     /// `fetch` is a parameter so this can be exercised without the network, and
-    /// without the process-wide `OnceLock` in [`catalog`] fixing the outcome
+    /// without the process-wide `LazyLock` in [`catalog`] fixing the outcome
     /// for every later test in the binary.
     ///
     /// A body is parsed before it is written: caching one we could not read
@@ -267,23 +267,11 @@ mod imp {
     mod tests {
         use super::*;
 
-        /// `AGENT_HARNESS_CACHE_DIR` is process-global, so these cannot run
-        /// beside each other.
-        static CACHE_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
         fn with_cache_dir<T>(tag: &str, body: impl FnOnce(&Path) -> T) -> T {
-            let _guard = CACHE_ENV.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let restore = std::env::var_os("AGENT_HARNESS_CACHE_DIR");
             let dir = std::env::temp_dir().join(format!("hl-cache-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
-            std::env::set_var("AGENT_HARNESS_CACHE_DIR", &dir);
-
+            let _env = crate::test_env::set("AGENT_HARNESS_CACHE_DIR", &dir.to_string_lossy());
             let out = body(&dir);
-
-            match restore {
-                Some(value) => std::env::set_var("AGENT_HARNESS_CACHE_DIR", value),
-                None => std::env::remove_var("AGENT_HARNESS_CACHE_DIR"),
-            }
             let _ = std::fs::remove_dir_all(&dir);
             out
         }
@@ -443,18 +431,12 @@ mod imp {
             // `cache_path` returning None means fetch-only. Writing to some
             // default location instead would put a 4 MB file somewhere the host
             // never agreed to.
-            let _guard = CACHE_ENV.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let restore = std::env::var_os("AGENT_HARNESS_CACHE_DIR");
-            std::env::remove_var("AGENT_HARNESS_CACHE_DIR");
+            let _env = crate::test_env::unset("AGENT_HARNESS_CACHE_DIR");
 
             assert!(cache_path().is_none());
             write_cache(SAMPLE); // must not panic, must not write
             assert!(load_cached().is_none());
             assert!(!cache_is_stale(), "nothing to refresh is not a stale cache");
-
-            if let Some(value) = restore {
-                std::env::set_var("AGENT_HARNESS_CACHE_DIR", value);
-            }
         }
 
         #[test]

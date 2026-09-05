@@ -13,6 +13,8 @@
 //! cargo test --all-features --test codex_live -- --ignored
 //! ```
 
+#![cfg(feature = "codex")]
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;

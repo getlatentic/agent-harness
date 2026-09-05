@@ -371,4 +371,3 @@ mod tests {
         assert!(compact.contains("stop calling tools"), "must know when to finish");
     }
 }
-

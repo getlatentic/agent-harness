@@ -60,70 +60,67 @@ pub fn parse_claude_line(line: &str) -> ParsedLine {
             let event_type = event.get("type").and_then(Value::as_str);
 
             // Streamed assistant text.
-            if event_type == Some("content_block_delta") {
-                if let Some(delta) = event.get("delta").and_then(Value::as_object) {
-                    if delta.get("type").and_then(Value::as_str) == Some("text_delta") {
-                        if let Some(text) = delta.get("text").and_then(Value::as_str) {
-                            if !text.is_empty() {
-                                return ParsedLine {
-                                    text: Some(text.to_owned()),
-                                    ..ParsedLine::default()
-                                };
-                            }
-                        }
-                    }
-                    // Extended-thinking deltas (Anthropic streaming):
-                    // `delta.type == "thinking_delta"` carries the reasoning
-                    // text in `delta.thinking`. Surfaced as a distinct
-                    // Thinking event (harmless no-op when the model isn't
-                    // thinking, since the arm never matches).
-                    if delta.get("type").and_then(Value::as_str) == Some("thinking_delta") {
-                        if let Some(thinking) = delta.get("thinking").and_then(Value::as_str) {
-                            if !thinking.is_empty() {
-                                return ParsedLine {
-                                    thinking: Some(thinking.to_owned()),
-                                    ..ParsedLine::default()
-                                };
-                            }
-                        }
-                    }
+            if event_type == Some("content_block_delta")
+                && let Some(delta) = event.get("delta").and_then(Value::as_object)
+            {
+                if delta.get("type").and_then(Value::as_str) == Some("text_delta")
+                    && let Some(text) = delta.get("text").and_then(Value::as_str)
+                    && !text.is_empty()
+                {
+                    return ParsedLine {
+                        text: Some(text.to_owned()),
+                        ..ParsedLine::default()
+                    };
+                }
+                // Extended-thinking deltas (Anthropic streaming):
+                // `delta.type == "thinking_delta"` carries the reasoning
+                // text in `delta.thinking`. Surfaced as a distinct
+                // Thinking event (harmless no-op when the model isn't
+                // thinking, since the arm never matches).
+                if delta.get("type").and_then(Value::as_str) == Some("thinking_delta")
+                    && let Some(thinking) = delta.get("thinking").and_then(Value::as_str)
+                    && !thinking.is_empty()
+                {
+                    return ParsedLine {
+                        thinking: Some(thinking.to_owned()),
+                        ..ParsedLine::default()
+                    };
                 }
             }
 
             // A tool call beginning → structured ToolStart (id + name) so
             // the UI renders a state-ful card, ended by the matching
             // tool_result (the `user` arm below).
-            if event_type == Some("content_block_start") {
-                if let Some(block) = event.get("content_block").and_then(Value::as_object) {
-                    if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                        let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
-                        // AskUserQuestion is surfaced as selectable chips (from
-                        // the aggregate `assistant` line below), not a tool card
-                        // — and headless Claude denies the tool, so its card
-                        // would only ever show as a failure. Suppress it.
-                        if name == "AskUserQuestion" {
-                            return ParsedLine::default();
-                        }
-                        let id = block.get("id").and_then(Value::as_str).unwrap_or_default();
-                        // In streaming mode the tool's arguments are NOT here:
-                        // `content_block_start` carries an empty `input: {}`,
-                        // and the real args arrive incrementally as
-                        // `input_json_delta` fragments. Reconstructing them
-                        // would mean accumulating partial JSON and delaying the
-                        // card — so leave `input: None` (honest: the card still
-                        // renders, just without args) rather than emit `{}`.
-                        // The tool's *output* is captured at tool_result below.
-                        return ParsedLine {
-                            tool_start: Some(ToolCallStart {
-                                tool_call_id: id.to_owned(),
-                                name: name.to_owned(),
-                                input: None,
-                                tool_kind: claude_tool_kind(name),
-                            }),
-                            ..ParsedLine::default()
-                        };
-                    }
+            if event_type == Some("content_block_start")
+                && let Some(block) = event.get("content_block").and_then(Value::as_object)
+                && block.get("type").and_then(Value::as_str) == Some("tool_use")
+            {
+                let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
+                // AskUserQuestion is surfaced as selectable chips (from
+                // the aggregate `assistant` line below), not a tool card
+                // — and headless Claude denies the tool, so its card
+                // would only ever show as a failure. Suppress it.
+                if name == "AskUserQuestion" {
+                    return ParsedLine::default();
                 }
+                let id = block.get("id").and_then(Value::as_str).unwrap_or_default();
+                // In streaming mode the tool's arguments are NOT here:
+                // `content_block_start` carries an empty `input: {}`,
+                // and the real args arrive incrementally as
+                // `input_json_delta` fragments. Reconstructing them
+                // would mean accumulating partial JSON and delaying the
+                // card — so leave `input: None` (honest: the card still
+                // renders, just without args) rather than emit `{}`.
+                // The tool's *output* is captured at tool_result below.
+                return ParsedLine {
+                    tool_start: Some(ToolCallStart {
+                        tool_call_id: id.to_owned(),
+                        name: name.to_owned(),
+                        input: None,
+                        tool_kind: claude_tool_kind(name),
+                    }),
+                    ..ParsedLine::default()
+                };
             }
 
             ParsedLine::default()
@@ -165,22 +162,22 @@ pub fn parse_claude_line(line: &str) -> ParsedLine {
                     let Some(block) = item.as_object() else {
                         continue;
                     };
-                    if block.get("type").and_then(Value::as_str) == Some("tool_result") {
-                        if let Some(id) = block.get("tool_use_id").and_then(Value::as_str) {
-                            let is_error =
-                                block.get("is_error").and_then(Value::as_bool).unwrap_or(false);
-                            // `content` is the tool's result — a string, or an
-                            // array of `{type:"text", text}` blocks.
-                            let output = block.get("content").and_then(claude_tool_result_text);
-                            return ParsedLine {
-                                tool_end: Some(ToolCallEnd {
-                                    tool_call_id: id.to_owned(),
-                                    ok: !is_error,
-                                    output,
-                                }),
-                                ..ParsedLine::default()
-                            };
-                        }
+                    if block.get("type").and_then(Value::as_str) == Some("tool_result")
+                        && let Some(id) = block.get("tool_use_id").and_then(Value::as_str)
+                    {
+                        let is_error =
+                            block.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+                        // `content` is the tool's result — a string, or an
+                        // array of `{type:"text", text}` blocks.
+                        let output = block.get("content").and_then(claude_tool_result_text);
+                        return ParsedLine {
+                            tool_end: Some(ToolCallEnd {
+                                tool_call_id: id.to_owned(),
+                                ok: !is_error,
+                                output,
+                            }),
+                            ..ParsedLine::default()
+                        };
                     }
                 }
             }

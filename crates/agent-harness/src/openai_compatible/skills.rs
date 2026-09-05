@@ -57,10 +57,10 @@ fn discover_in(roots: &[PathBuf]) -> Vec<Skill> {
     let mut seen = HashSet::new();
     for root in roots {
         for path in skill_files(root) {
-            if let Some(skill) = read_skill(&path) {
-                if seen.insert(skill.name.clone()) {
-                    skills.push(skill);
-                }
+            if let Some(skill) = read_skill(&path)
+                && seen.insert(skill.name.clone())
+            {
+                skills.push(skill);
             }
         }
     }

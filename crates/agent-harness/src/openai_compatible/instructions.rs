@@ -132,10 +132,10 @@ fn resolve(cwd: &Path, sources: &InstructionSources) -> Vec<PathBuf> {
         seen.insert(global.clone());
     }
     for dir in project_dirs(cwd) {
-        if let Some(found) = first_in(&dir) {
-            if seen.insert(found.clone()) {
-                files.push(found);
-            }
+        if let Some(found) = first_in(&dir)
+            && seen.insert(found.clone())
+        {
+            files.push(found);
         }
     }
     files

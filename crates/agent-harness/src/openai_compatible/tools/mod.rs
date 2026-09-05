@@ -420,7 +420,7 @@ impl ToolSet {
         }
         let subject = tool.permission_subject(args);
         for rule in &self.permissions {
-            let tool_matches = rule.tool.as_deref().map_or(true, |t| t == tool.id());
+            let tool_matches = rule.tool.as_deref().is_none_or(|t| t == tool.id());
             let pattern_matches = match (&rule.pattern, &subject) {
                 (None, _) => true,
                 (Some(p), Some(s)) => s.contains(p.as_str()),
@@ -565,7 +565,7 @@ pub(crate) enum Keep {
     Head,
     /// Keep the end — for a tool whose diagnostic lands last (`bash`'s exit/error
     /// lines), so a small model isn't shown only the leading noise.
-    #[allow(dead_code)] // a direction tools may request; bash uses HeadAndTail
+    #[allow(dead_code)] // a direction tools may request; bash uses HeadAndTail, tests use this
     Tail,
     /// Keep both ends (split the budget), with a middle marker for the gap — the
     /// `bash` case: the command and its trailing error/exit are both preserved.
@@ -1123,12 +1123,12 @@ mod tests {
     /// not a path on Windows, where a bogus cwd fails the spawn outright
     /// ("The directory name is invalid").
     fn any_cwd() -> &'static Path {
-        static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-        DIR.get_or_init(|| {
+        static DIR: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
             let d = std::env::temp_dir().join("hl-tools-cwd");
             let _ = std::fs::create_dir_all(&d);
             d
-        })
+        });
+        &DIR
     }
 
     /// Sleep ~5s in the platform's shell — Windows `cmd` has no `sleep`.

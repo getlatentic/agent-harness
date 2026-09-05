@@ -52,6 +52,11 @@ pub(crate) mod jsonrpc;
 /// `call` runs on a thread the adapter owns, so it may block; a panic inside it
 /// is caught and reported to the agent as a failed call rather than ending the
 /// run.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a tool the agent can be offered",
+    label = "implement `HostTool` for it, or wrap a closure in `FnTool::new`",
+    note = "a `HostTool` is a name, a description, a JSON Schema for its arguments, and a `call`"
+)]
 pub trait HostTool: Send + Sync {
     /// The name the agent calls it by. Unique within its [`ToolServer`].
     fn name(&self) -> &str;

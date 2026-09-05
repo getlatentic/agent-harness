@@ -1052,7 +1052,7 @@ mod tests {
         // stale variable in the user's shell. `ApiKey` removes the question —
         // a key comes from one place or the other, never both — so what is
         // left worth asserting is that `Value` does not read the environment.
-        std::env::set_var("ACME_KEY", "from-the-environment");
+        let _env = crate::test_env::set("ACME_KEY", "from-the-environment");
         let h = OpenHarness::custom(OpenHarnessConfig {
             id: "acme".to_owned(),
             display_name: "Acme".to_owned(),
@@ -1062,7 +1062,6 @@ mod tests {
         });
         assert_eq!(h.api_key.resolve().as_deref(), Some("from-the-host"));
         assert!(h.api_key.env_var().is_none(), "a value names no variable to tell the user about");
-        std::env::remove_var("ACME_KEY");
     }
 
     #[test]
@@ -1097,17 +1096,16 @@ mod tests {
         let error = awaiting.readiness().error.unwrap_or_default();
         assert!(error.contains("Add an API key"), "no variable to name: {error}");
 
-        std::env::set_var("ACME_ENV_KEY", "sk-from-env");
+        let _env = crate::test_env::set("ACME_ENV_KEY", "sk-from-env");
         let from_env = harness(ApiKey::Env("ACME_ENV_KEY".to_owned()));
         assert!(from_env.features().credential_required);
         assert!(from_env.readiness().ready);
         assert_eq!(from_env.credential().keychain_account, "ACME_ENV_KEY");
-        std::env::remove_var("ACME_ENV_KEY");
     }
 
     #[test]
     fn an_exported_but_empty_variable_is_not_a_credential() {
-        std::env::set_var("ACME_BLANK", "   ");
+        let _env = crate::test_env::set("ACME_BLANK", "   ");
         let harness = OpenHarness::custom(OpenHarnessConfig {
             id: "acme".to_owned(),
             display_name: "Acme".to_owned(),
@@ -1117,7 +1115,6 @@ mod tests {
         });
         assert!(harness.api_key.resolve().is_none(), "blank is a misconfiguration, not a key");
         assert!(!harness.readiness().ready);
-        std::env::remove_var("ACME_BLANK");
     }
 
     #[test]

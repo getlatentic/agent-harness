@@ -36,7 +36,7 @@ use harness::{ApiKey,
 ///
 /// `patience` is in 50ms ticks: a plain completion answers in seconds, while a
 /// tool round trip spends a turn on the call and another on the answer.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn live_run(
     provider: &str,
     base_url: &str,
@@ -90,8 +90,8 @@ fn live_run(
         thread::sleep(std::time::Duration::from_millis(50));
     }
     assert!(done.load(Ordering::SeqCst), "{provider}: run did not finish in time");
-    let events = events.lock().unwrap().clone();
-    events
+
+    events.lock().unwrap().clone()
 }
 
 /// Drive one hosted provider through a full run and assert the *protocol*.

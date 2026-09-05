@@ -16,6 +16,8 @@
 //! cargo test --all-features --test claude_live -- --ignored
 //! ```
 
+#![cfg(feature = "claude")]
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;

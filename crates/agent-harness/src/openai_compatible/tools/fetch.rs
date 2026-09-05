@@ -109,10 +109,12 @@ fn transfer(url: &str, format: &str, timeout: Option<u64>) -> ToolOutcome {
         Err(e) => return ToolOutcome::err(format!("webfetch: request to {url} failed: {e}")),
     };
     // Reject early on a declared content length over the cap.
-    if let Some(len) = resp.header("Content-Length").and_then(|l| l.parse::<u64>().ok()) {
-        if len > MAX_RESPONSE_BYTES {
-            return ToolOutcome::err("webfetch: response too large (exceeds 5MB limit)".to_owned());
-        }
+    if let Some(len) = resp
+        .header("Content-Length")
+        .and_then(|l| l.parse::<u64>().ok())
+        && len > MAX_RESPONSE_BYTES
+    {
+        return ToolOutcome::err("webfetch: response too large (exceeds 5MB limit)".to_owned());
     }
     let content_type = resp.header("Content-Type").unwrap_or("").to_owned();
     // Read at most the cap + 1 byte so an over-limit body is detected.

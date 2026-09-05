@@ -27,7 +27,7 @@ struct BashArgs {
     /// The shell command to run.
     command: String,
     /// A short (5-10 word) description of what the command does.
-    #[allow(dead_code)] // advertised so the model states intent; not acted on here
+    #[expect(dead_code, reason = "advertised so the model states intent; not acted on here")]
     description: Option<String>,
     /// Run directory, relative to the working directory (default: the working directory).
     workdir: Option<String>,
@@ -291,9 +291,8 @@ mod env_tests {
     fn a_shell_call_cannot_read_the_host_key() {
         // The exposure this closes: the host holds a provider key, and the
         // model asks the shell to echo it back.
-        std::env::set_var("OPENROUTER_API_KEY", "sk-or-v1-SENTINEL");
+        let _env = crate::test_env::set("OPENROUTER_API_KEY", "sk-or-v1-SENTINEL");
         assert!(!shell_sees("OPENROUTER_API_KEY").contains("SENTINEL"));
-        std::env::remove_var("OPENROUTER_API_KEY");
     }
 
     #[test]
@@ -307,9 +306,8 @@ mod env_tests {
             ("SSH_AUTH_SOCK", "/tmp/ssh-SENTINEL/agent.1"),
             ("NPM_AUTH", "SENTINEL"),
         ] {
-            std::env::set_var(name, value);
+            let _env = crate::test_env::set(name, value);
             assert!(!shell_sees(name).contains("SENTINEL"), "{name} leaked");
-            std::env::remove_var(name);
         }
     }
 
@@ -322,11 +320,10 @@ mod env_tests {
             ("PASSWORD_STORE_DIR", "/home/x/.password-store"),
             ("TOKEN_BUDGET", "4096"),
         ] {
-            std::env::set_var(name, value);
+            let _env = crate::test_env::set(name, value);
             // Still withheld — but by a rule that is honest about it: anything
             // not named is withheld, secret or not. The host adds what it needs.
             assert!(!is_allowed(name));
-            std::env::remove_var(name);
         }
     }
 

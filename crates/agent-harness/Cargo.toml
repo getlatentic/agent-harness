@@ -89,9 +89,28 @@ tempfile = "3"
 
 # The readiness table covers every archetype, so it needs the ACP adapter as
 # well as the default CLI ones.
+# Every example names the adapters it drives, so a `--no-default-features`
+# build that includes examples skips the ones it cannot compile instead of
+# failing on them.
+[[example]]
+name = "claude"
+required-features = ["claude"]
+
+[[example]]
+name = "codex"
+required-features = ["codex"]
+
+[[example]]
+name = "setup"
+required-features = ["claude"]
+
+[[example]]
+name = "verify_enrichment"
+required-features = ["claude"]
+
 [[example]]
 name = "discover"
-required-features = ["acp"]
+required-features = ["acp", "claude", "codex"]
 
 # The web playground drives a run from the browser over SSE; it needs the local
 # runtime (`openai-compatible`) + the ACP adapter (`acp`) to offer both

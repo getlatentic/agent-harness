@@ -148,8 +148,8 @@ fn collect(harness: &OpenHarness, request: RunRequest) -> Vec<RunEvent> {
         thread::sleep(std::time::Duration::from_millis(25));
     }
     let _ = handle;
-    let out = events.lock().unwrap().clone();
-    out
+
+    events.lock().unwrap().clone()
 }
 
 fn ask(prompt: &str) -> RunRequest {
