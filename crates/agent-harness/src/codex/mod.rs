@@ -101,6 +101,7 @@ impl Harness for CodexHarness {
             effort: true,
             login: true,
             custom_instructions: true,
+            structured_output: true,
             ..Default::default()
         }
     }
@@ -159,7 +160,13 @@ impl Harness for CodexHarness {
             tools,
             "the Codex CLI has no flag that withholds its tools",
         )?;
-        let args = build_codex_args(prompt, mode, &tuning, resume.as_deref());
+        // `--output-schema` takes a path, not a document, so the schema is written
+        // to a file of its own for this run and removed when the run exits.
+        let schema_file = match &tuning.output_schema {
+            Some(schema) => Some(write_output_schema(&run_id, schema).map_err(Error::spawn)?),
+            None => None,
+        };
+        let args = build_codex_args(prompt, mode, &tuning, resume.as_deref(), schema_file.as_deref());
         let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
         // No env injected — Codex uses its own auth. PATH augmentation
@@ -173,7 +180,9 @@ impl Harness for CodexHarness {
         // [`CodexStreamParser`]). The callback runs on cli-stream's reader
         // threads, so the parser is held behind an `Arc<Mutex>` — the same
         // shape as bob's.
-        let parser = Arc::new(Mutex::new(CodexStreamParser::new()));
+        let parser = Arc::new(Mutex::new(
+            CodexStreamParser::new().expecting_json(tuning.output_schema.is_some()),
+        ));
         let program = tuning.binary_path.clone().unwrap_or_else(|| PathBuf::from(&self.command));
         let handle = Command::new(program)
             .cwd(cwd)
@@ -181,6 +190,11 @@ impl Harness for CodexHarness {
             .args(args)
             .resolve_cli()
             .stream(move |event| {
+                if let crate::Event::Exited { .. } = &event
+                    && let Some(path) = &schema_file
+                {
+                    let _ = std::fs::remove_file(path);
+                }
                 // Recover a poisoned lock rather than panic on a reader
                 // thread — parsing is total, so the parser is never
                 // mid-corruption.
@@ -258,6 +272,7 @@ fn build_codex_args(
     mode: RunMode,
     tuning: &RunTuning,
     resume: Option<&str>,
+    output_schema: Option<&std::path::Path>,
 ) -> Vec<String> {
     // `exec` always; `exec resume <id>` to continue a prior session instead of
     // replaying history in the prompt. The session id is a positional *after*
@@ -308,6 +323,13 @@ fn build_codex_args(
         args.push("-c".to_owned());
         args.push(format!("developer_instructions={}", toml_basic_string(extra)));
     }
+    // The shape the final message must fit; Codex answers with exactly that JSON
+    // as its last `agent_message`, which the parser also surfaces as
+    // `RunEvent::StructuredOutput`.
+    if let Some(path) = output_schema {
+        args.push("--output-schema".to_owned());
+        args.push(path.to_string_lossy().into_owned());
+    }
     if matches!(mode, RunMode::Edit) {
         // Low-friction sandboxed auto-execution so Codex can apply
         // edits without interactive approval. (Exact sandbox flags
@@ -324,6 +346,14 @@ fn build_codex_args(
     args
 }
 
+
+/// The run's output schema as a file, since `--output-schema` reads one.
+fn write_output_schema(run_id: &str, schema: &Value) -> Result<PathBuf, String> {
+    let path = std::env::temp_dir().join(format!("harness-codex-schema-{run_id}.json"));
+    std::fs::write(&path, schema.to_string())
+        .map_err(|e| format!("writing the output schema to {}: {e}", path.display()))?;
+    Ok(path)
+}
 
 /// A TOML basic string: quoted, with the escapes the spec requires. `-c
 /// key=value` parses `value` as TOML, so an unescaped quote or newline in a
@@ -575,7 +605,7 @@ mod tests {
         {
             let tuning =
                 RunTuning { extra_instructions: Some(instructions.to_owned()), ..RunTuning::default() };
-            let args = build_codex_args("hi".to_owned(), RunMode::Ask, &tuning, None);
+            let args = build_codex_args("hi".to_owned(), RunMode::Ask, &tuning, None, None);
             assert_eq!(config_value(&args, "developer_instructions"), expected, "{instructions:?}");
         }
     }
@@ -588,7 +618,7 @@ mod tests {
         let raw = "say \"hi\"\nthen\tstop\\done";
         let tuning =
             RunTuning { extra_instructions: Some(raw.to_owned()), ..RunTuning::default() };
-        let args = build_codex_args("hi".to_owned(), RunMode::Ask, &tuning, None);
+        let args = build_codex_args("hi".to_owned(), RunMode::Ask, &tuning, None, None);
         let emitted = config_value(&args, "developer_instructions").expect("key emitted");
         assert_eq!(emitted, r#""say \"hi\"\nthen\tstop\\done""#);
         let parsed: String =
@@ -603,7 +633,7 @@ mod tests {
             extra_args: vec!["-c".to_owned(), "developer_instructions=\"host copy\"".to_owned()],
             ..RunTuning::default()
         };
-        let args = build_codex_args("hi".to_owned(), RunMode::Ask, &tuning, None);
+        let args = build_codex_args("hi".to_owned(), RunMode::Ask, &tuning, None, None);
         assert_eq!(
             args.iter().filter(|a| a.starts_with("developer_instructions=")).count(),
             1,
@@ -612,13 +642,25 @@ mod tests {
 
         // Positive arm: without the host's copy the adapter emits its own.
         let adapter_only = RunTuning { extra_args: Vec::new(), ..tuning };
-        let args = build_codex_args("hi".to_owned(), RunMode::Ask, &adapter_only, None);
+        let args = build_codex_args("hi".to_owned(), RunMode::Ask, &adapter_only, None, None);
         assert_eq!(config_value(&args, "developer_instructions"), Some(r#""adapter copy""#));
     }
 
     #[test]
+    fn an_output_schema_travels_as_a_file_the_cli_can_read() {
+        let schema = serde_json::json!({ "type": "object", "properties": { "code": { "type": "string" } } });
+        let path = write_output_schema("run-77", &schema).expect("written");
+        assert_eq!(serde_json::from_str::<Value>(&std::fs::read_to_string(&path).unwrap()).unwrap(), schema);
+        let args = build_codex_args("hi".into(), RunMode::Ask, &RunTuning::default(), None, Some(&path));
+        assert_eq!(flag_value(&args, "--output-schema"), Some(path.to_str().unwrap()));
+        let without = build_codex_args("hi".into(), RunMode::Ask, &RunTuning::default(), None, None);
+        assert!(!without.iter().any(|a| a == "--output-schema"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn codex_args_default_omit_model_but_force_low_effort() {
-        let args = build_codex_args("hi".to_owned(), RunMode::Ask, &RunTuning::default(), None);
+        let args = build_codex_args("hi".to_owned(), RunMode::Ask, &RunTuning::default(), None, None);
         assert_eq!(args[0], "exec");
         assert!(!args.contains(&"resume".to_owned()));
         assert!(args.contains(&"--json".to_owned()));
@@ -640,7 +682,7 @@ mod tests {
     fn codex_args_explicit_minimal_effort_is_honored() {
         let tuning =
             RunTuning { effort: Some(ReasoningEffort::Minimal), ..RunTuning::default() };
-        let args = build_codex_args("hi".to_owned(), RunMode::Ask, &tuning, None);
+        let args = build_codex_args("hi".to_owned(), RunMode::Ask, &tuning, None, None);
         assert_eq!(flag_value(&args, "-c"), Some("model_reasoning_effort=\"minimal\""));
     }
 
@@ -652,7 +694,7 @@ mod tests {
             max_turns: Some(5),
             ..RunTuning::default()
         };
-        let args = build_codex_args("hi".to_owned(), RunMode::Edit, &tuning, None);
+        let args = build_codex_args("hi".to_owned(), RunMode::Edit, &tuning, None, None);
         assert_eq!(flag_value(&args, "--model"), Some("gpt-5-codex"));
         assert_eq!(flag_value(&args, "-c"), Some("model_reasoning_effort=\"high\""));
         assert!(args.contains(&"--full-auto".to_owned()));
@@ -665,7 +707,7 @@ mod tests {
     #[test]
     fn codex_resume_uses_the_resume_subcommand_with_id_before_prompt() {
         let args =
-            build_codex_args("hi".to_owned(), RunMode::Ask, &RunTuning::default(), Some("sess-9"));
+            build_codex_args("hi".to_owned(), RunMode::Ask, &RunTuning::default(), Some("sess-9"), None);
         // `exec resume` subcommand, JSON stream + git-skip still present.
         assert_eq!(args[0], "exec");
         assert_eq!(args[1], "resume");

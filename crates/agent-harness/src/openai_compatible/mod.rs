@@ -708,6 +708,7 @@ impl Harness for OpenHarness {
             max_turns: true,
             custom_instructions: true,
             host_tools: true,
+            structured_output: true,
             ..Default::default()
         }
     }

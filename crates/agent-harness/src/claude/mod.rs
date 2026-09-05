@@ -138,6 +138,7 @@ impl Harness for ClaudeHarness {
             login: true,
             custom_instructions: true,
             host_tools: true,
+            structured_output: true,
             ..Default::default()
         }
     }
@@ -354,9 +355,37 @@ fn build_claude_args(
     // directory as empty that held the planted file. Nothing was read, which
     // is the guarantee; but a caller that scrapes an answer for tool syntax,
     // or trusts a transcript quoted inside one, will find both there.
-    if tools == ToolAccess::None && !extra_args_sets(&tuning.extra_args, "--disallowedTools") {
-        args.push("--disallowedTools".to_owned());
-        args.push("*".to_owned());
+    //
+    // With a schema the wildcard cannot be used: Claude Code enforces
+    // `--json-schema` through a `StructuredOutput` tool the model calls with its
+    // answer, and `--disallowedTools "*"` denies that call too — measured, the
+    // model tried twice, was refused, and fell back to Markdown prose. `--tools`
+    // is the availability gate, and naming only that tool leaves exactly one:
+    // against a planted file, init listed `[StructuredOutput]`, the file was
+    // unreachable, and the model said so inside the schema field. `--tools`
+    // limits the *built-in* set only — without `--strict-mcp-config` beside it
+    // (sent below) the same prompt read the file through the user's MCP servers.
+    if tools == ToolAccess::None {
+        match &tuning.output_schema {
+            Some(_) if !extra_args_sets(&tuning.extra_args, "--tools") => {
+                args.push("--tools".to_owned());
+                args.push("StructuredOutput".to_owned());
+            }
+            None if !extra_args_sets(&tuning.extra_args, "--disallowedTools") => {
+                args.push("--disallowedTools".to_owned());
+                args.push("*".to_owned());
+            }
+            _ => {}
+        }
+    }
+    // The shape the answer must fit. The result line then carries the
+    // `StructuredOutput` call's input as `structured_output`, which the parser
+    // surfaces as `RunEvent::StructuredOutput`.
+    if let Some(schema) = &tuning.output_schema
+        && !extra_args_sets(&tuning.extra_args, "--json-schema")
+    {
+        args.push("--json-schema".to_owned());
+        args.push(schema.to_string());
     }
     // A run that may call nothing has no use for connected MCP servers, and
     // pays for them: their definitions are assembled for every invocation, so
@@ -840,6 +869,30 @@ cat >/dev/null
             events.iter().any(|e| matches!(e, crate::RunEvent::Exited { exit_code: Some(0), cancelled: false, .. })),
             "exit 3/4/5 names the protocol step the adapter got wrong: {events:?}"
         );
+    }
+
+    #[test]
+    fn a_schema_rides_as_json_schema_and_swaps_the_wildcard_for_the_tool_that_carries_it() {
+        let schema = serde_json::json!({ "type": "object", "properties": { "code": { "type": "string" } } });
+        let tuning = RunTuning { output_schema: Some(schema.clone()), ..RunTuning::default() };
+
+        // A no-tools run keeps its guarantee through `--tools`, since the
+        // wildcard would deny the one tool the schema needs.
+        let none = build_claude_args(Some("hi".into()), RunMode::Ask, ToolAccess::None, &tuning, None);
+        assert_eq!(flag_value(&none, "--json-schema"), Some(schema.to_string().as_str()));
+        assert_eq!(flag_value(&none, "--tools"), Some("StructuredOutput"));
+        assert!(!none.iter().any(|a| a == "--disallowedTools"), "{none:?}");
+        assert!(none.iter().any(|a| a == "--strict-mcp-config"), "MCP servers stay out: {none:?}");
+
+        // A run that may use tools adds only the schema.
+        let default = build_claude_args(Some("hi".into()), RunMode::Ask, ToolAccess::Default, &tuning, None);
+        assert_eq!(flag_value(&default, "--json-schema"), Some(schema.to_string().as_str()));
+        assert!(!default.iter().any(|a| a == "--tools" || a == "--disallowedTools"), "{default:?}");
+
+        // Without a schema, None is exactly what it was.
+        let plain = build_claude_args(Some("hi".into()), RunMode::Ask, ToolAccess::None, &RunTuning::default(), None);
+        assert_eq!(flag_value(&plain, "--disallowedTools"), Some("*"));
+        assert!(!plain.iter().any(|a| a == "--tools" || a == "--json-schema"), "{plain:?}");
     }
 
     #[test]

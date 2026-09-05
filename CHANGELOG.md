@@ -7,6 +7,24 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+### Added
+
+- **Structured output on every CLI adapter, and as data.** `RunTuning::output_schema`
+  was honoured only by `openai-compatible`. Claude now passes `--json-schema`,
+  Codex `--output-schema` (a file per run, removed on exit), and all three report
+  the schema-fitting answer as a new `RunEvent::StructuredOutput` beside the prose
+  they always streamed. `Features::structured_output` says which adapters do.
+
+  Measured before written: Claude Code enforces the schema through a
+  `StructuredOutput` tool the model calls, and `--disallowedTools "*"` — what
+  `ToolAccess::None` sent — denied that call, so the model fell back to Markdown
+  prose. Under `None` with a schema the adapter now sends `--tools StructuredOutput`
+  instead: against a planted file that left exactly one tool, the file unreachable,
+  and the model saying so inside the schema field. `--tools` limits only the
+  built-in set; the `--strict-mcp-config` already sent under `None` is what keeps
+  the user's MCP servers out, and without it the same prompt read the file
+  through them.
+
 ### Changed
 
 - **Edition 2024; `rust-version` is now 1.88.** The floor moves from a

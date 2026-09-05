@@ -132,11 +132,21 @@ pub struct CodexStreamParser {
     /// The most recent `agent_message` text, not yet known to be a preamble
     /// (→ Activity) or the final answer (→ Text).
     pending_message: Option<String>,
+    /// The run asked for a schema, so the answer is also the data it parses to.
+    expect_json: bool,
 }
 
 impl CodexStreamParser {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether the run was given `--output-schema`: the final message is then
+    /// the JSON it asked for, and is surfaced as `RunEvent::StructuredOutput`
+    /// beside the `Text` it always was.
+    pub fn expecting_json(mut self, expect: bool) -> Self {
+        self.expect_json = expect;
+        self
     }
 
     /// Normalize one raw process event, applying the agent_message state
@@ -217,15 +227,20 @@ impl CodexStreamParser {
         }
     }
 
-    /// Emit a held message as the answer (the final assistant message).
+    /// Emit a held message as the answer (the final assistant message) — and,
+    /// when a schema was asked for and the message fits JSON, as data too.
     fn take_pending_as_answer(&mut self, run_id: &str) -> Vec<RunEvent> {
-        match self.pending_message.take() {
-            Some(text) if !text.is_empty() => vec![RunEvent::Text {
-                run_id: run_id.to_owned(),
-                delta: text,
-            }],
-            _ => Vec::new(),
-        }
+        let Some(text) = self.pending_message.take().filter(|t| !t.is_empty()) else {
+            return Vec::new();
+        };
+        let structured = self
+            .expect_json
+            .then(|| serde_json::from_str::<Value>(&text).ok())
+            .flatten()
+            .map(|value| RunEvent::StructuredOutput { run_id: run_id.to_owned(), value });
+        let mut out = vec![RunEvent::Text { run_id: run_id.to_owned(), delta: text }];
+        out.extend(structured);
+        out
     }
 }
 
@@ -432,6 +447,31 @@ fn truncate(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_schema_bound_answer_is_also_data_but_only_when_asked_for_and_only_when_it_parses() {
+        let answer = |text: &str| {
+            serde_json::json!({ "type": "item.completed", "item": { "type": "agent_message", "text": text } }).to_string()
+        };
+        let done = serde_json::json!({ "type": "turn.completed" }).to_string();
+        let run = |expect: bool, text: &str| {
+            let mut parser = CodexStreamParser::new().expecting_json(expect);
+            let mut out = parser.on_process_event(Event::Stdout { run_id: "r".into(), line: answer(text) });
+            out.extend(parser.on_process_event(Event::Stdout { run_id: "r".into(), line: done.clone() }));
+            out
+        };
+        let structured = |events: &[RunEvent]| {
+            events.iter().find_map(|e| match e {
+                RunEvent::StructuredOutput { value, .. } => Some(value.clone()),
+                _ => None,
+            })
+        };
+        let asked = run(true, r#"{"code":"q"}"#);
+        assert!(asked.iter().any(|e| matches!(e, RunEvent::Text { delta, .. } if delta == r#"{"code":"q"}"#)), "{asked:?}");
+        assert_eq!(structured(&asked), Some(serde_json::json!({ "code": "q" })));
+        assert_eq!(structured(&run(true, "just prose")), None, "prose under a schema is not pretended to be data");
+        assert_eq!(structured(&run(false, r#"{"code":"q"}"#)), None, "JSON nobody asked for stays text");
+    }
 
     #[test]
     fn agent_message_completed_becomes_text() {
