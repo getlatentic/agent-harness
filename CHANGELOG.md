@@ -109,7 +109,8 @@ An alpha series carries breaking changes between its pre-releases, and Cargo's
     `--mcp-config`.
 
 - `cli-stream`: `ProcessHandle::close_stdin`, so a child that reads until EOF
-  can be told the conversation is over.
+  can be told the conversation is over. Released as cli-stream 0.5.0 — the edition
+  and MSRV move above apply to it too, which is the minor bump.
 
 ### Changed
 
