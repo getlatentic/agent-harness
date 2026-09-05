@@ -351,6 +351,23 @@ fn build_claude_args(
     {
         args.push("--strict-mcp-config".to_owned());
     }
+    // The host's custom instructions, appended to the agent's own system prompt.
+    // `--append-system-prompt` is additive, which is what `extra_instructions`
+    // has always been: replacing Claude's prompt is not on offer here, and
+    // `--system-prompt` is the flag that would do it.
+    //
+    // This matters where a caller cannot steer the model any other way. A DSPy
+    // ReActV2 loop over this adapter renders its tools as text, and its
+    // `forced_tool` steering is dropped on that path — the provider is never
+    // told to submit — so the only remaining lever on the final turn is prose in
+    // the system prompt.
+    if let Some(extra) = tuning.extra_instructions.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    {
+        if !extra_args_sets(&tuning.extra_args, "--append-system-prompt") {
+            args.push("--append-system-prompt".to_owned());
+            args.push(extra.to_owned());
+        }
+    }
     if matches!(mode, RunMode::Edit) && !extra_args_sets(&tuning.extra_args, "--permission-mode") {
         args.push("--permission-mode".to_owned());
         args.push("acceptEdits".to_owned());
@@ -695,6 +712,58 @@ mod tests {
         // Conservative built-in default; a host overrides via extra_args.
         let args = build_claude_args("hi".to_owned(), RunMode::Edit, ToolAccess::Default, &RunTuning::default(), None);
         assert_eq!(flag_value(&args, "--permission-mode"), Some("acceptEdits"));
+    }
+
+    #[test]
+    fn extra_instructions_are_appended_to_the_system_prompt() {
+        let tuning = RunTuning {
+            extra_instructions: Some("  always emit a submit tool call  ".to_owned()),
+            ..RunTuning::default()
+        };
+        let args = build_claude_args("hi".to_owned(), RunMode::Ask, ToolAccess::Default, &tuning, None);
+        assert_eq!(flag_value(&args, "--append-system-prompt"), Some("always emit a submit tool call"));
+    }
+
+    #[test]
+    fn blank_extra_instructions_emit_no_flag_but_real_ones_do() {
+        // An empty string is the host saying "no custom instructions", not a
+        // request to append nothing — an empty flag value would cost a prompt
+        // section and change the run for no reason.
+        //
+        // The last arm is the positive one, and it is why this test can fail: an
+        // adapter that emitted the flag *never* would satisfy the blank arms
+        // alone, which is a negative claim answered by a mechanism that does
+        // nothing.
+        for (instructions, expected) in [("", None), ("   ", None), ("real", Some("real"))] {
+            let tuning =
+                RunTuning { extra_instructions: Some(instructions.to_owned()), ..RunTuning::default() };
+            let args = build_claude_args("hi".to_owned(), RunMode::Ask, ToolAccess::Default, &tuning, None);
+            assert_eq!(
+                flag_value(&args, "--append-system-prompt"),
+                expected,
+                "instructions {instructions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_that_sets_append_system_prompt_itself_gets_no_duplicate() {
+        // Same rule as --permission-mode: the host fully owns a flag it sets.
+        let tuning = RunTuning {
+            extra_instructions: Some("adapter copy".to_owned()),
+            extra_args: vec!["--append-system-prompt".to_owned(), "host copy".to_owned()],
+            ..RunTuning::default()
+        };
+        let args = build_claude_args("hi".to_owned(), RunMode::Ask, ToolAccess::Default, &tuning, None);
+        assert_eq!(args.iter().filter(|a| *a == "--append-system-prompt").count(), 1);
+        assert_eq!(flag_value(&args, "--append-system-prompt"), Some("host copy"));
+
+        // The positive arm: the same tuning WITHOUT the host's flag emits the
+        // adapter's own copy. Without this, an adapter that never emitted
+        // anything would pass the deduplication assertion above.
+        let adapter_only = RunTuning { extra_args: Vec::new(), ..tuning };
+        let args = build_claude_args("hi".to_owned(), RunMode::Ask, ToolAccess::Default, &adapter_only, None);
+        assert_eq!(flag_value(&args, "--append-system-prompt"), Some("adapter copy"));
     }
 
     #[test]

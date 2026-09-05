@@ -352,9 +352,17 @@ pub struct RunTuning {
     /// this schema; the rest ignore it. `None` → free-form text.
     pub output_schema: Option<serde_json::Value>,
     /// Extra system-prompt instructions from the host — the user's per-harness
-    /// "custom instructions". The `openai-compatible` adapter appends it after
-    /// its base system prompt; other adapters currently ignore it (a CLI mapping
-    /// such as Claude's `--append-system-prompt` can opt in later). `None` → none.
+    /// "custom instructions", appended to whatever base prompt the agent has.
+    ///
+    /// A preference, in the tiers on [`Harness`]. Honoured by `openai-compatible`
+    /// (after its base system prompt) and by Claude (`--append-system-prompt`).
+    /// Codex ignores it: `codex exec` takes the prompt positionally and exposes
+    /// no flag that appends to the system prompt, so there is nothing to map to.
+    /// `None` → none.
+    ///
+    /// Additive by name and by design — a host wanting to *replace* the agent's
+    /// prompt is asking for something this has never offered (the fourth row on
+    /// [`Harness`]).
     pub extra_instructions: Option<String>,
     /// Absolute path to the agent's executable, overriding PATH resolution of
     /// the bare CLI name. `None` → resolve by name on PATH. CLI adapters

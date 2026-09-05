@@ -7,6 +7,24 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+### Changed
+
+- **The Claude adapter now honours `RunTuning::extra_instructions`**, mapping it
+  to `--append-system-prompt`. It was previously read only by
+  `openai-compatible`, so a host's custom instructions were silently dropped on
+  the adapter most likely to be running. Skipped when the host already sets the
+  flag through `extra_args`, and a blank string emits nothing.
+
+  Codex still ignores it, and now says why in the doc: `codex exec` takes its
+  prompt positionally and exposes no flag that appends to the system prompt, so
+  there is nothing to map to — an *ignore* in the tiers on `Harness`, not an
+  oversight.
+
+  This is the only lever some callers have. A DSPy `ReActV2` loop over this
+  adapter renders its tools as text, and dspy drops `tool_choice` on a rendered
+  exchange — so its forced submit never reaches the provider, and prose in the
+  system prompt is what is left.
+
 ## [0.6.0-alpha.1] - 2026-09-04
 
 A release about what a run *reports* and what it is *allowed to reach*. Two of
