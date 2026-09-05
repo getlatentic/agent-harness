@@ -25,6 +25,10 @@ cargo build --workspace --all-targets
 echo "==> feature gates (lean framework, then claude-only)"
 cargo build -p agent-harness --no-default-features
 cargo build -p agent-harness --no-default-features --features claude
+# The lean build's tests and examples too: an example or test that names an
+# adapter without declaring the feature compiles fine with defaults on and
+# only fails here, which is where five of them were found.
+cargo test --no-run -p agent-harness --no-default-features
 
 # The oldest compiler `rust-version` promises. Declared in Cargo.toml and
 # tested nowhere else, so this is what keeps the number honest. Skipped when
