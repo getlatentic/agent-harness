@@ -158,9 +158,11 @@ required-features = ["claude"]
 # crate of the lockstep release — so the version header is inserted exactly
 # once (a workspace-wide replacement would run per crate and duplicate it). The
 # path is relative to this manifest; the CHANGELOG lives at the workspace root.
+# `prerelease = true` because cargo-release skips replacements on a pre-release
+# by default — 0.6.0-alpha.1's header was written by hand for that reason.
 [package.metadata.release]
 pre-release-replacements = [
-  { file = "../../CHANGELOG.md", search = "## \\[Unreleased\\]", replace = "## [Unreleased]\n\n## [{{version}}] - {{date}}", exactly = 1 },
+  { file = "../../CHANGELOG.md", search = "## \\[Unreleased\\]", replace = "## [Unreleased]\n\n## [{{version}}] - {{date}}", exactly = 1, prerelease = true },
   # The install snippets are part of the release, not documentation trailing
   # it: they said `agent-harness = "0.4"` for three published versions, so
   # following the README handed you the release before every type was renamed.
