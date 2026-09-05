@@ -199,6 +199,7 @@ pub enum RunMode {
     Edit,
 }
 
+#[cfg(any(feature = "codex", feature = "acp"))]
 /// Whether a run may call tools at all — the question of *reach*, kept apart
 /// from [`RunMode`]'s question of *write permission*.
 ///
@@ -598,6 +599,13 @@ pub struct Features {
     /// an adapter that leaves it `false` rather than offering a control that does
     /// nothing.
     pub custom_instructions: bool,
+    /// Serves the [`ToolServer`](crate::ToolServer)s a host attaches with the
+    /// adapter's `with_tool_server` — functions the host program implements,
+    /// offered to the agent as an MCP server living in this process. `true` for
+    /// `claude` (over Claude Code's control protocol) and `openai-compatible`
+    /// (dispatched by its own loop). An adapter that leaves it `false` has no
+    /// `with_tool_server`, so a host cannot hand it a tool for it to drop.
+    pub host_tools: bool,
 }
 
 /// Where a user gets a harness that isn't on the machine yet.

@@ -35,6 +35,7 @@ use crate::{RunEvent, RunMode, ToolKind};
 mod fetch;
 mod file;
 pub(crate) mod discovery;
+pub(crate) mod host;
 pub(crate) mod mcp;
 mod patch;
 mod question;

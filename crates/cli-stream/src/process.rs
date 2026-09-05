@@ -436,6 +436,19 @@ impl ProcessHandle {
         stdin.write_all(bytes).and_then(|()| stdin.flush()).map_err(|source| StreamError::Write { source })
     }
 
+    /// Close the child's stdin, so its next read is EOF.
+    ///
+    /// In a newline protocol EOF is itself a message: Claude Code's stream-json
+    /// input reads it as "finish the current turn and exit", and a child that
+    /// never sees it waits for the next line forever. Idempotent — a second
+    /// close, or a close on a child spawned with [`Stdin::Closed`], changes
+    /// nothing. A later [`write`](Self::write) reports the pipe as not captured.
+    pub fn close_stdin(&self) -> Result<(), StreamError> {
+        let mut guard = self.inner.stdin.lock().map_err(|_| StreamError::CancelLockPoisoned)?;
+        guard.take();
+        Ok(())
+    }
+
     /// Whether `cancel()` was called. Tagged on the final `Exited` event.
     pub fn was_cancelled(&self) -> bool {
         self.inner.cancelled.load(Ordering::SeqCst)
@@ -1071,6 +1084,34 @@ mod tests {
         // And streamed is still the default.
         let (_h, events) = Command::new("sh").run_id("loud").args(["-c", noisy]).start().expect("spawn");
         assert!(events.into_iter().any(|e| matches!(e, Event::Stderr { line, .. } if line == "noise")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closing_stdin_is_how_a_child_that_reads_until_eof_gets_to_exit() {
+        // `cat` runs until its input ends. Nothing else this handle offers makes
+        // it stop short of a signal, so the close is the only clean exit.
+        let (handle, events) =
+            Command::new("cat").run_id("eof").stdin(Stdin::Piped).start().expect("spawn");
+        handle.write_line("last words").expect("still open");
+        handle.close_stdin().expect("close");
+        handle.close_stdin().expect("closing twice is not an error");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let exit = loop {
+            let left = deadline
+                .checked_duration_since(Instant::now())
+                .expect("the child never exited after EOF");
+            match events.recv_timeout(left) {
+                Ok(Event::Exited { exit_code, cancelled, .. }) => break (exit_code, cancelled),
+                Ok(_) => continue,
+                Err(err) => panic!("no exit arrived: {err}"),
+            }
+        };
+        assert_eq!(exit, (Some(0), false), "EOF ended it, not a signal");
+
+        let err = handle.write_line("too late").unwrap_err();
+        assert!(matches!(err, StreamError::PipeNotCaptured { stream: "stdin" }), "got {err}");
     }
 
     #[cfg(unix)]

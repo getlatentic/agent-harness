@@ -95,6 +95,8 @@ pub(crate) struct LoopConfig {
     pub agents: Vec<(String, crate::openai_compatible::AgentDef)>,
     /// MCP servers to launch over stdio and expose their tools to the model.
     pub mcp_servers: Vec<crate::openai_compatible::McpServer>,
+    /// Host tools dispatched in this process, offered beside the MCP tools.
+    pub tool_servers: Vec<crate::ToolServer>,
     /// JSON Schema the model's final answer must conform to (structured output);
     /// `None` → free-form text.
     pub output_schema: Option<Value>,
@@ -288,11 +290,16 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
     let no_tools = cfg.tools == crate::ToolAccess::None;
     // Connect any configured MCP servers (best-effort) and build the run's tool
     // set: built-ins + MCP tools, offered + dispatched as one set.
-    let (mcp_tools, mcp_status) = if no_tools {
+    let (mut mcp_tools, mcp_status) = if no_tools {
         (Vec::new(), Vec::new())
     } else {
         tools::mcp::connect_all(&cfg.mcp_servers, &cfg.cwd)
     };
+    // The host's own tools sit beside the MCP ones: same namespacing, same
+    // deferral above the size threshold, same permission rules.
+    if !no_tools {
+        mcp_tools.extend(tools::host::tools(&cfg.tool_servers));
+    }
     for message in mcp_status {
         (*on_event)(RunEvent::Activity { run_id: rid.to_owned(), message });
     }
@@ -1221,6 +1228,7 @@ mod tests {
             dialect: chat::Dialect::OpenAi,
             agents: Vec::new(),
             mcp_servers: Vec::new(),
+            tool_servers: Vec::new(),
             output_schema: None,
             model_cost: None,
             image_data_uris: Vec::new(),
