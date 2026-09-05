@@ -9,19 +9,27 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ### Changed
 
-- **The Claude adapter now honours `RunTuning::extra_instructions`**, mapping it
-  to `--append-system-prompt`. It was previously read only by
-  `openai-compatible`, so a host's custom instructions were silently dropped on
-  the adapter most likely to be running. Skipped when the host already sets the
-  flag through `extra_args`, and a blank string emits nothing.
+- **`RunTuning::extra_instructions` is now honoured by the Claude and Codex
+  adapters.** It was previously read only by `openai-compatible`, so a host's
+  custom instructions were silently dropped on the two adapters most likely to
+  be running.
 
-  Codex still ignores it, and now says why in the doc: `codex exec` takes its
-  prompt positionally and exposes no flag that appends to the system prompt, so
-  there is nothing to map to — an *ignore* in the tiers on `Harness`, not an
-  oversight.
+  - Claude: `--append-system-prompt`.
+  - Codex: `-c developer_instructions=…`, a `developer` role message beside
+    Codex's own base instructions. There is no flag for it — `-c` is the door,
+    and its value is parsed as TOML, so the text is emitted as an escaped TOML
+    basic string rather than relying on the documented raw-literal fallback
+    (which would misread any value that *does* parse, such as `true` or one
+    containing `=`).
 
-  This is the only lever some callers have. A DSPy `ReActV2` loop over this
-  adapter renders its tools as text, and dspy drops `tool_choice` on a rendered
+  Both skip the setting when the host already provides it through `extra_args`,
+  and neither emits anything for a blank string. Both were verified against the
+  installed CLIs — for Codex, `developer_instructions` set to answer with one
+  fixed word returned that word where an unmodified run returned `4`, and a
+  value carrying a quote, a newline and an `=` round-tripped intact.
+
+  This is the only lever some callers have. A DSPy `ReActV2` loop over these
+  adapters renders its tools as text, and dspy drops `tool_choice` on a rendered
   exchange — so its forced submit never reaches the provider, and prose in the
   system prompt is what is left.
 

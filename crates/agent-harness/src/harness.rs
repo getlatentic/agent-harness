@@ -354,11 +354,11 @@ pub struct RunTuning {
     /// Extra system-prompt instructions from the host — the user's per-harness
     /// "custom instructions", appended to whatever base prompt the agent has.
     ///
-    /// A preference, in the tiers on [`Harness`]. Honoured by `openai-compatible`
-    /// (after its base system prompt) and by Claude (`--append-system-prompt`).
-    /// Codex ignores it: `codex exec` takes the prompt positionally and exposes
-    /// no flag that appends to the system prompt, so there is nothing to map to.
-    /// `None` → none.
+    /// A preference, in the tiers on [`Harness`], honoured by every CLI adapter
+    /// that can express it: `openai-compatible` appends it after its base system
+    /// prompt, Claude passes `--append-system-prompt`, and Codex sends
+    /// `-c developer_instructions=…` (a `developer` role message beside its own
+    /// base instructions). ACP has no equivalent and ignores it. `None` → none.
     ///
     /// Additive by name and by design — a host wanting to *replace* the agent's
     /// prompt is asking for something this has never offered (the fourth row on
