@@ -11,7 +11,7 @@ child CLI: a task runner, a build/test wrapper, a TUI, a desktop app shelling
 out to tools.
 
 ```toml
-cli-stream = "0.4"
+cli-stream = "0.5.0"
 ```
 
 ```rust
