@@ -23,7 +23,11 @@
 # First release:  cargo release 0.1.0 --execute
 # Later releases: cargo release patch --execute   # or minor / major
 
-shared-version = true
+# cli-stream versions on its own — its consumers pin a `0.x` line that has
+# nothing to do with agent-harness's, and 0.6.0-alpha.1 shipped with it at
+# 0.4.3. `true` here pulled it to the workspace version on the first pre-release
+# cut through this file, so each crate is released with `-p`.
+shared-version = false
 tag-name = "v{{version}}"
 
 # `cargo release` prepares a release here; it does not perform one.
