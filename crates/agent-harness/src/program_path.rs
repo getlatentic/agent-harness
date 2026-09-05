@@ -31,7 +31,7 @@
 //! looks for yet.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 use cli_stream::hidden_command;
 
@@ -189,8 +189,8 @@ fn prepend_program_dir(program: &Path, base_path: &str) -> String {
 /// (bounded) shell spawn happens at most once per launch, lazily on the first
 /// readiness/run/login, never at construction.
 pub fn augmented_path() -> String {
-    static CACHED: OnceLock<String> = OnceLock::new();
-    CACHED.get_or_init(compute_augmented_path).clone()
+    static CACHED: LazyLock<String> = LazyLock::new(compute_augmented_path);
+    CACHED.clone()
 }
 
 fn compute_augmented_path() -> String {

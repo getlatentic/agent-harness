@@ -32,9 +32,7 @@ pub(crate) fn lock() -> ScopedEnv {
 
 /// Set `key` to `value` until the guard drops.
 pub(crate) fn set(key: &str, value: &str) -> ScopedEnv {
-    let mut env = lock();
-    env.set(key, Some(value));
-    env
+    scoped(&[(key, Some(value))])
 }
 
 /// Set or remove several variables at once until the guard drops.
@@ -48,9 +46,7 @@ pub(crate) fn scoped(vars: &[(&str, Option<&str>)]) -> ScopedEnv {
 
 /// Remove `key` until the guard drops.
 pub(crate) fn unset(key: &str) -> ScopedEnv {
-    let mut env = lock();
-    env.set(key, None);
-    env
+    scoped(&[(key, None)])
 }
 
 impl ScopedEnv {

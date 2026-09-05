@@ -27,7 +27,7 @@ struct BashArgs {
     /// The shell command to run.
     command: String,
     /// A short (5-10 word) description of what the command does.
-    #[allow(dead_code)] // advertised so the model states intent; not acted on here
+    #[expect(dead_code, reason = "advertised so the model states intent; not acted on here")]
     description: Option<String>,
     /// Run directory, relative to the working directory (default: the working directory).
     workdir: Option<String>,

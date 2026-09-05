@@ -13,7 +13,9 @@
 #                     full local-/OpenAI-compatible runtime that *is* the agent).
 #                     → cli-stream. [publishable]
 [workspace]
-resolver = "2"
+# `3` picks dependency versions that respect `rust-version`, so an MSRV that is
+# tested (scripts/check.sh, the msrv CI job) is also what `cargo update` keeps.
+resolver = "3"
 members = ["crates/cli-stream", "crates/agent-harness"]
 
 # Shared publish metadata + agent-harness's version. Only agent-harness inherits

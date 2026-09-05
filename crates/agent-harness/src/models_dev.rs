@@ -56,7 +56,7 @@ pub fn provider_models(provider: &str) -> Vec<ModelChoice> {
 mod imp {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
-    use std::sync::OnceLock;
+    use std::sync::LazyLock;
     use std::time::Duration;
 
     use serde::Deserialize;
@@ -128,8 +128,8 @@ mod imp {
     /// with no cache it fetches once and persists it. A miss caches `None`, so
     /// callers fall back without retrying every call.
     fn catalog() -> Option<&'static Catalog> {
-        static CACHE: OnceLock<Option<Catalog>> = OnceLock::new();
-        CACHE.get_or_init(|| load_or_fetch(fetch_remote)).as_ref()
+        static CACHE: LazyLock<Option<Catalog>> = LazyLock::new(|| load_or_fetch(fetch_remote));
+        CACHE.as_ref()
     }
 
     /// Prefer the on-disk cache — instant, and works offline — refreshing it in
@@ -137,7 +137,7 @@ mod imp {
     /// once and persist.
     ///
     /// `fetch` is a parameter so this can be exercised without the network, and
-    /// without the process-wide `OnceLock` in [`catalog`] fixing the outcome
+    /// without the process-wide `LazyLock` in [`catalog`] fixing the outcome
     /// for every later test in the binary.
     ///
     /// A body is parsed before it is written: caching one we could not read

@@ -20,6 +20,14 @@ Unreleased changes accumulate under **Unreleased** until the next release.
   guard (`test_env`), with the one thing the lock cannot cover written down
   once instead of at every call.
 
+  Taken at the new floor: `LazyLock` (1.80) replaces three `OnceLock` +
+  `get_or_init` pairs; `#[expect]` (1.81) replaces the unconditional
+  `#[allow]`s, and on its first run found two that were already stale;
+  `#[diagnostic::on_unimplemented]` (1.78) on `HostTool` names `FnTool` when a
+  type fails the bound; `resolver = "3"` (1.84) makes `cargo update` honour the
+  `rust-version` the gate now tests. Examples that drive `Claude`/`Codex` now
+  declare `required-features`, so a lean build with examples no longer fails.
+
 ### Added
 
 - **Host tools: functions from your own program, offered to the agent
