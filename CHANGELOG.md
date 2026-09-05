@@ -7,6 +7,26 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+### Moving from alpha.1
+
+An alpha series carries breaking changes between its pre-releases, and Cargo's
+`^0.6.0-alpha.1` admits alpha.2 — so a host on alpha.1 takes these on a plain
+`cargo update`, with no manifest edit to announce them. Three land here:
+
+- `RunTuning` has two new fields, `system_prompt` and `max_thinking_tokens`.
+  An exhaustive literal stops compiling; `..RunTuning::default()` is the form
+  that survives the next one too.
+- `RunEvent` has a new variant, `StructuredOutput`. A `match` without a
+  wildcard arm stops compiling. On the wire it appears only when a run asked
+  for `output_schema`.
+- `Features::custom_instructions` is now `true` for `claude` and `codex`, because
+  they honour it. A host that read the flag as a proxy for something else — one
+  had keyed "does this agent read files itself" off it — changes behaviour
+  without an error. The flag means what its doc says: `extra_instructions`
+  reaches the prompt. Every adapter that offers tools reads files itself, on
+  every adapter; what stops it is `ToolAccess::None`, which is the request's
+  to make, not a capability to ask about.
+
 ### Added
 
 - **Structured output on every CLI adapter, and as data.** `RunTuning::output_schema`
