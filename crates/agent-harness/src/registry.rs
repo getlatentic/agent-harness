@@ -233,6 +233,9 @@ mod tests {
         assert!(codex.custom_model && codex.effort && !codex.max_turns);
 
         assert!(claude.login && codex.login);
+        // Both adapters map `extra_instructions` onto their CLI; the picker
+        // shows the field only where this is true.
+        assert!(claude.custom_instructions && codex.custom_instructions);
     }
 
     // A third-party / custom provider — proves the registry is open: this

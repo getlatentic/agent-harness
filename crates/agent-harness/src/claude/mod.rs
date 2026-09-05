@@ -120,6 +120,7 @@ impl Harness for ClaudeHarness {
             max_turns: true,
             withheld_tools: true,
             login: true,
+            custom_instructions: true,
             ..Default::default()
         }
     }

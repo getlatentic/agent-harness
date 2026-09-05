@@ -593,9 +593,10 @@ pub struct Features {
     /// `false` for harnesses Compose authenticates itself (bob).
     pub login: bool,
     /// Honors [`RunTuning::extra_instructions`] — the user's per-harness custom
-    /// instructions, appended to the system prompt. `true` only for the
-    /// `openai-compatible` adapter so far; the picker hides the field for the
-    /// rest rather than offering a control that does nothing.
+    /// instructions, appended to the system prompt. `true` for
+    /// `openai-compatible`, `claude` and `codex`; the picker hides the field for
+    /// an adapter that leaves it `false` rather than offering a control that does
+    /// nothing.
     pub custom_instructions: bool,
 }
 

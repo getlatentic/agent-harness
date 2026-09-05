@@ -100,6 +100,7 @@ impl Harness for CodexHarness {
             custom_model: true,
             effort: true,
             login: true,
+            custom_instructions: true,
             ..Default::default()
         }
     }
