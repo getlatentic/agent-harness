@@ -267,23 +267,11 @@ mod imp {
     mod tests {
         use super::*;
 
-        /// `AGENT_HARNESS_CACHE_DIR` is process-global, so these cannot run
-        /// beside each other.
-        static CACHE_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
         fn with_cache_dir<T>(tag: &str, body: impl FnOnce(&Path) -> T) -> T {
-            let _guard = CACHE_ENV.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let restore = std::env::var_os("AGENT_HARNESS_CACHE_DIR");
             let dir = std::env::temp_dir().join(format!("hl-cache-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
-            std::env::set_var("AGENT_HARNESS_CACHE_DIR", &dir);
-
+            let _env = crate::test_env::set("AGENT_HARNESS_CACHE_DIR", &dir.to_string_lossy());
             let out = body(&dir);
-
-            match restore {
-                Some(value) => std::env::set_var("AGENT_HARNESS_CACHE_DIR", value),
-                None => std::env::remove_var("AGENT_HARNESS_CACHE_DIR"),
-            }
             let _ = std::fs::remove_dir_all(&dir);
             out
         }
@@ -443,18 +431,12 @@ mod imp {
             // `cache_path` returning None means fetch-only. Writing to some
             // default location instead would put a 4 MB file somewhere the host
             // never agreed to.
-            let _guard = CACHE_ENV.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let restore = std::env::var_os("AGENT_HARNESS_CACHE_DIR");
-            std::env::remove_var("AGENT_HARNESS_CACHE_DIR");
+            let _env = crate::test_env::unset("AGENT_HARNESS_CACHE_DIR");
 
             assert!(cache_path().is_none());
             write_cache(SAMPLE); // must not panic, must not write
             assert!(load_cached().is_none());
             assert!(!cache_is_stale(), "nothing to refresh is not a stale cache");
-
-            if let Some(value) = restore {
-                std::env::set_var("AGENT_HARNESS_CACHE_DIR", value);
-            }
         }
 
         #[test]

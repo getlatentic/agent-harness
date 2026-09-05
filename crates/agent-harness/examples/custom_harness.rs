@@ -133,17 +133,17 @@ impl EchoParser {
     fn parse_line(&mut self, line: &str) -> ParsedLine {
         let value = serde_json::from_str::<Value>(line.trim()).unwrap_or(Value::Null);
         // The first line announces the session (stateful: only once).
-        if !self.announced {
-            if let Some(model) = value.get("model").and_then(Value::as_str) {
-                self.announced = true;
-                return ParsedLine {
-                    session: Some(SessionInfo {
-                        session_id: None,
-                        model: Some(model.to_owned()),
-                    }),
-                    ..ParsedLine::default()
-                };
-            }
+        if !self.announced
+            && let Some(model) = value.get("model").and_then(Value::as_str)
+        {
+            self.announced = true;
+            return ParsedLine {
+                session: Some(SessionInfo {
+                    session_id: None,
+                    model: Some(model.to_owned()),
+                }),
+                ..ParsedLine::default()
+            };
         }
         if let Some(text) = value.get("text").and_then(Value::as_str) {
             return ParsedLine {

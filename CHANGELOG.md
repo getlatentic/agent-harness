@@ -7,6 +7,19 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+### Changed
+
+- **Edition 2024; `rust-version` is now 1.88.** The floor moves from a
+  November 2023 compiler to a June 2025 one so the crate can use let chains,
+  which the 2024 edition gates. CI gains an `msrv` job and `scripts/check.sh` an
+  MSRV step, so the declared minimum is tested rather than asserted — it never
+  was before. Every `if let … { if … {` the old edition forced is now one
+  condition. The migration also made a pre-existing hazard visible: tests set
+  process environment variables from parallel threads, which is why `set_var`
+  is `unsafe` in 2024. Those 25 sites now go through one locked, restoring
+  guard (`test_env`), with the one thing the lock cannot cover written down
+  once instead of at every call.
+
 ### Added
 
 - **Host tools: functions from your own program, offered to the agent

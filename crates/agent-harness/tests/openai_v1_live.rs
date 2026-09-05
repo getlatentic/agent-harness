@@ -90,8 +90,8 @@ fn live_run(
         thread::sleep(std::time::Duration::from_millis(50));
     }
     assert!(done.load(Ordering::SeqCst), "{provider}: run did not finish in time");
-    let events = events.lock().unwrap().clone();
-    events
+
+    events.lock().unwrap().clone()
 }
 
 /// Drive one hosted provider through a full run and assert the *protocol*.

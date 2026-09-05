@@ -382,12 +382,12 @@ impl ProcessHandle {
             let inner = Arc::clone(&self.inner);
             thread::spawn(move || {
                 thread::sleep(Duration::from_millis(1500));
-                if let Ok(mut guard) = inner.child.lock() {
-                    if let Some(child) = guard.as_mut() {
-                        // The group again, for the same reason.
-                        // SAFETY: as above.
-                        unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
-                    }
+                if let Ok(mut guard) = inner.child.lock()
+                    && let Some(child) = guard.as_mut()
+                {
+                    // The group again, for the same reason.
+                    // SAFETY: as above.
+                    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
                 }
             });
         }

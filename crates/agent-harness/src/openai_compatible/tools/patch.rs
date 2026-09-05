@@ -157,10 +157,10 @@ fn apply(ops: Vec<Op>, cwd: &Path) -> ToolOutcome {
                 let Some(p) = safe_join(cwd, &path) else {
                     return ToolOutcome::err(format!("path `{path}` escapes the working directory"));
                 };
-                if let Some(parent) = p.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        return ToolOutcome::err(format!("creating parent of `{path}`: {e}"));
-                    }
+                if let Some(parent) = p.parent()
+                    && let Err(e) = std::fs::create_dir_all(parent)
+                {
+                    return ToolOutcome::err(format!("creating parent of `{path}`: {e}"));
                 }
                 if let Err(e) = std::fs::write(&p, &content) {
                     return ToolOutcome::err(format!("writing `{path}`: {e}"));

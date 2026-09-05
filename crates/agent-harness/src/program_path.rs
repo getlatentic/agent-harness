@@ -360,19 +360,19 @@ fn hardcoded_node_dirs() -> String {
     }
     let mut parts: Vec<String> =
         vec!["/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_owned()];
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            let home_path = Path::new(&home);
-            // Official-installer location for several agent CLIs.
-            parts.push(home_path.join(".local/bin").display().to_string());
-            // nvm: ~/.nvm/versions/node/<version>/bin — where npm-global
-            // CLIs (bob, claude, codex) live under an nvm-managed node.
-            if let Ok(entries) = std::fs::read_dir(home_path.join(".nvm/versions/node")) {
-                for entry in entries.flatten() {
-                    let bin = entry.path().join("bin");
-                    if bin.is_dir() {
-                        parts.push(bin.display().to_string());
-                    }
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        let home_path = Path::new(&home);
+        // Official-installer location for several agent CLIs.
+        parts.push(home_path.join(".local/bin").display().to_string());
+        // nvm: ~/.nvm/versions/node/<version>/bin — where npm-global
+        // CLIs (bob, claude, codex) live under an nvm-managed node.
+        if let Ok(entries) = std::fs::read_dir(home_path.join(".nvm/versions/node")) {
+            for entry in entries.flatten() {
+                let bin = entry.path().join("bin");
+                if bin.is_dir() {
+                    parts.push(bin.display().to_string());
                 }
             }
         }
@@ -767,13 +767,13 @@ mod tests {
         // directories is what leaves an nvm-installed CLI invisible.
         let dirs = hardcoded_node_dirs();
         assert!(dirs.contains("/usr/local/bin") && dirs.contains("/opt/homebrew/bin"));
-        if let Ok(home) = std::env::var("HOME") {
-            if !home.is_empty() {
-                assert!(
-                    dirs.contains(&format!("{home}/.local/bin")),
-                    "the official-installer location is where several agent CLIs land: {dirs}"
-                );
-            }
+        if let Ok(home) = std::env::var("HOME")
+            && !home.is_empty()
+        {
+            assert!(
+                dirs.contains(&format!("{home}/.local/bin")),
+                "the official-installer location is where several agent CLIs land: {dirs}"
+            );
         }
     }
 
@@ -910,9 +910,6 @@ mod spawned {
         shell
     }
 
-    /// `SHELL` is process-global, so the two cases below cannot run alongside
-    /// each other.
-    static SHELL_ENV: Mutex<()> = Mutex::new(());
 
     #[test]
     fn the_path_comes_from_the_shell_we_asked() {
@@ -921,11 +918,9 @@ mod spawned {
         // parser — the spawn, the sentinel handshake and the `$SHELL` guard had
         // nothing exercising them. A fake shell reaches all three without
         // depending on how this machine's rc happens to be set up.
-        let _guard = SHELL_ENV.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let restore = std::env::var("SHELL").ok();
-
+        let mut env = crate::test_env::lock();
         let shell = fake_login_shell("ok", "PATH=/fake/node/bin:/usr/bin");
-        std::env::set_var("SHELL", &shell);
+        env.set("SHELL", Some(&shell.to_string_lossy()));
         assert_eq!(
             login_shell_path().as_deref(),
             Some("/fake/node/bin:/usr/bin"),
@@ -934,13 +929,8 @@ mod spawned {
 
         // No shell to ask is not an empty PATH — the caller must fall back to
         // the hardcoded list rather than treat "" as the user's real PATH.
-        std::env::set_var("SHELL", "");
+        env.set("SHELL", Some(""));
         assert_eq!(login_shell_path(), None);
-
-        match restore {
-            Some(value) => std::env::set_var("SHELL", value),
-            None => std::env::remove_var("SHELL"),
-        }
     }
 
     fn run(program: PathBuf, env: Vec<(String, String)>) -> String {
@@ -966,8 +956,8 @@ mod spawned {
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         assert!(finished, "the fixture never exited; its output would be whatever arrived in time");
-        let out = lines.lock().unwrap().join("\n");
-        out
+
+        lines.lock().unwrap().join("\n")
     }
 
     #[test]
@@ -1000,4 +990,3 @@ mod spawned {
         let _ = std::fs::remove_dir_all(cli.parent().unwrap());
     }
 }
-
