@@ -70,10 +70,10 @@ pub(crate) fn classify(path: &Path, home: &Path, resource_dir: Option<&Path>) ->
     if resolved.starts_with(&local_bin) {
         return InstallKind::Native;
     }
-    if let Some(resource_dir) = resource_dir {
-        if resolved.starts_with(canonical_or_self(resource_dir)) {
-            return InstallKind::Bundled;
-        }
+    if let Some(resource_dir) = resource_dir
+        && resolved.starts_with(canonical_or_self(resource_dir))
+    {
+        return InstallKind::Bundled;
     }
     if path_contains(&resolved, ".nvm") || path_contains(&resolved, "node_modules") {
         return InstallKind::NpmGlobal;

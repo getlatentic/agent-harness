@@ -26,6 +26,17 @@ echo "==> feature gates (lean framework, then claude-only)"
 cargo build -p agent-harness --no-default-features
 cargo build -p agent-harness --no-default-features --features claude
 
+# The oldest compiler `rust-version` promises. Declared in Cargo.toml and
+# tested nowhere else, so this is what keeps the number honest. Skipped when
+# that toolchain is not installed: `rustup toolchain install 1.88`.
+MSRV=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
+if rustup run "$MSRV" rustc --version >/dev/null 2>&1; then
+  echo "==> MSRV ($MSRV) check"
+  cargo "+$MSRV" check --workspace --all-features --all-targets
+else
+  echo "==> (skip) MSRV toolchain $MSRV not installed — 'rustup toolchain install $MSRV' to enable"
+fi
+
 if command -v cargo-deny >/dev/null 2>&1; then
   echo "==> cargo deny (advisories + licenses)"
   cargo deny check

@@ -215,10 +215,10 @@ fn write_file(cwd: &Path, rel: &str, content: &str) -> ToolOutcome {
     let Some(path) = safe_join(cwd, rel) else {
         return ToolOutcome::err(format!("path `{rel}` escapes the working directory"));
     };
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return ToolOutcome::err(format!("creating parent of `{rel}`: {e}"));
-        }
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        return ToolOutcome::err(format!("creating parent of `{rel}`: {e}"));
     }
     match std::fs::write(&path, content) {
         Ok(()) => ToolOutcome::ok(format!("wrote {} bytes to {rel}", content.len())),
@@ -256,11 +256,9 @@ fn edit_file(cwd: &Path, rel: &str, old: &str, new: &str, replace_all: bool) -> 
     // single unique span (OpenCode's LineTrimmedReplacer) — the common case
     // where the model's `old_string` has slightly-off indentation/trailing
     // whitespace. `replace_all` stays exact-only (fuzzy multi-replace is unsafe).
-    if !replace_all {
-        if let Some(updated) = super::replace_line_trimmed(&content, old, new) {
+    if !replace_all && let Some(updated) = super::replace_line_trimmed(&content, old, new) {
             return write_edit(&path, rel, &updated, 1, true);
         }
-    }
 
     ToolOutcome::err(format!(
         "edit: `old_string` not found in {rel} — it must match exactly (whitespace and indentation included)"
@@ -277,4 +275,3 @@ fn write_edit(path: &Path, rel: &str, updated: &str, n: usize, fuzzy: bool) -> T
         Err(e) => ToolOutcome::err(format!("writing edited `{rel}`: {e}")),
     }
 }
-

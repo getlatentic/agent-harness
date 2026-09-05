@@ -180,8 +180,8 @@ fn collect_inner(
         thread::sleep(std::time::Duration::from_millis(25));
     }
     let _ = handle;
-    let out = events.lock().unwrap().clone();
-    out
+
+    events.lock().unwrap().clone()
 }
 
 /// A stand-in serving only what the model *manager* uses: `/api/tags` for the

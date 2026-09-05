@@ -252,10 +252,10 @@ fn probe_claude_signed_in(command: &str) -> bool {
         return false;
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(stdout.trim()) {
-        if let Some(logged_in) = map.get("loggedIn").and_then(Value::as_bool) {
-            return logged_in;
-        }
+    if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(stdout.trim())
+        && let Some(logged_in) = map.get("loggedIn").and_then(Value::as_bool)
+    {
+        return logged_in;
     }
     // Fallback: exit 0 with non-empty output ≈ signed in.
     output.status.success() && !stdout.trim().is_empty()
@@ -388,11 +388,11 @@ fn build_claude_args(
     // `forced_tool` steering is dropped on that path — the provider is never
     // told to submit — so the only remaining lever on the final turn is prose in
     // the system prompt.
-    if let Some(extra) = crate::harness::nonblank(tuning.extra_instructions.as_deref()) {
-        if !extra_args_sets(&tuning.extra_args, "--append-system-prompt") {
-            args.push("--append-system-prompt".to_owned());
-            args.push(extra.to_owned());
-        }
+    if let Some(extra) = crate::harness::nonblank(tuning.extra_instructions.as_deref())
+        && !extra_args_sets(&tuning.extra_args, "--append-system-prompt")
+    {
+        args.push("--append-system-prompt".to_owned());
+        args.push(extra.to_owned());
     }
     if matches!(mode, RunMode::Edit) && !extra_args_sets(&tuning.extra_args, "--permission-mode") {
         args.push("--permission-mode".to_owned());
@@ -468,8 +468,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         let _ = handle.cancel();
-        let events = seen.lock().unwrap().clone();
-        events
+
+        seen.lock().unwrap().clone()
     }
 
     #[cfg(unix)]

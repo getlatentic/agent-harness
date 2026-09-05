@@ -274,15 +274,14 @@ pub fn parse_codex_line(line: &str) -> ParsedLine {
                 return ParsedLine::default();
             };
             // The assistant's reply: full text in one shot.
-            if item.get("type").and_then(Value::as_str) == Some("agent_message") {
-                if let Some(text) = item.get("text").and_then(Value::as_str) {
-                    if !text.is_empty() {
-                        return ParsedLine {
-                            text: Some(text.to_owned()),
-                            ..ParsedLine::default()
-                        };
-                    }
-                }
+            if item.get("type").and_then(Value::as_str) == Some("agent_message")
+                && let Some(text) = item.get("text").and_then(Value::as_str)
+                && !text.is_empty()
+            {
+                return ParsedLine {
+                    text: Some(text.to_owned()),
+                    ..ParsedLine::default()
+                };
             }
             // A tool item finished. Grounded in codex 0.125.0's
             // `--json` schema: command_execution / web_search /

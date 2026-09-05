@@ -89,6 +89,22 @@ jobs:
           cargo test --all-features --test ollama_route -- --ignored --nocapture \
             live_ollama_streams_a_real_completion
 
+  msrv:
+    # The oldest compiler `rust-version` promises. Every other job runs on
+    # stable, so without this the number in Cargo.toml is a claim nobody tests.
+    name: msrv (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - name: Linux system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Check on the minimum supported compiler
+        run: cargo check --workspace --all-features --all-targets
+
   lint:
     name: clippy
     runs-on: ubuntu-latest

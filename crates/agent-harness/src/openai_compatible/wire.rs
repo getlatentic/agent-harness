@@ -340,21 +340,21 @@ pub(super) fn drain_stream(
             if choice.finish_reason.is_some() {
                 stop = choice.finish_reason;
             }
-            if let Some(text) = choice.delta.content {
-                if !text.is_empty() {
-                    // Models that inline reasoning as `<think>…</think>` in the
-                    // content get it routed to the reasoning stream; only the
-                    // visible text folds into the message.
-                    content.push_str(&think.feed(&text, &mut on_delta));
-                }
+            if let Some(text) = choice.delta.content
+                && !text.is_empty()
+            {
+                // Models that inline reasoning as `<think>…</think>` in the
+                // content get it routed to the reasoning stream; only the
+                // visible text folds into the message.
+                content.push_str(&think.feed(&text, &mut on_delta));
             }
             // Other reasoning models stream it in a dedicated field
             // (`reasoning_content` on DeepSeek, `reasoning` on OpenRouter);
             // surface it distinctly but don't fold it into the message.
-            if let Some(reasoning) = choice.delta.reasoning_content.or(choice.delta.reasoning) {
-                if !reasoning.is_empty() {
-                    on_delta(Fragment::Reasoning(&reasoning));
-                }
+            if let Some(reasoning) = choice.delta.reasoning_content.or(choice.delta.reasoning)
+                && !reasoning.is_empty()
+            {
+                on_delta(Fragment::Reasoning(&reasoning));
             }
             for delta in choice.delta.tool_calls {
                 accumulate_tool_call(&mut tool_calls, delta);

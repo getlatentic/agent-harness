@@ -52,10 +52,10 @@ impl HttpConnection {
         let method = body.get("method").and_then(Value::as_str).unwrap_or("request");
         let resp = req.send_json(body.clone()).map_err(|e| format!("{} {method}: request failed: {e}", self.server))?;
         // Capture a session id the server hands back (typically on initialize).
-        if let Some(sid) = resp.header("Mcp-Session-Id") {
-            if let Ok(mut slot) = self.session.lock() {
-                *slot = Some(sid.to_owned());
-            }
+        if let Some(sid) = resp.header("Mcp-Session-Id")
+            && let Ok(mut slot) = self.session.lock()
+        {
+            *slot = Some(sid.to_owned());
         }
         Ok(resp)
     }

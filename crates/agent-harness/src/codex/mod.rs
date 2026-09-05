@@ -302,11 +302,11 @@ fn build_codex_args(
     // Verified against codex-cli 0.149.0 rather than read: with
     // `developer_instructions` set to answer with one fixed word, `What is 2+2?`
     // returned that word; without it, `4`.
-    if let Some(extra) = crate::harness::nonblank(tuning.extra_instructions.as_deref()) {
-        if !extra_args_sets_config(&tuning.extra_args, "developer_instructions") {
-            args.push("-c".to_owned());
-            args.push(format!("developer_instructions={}", toml_basic_string(extra)));
-        }
+    if let Some(extra) = crate::harness::nonblank(tuning.extra_instructions.as_deref())
+        && !extra_args_sets_config(&tuning.extra_args, "developer_instructions")
+    {
+        args.push("-c".to_owned());
+        args.push(format!("developer_instructions={}", toml_basic_string(extra)));
     }
     if matches!(mode, RunMode::Edit) {
         // Low-friction sandboxed auto-execution so Codex can apply
@@ -413,8 +413,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         let _ = handle.cancel();
-        let events = seen.lock().unwrap().clone();
-        events
+
+        seen.lock().unwrap().clone()
     }
 
     #[cfg(unix)]

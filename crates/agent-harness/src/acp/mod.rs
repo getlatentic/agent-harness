@@ -588,8 +588,8 @@ done
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         let _ = handle;
-        let out = events.lock().unwrap().clone();
-        out
+
+        events.lock().unwrap().clone()
     }
 
     #[cfg(unix)]

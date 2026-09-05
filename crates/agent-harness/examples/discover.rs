@@ -47,10 +47,10 @@ fn main() {
             if let Some(error) = &ready.error {
                 println!("           ↳ {error}");
             }
-            if !ready.installed {
-                if let Some(hint) = info.install_hint {
-                    println!("           ↳ get it from {}", hint.url);
-                }
+            if !ready.installed
+                && let Some(hint) = info.install_hint
+            {
+                println!("           ↳ get it from {}", hint.url);
             }
         }
     }

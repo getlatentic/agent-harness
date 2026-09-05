@@ -420,7 +420,7 @@ impl ToolSet {
         }
         let subject = tool.permission_subject(args);
         for rule in &self.permissions {
-            let tool_matches = rule.tool.as_deref().map_or(true, |t| t == tool.id());
+            let tool_matches = rule.tool.as_deref().is_none_or(|t| t == tool.id());
             let pattern_matches = match (&rule.pattern, &subject) {
                 (None, _) => true,
                 (Some(p), Some(s)) => s.contains(p.as_str()),

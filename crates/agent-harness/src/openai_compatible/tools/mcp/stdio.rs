@@ -58,10 +58,10 @@ impl StdioConnection {
             // Only stdout carries protocol, and stderr is dropped by the OS,
             // so the one thing left to filter is a non-JSON line — a server
             // logging to stdout.
-            if let Event::Stdout { line, .. } = event {
-                if let Ok(message) = serde_json::from_str::<Value>(line.trim()) {
-                    let _ = tx.send(message);
-                }
+            if let Event::Stdout { line, .. } = event
+                && let Ok(message) = serde_json::from_str::<Value>(line.trim())
+            {
+                let _ = tx.send(message);
             }
         })
         .map_err(|e| format!("spawning `{command}`: {e}"))?;

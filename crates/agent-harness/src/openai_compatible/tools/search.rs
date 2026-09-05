@@ -195,10 +195,10 @@ fn grep_files(cwd: &Path, pattern: &str, path: Option<&str>, include: Option<&st
             continue;
         }
         let rel = entry.path().strip_prefix(cwd).unwrap_or_else(|_| entry.path());
-        if let Some(g) = &include {
-            if !g.is_match(rel) {
-                continue;
-            }
+        if let Some(g) = &include
+            && !g.is_match(rel)
+        {
+            continue;
         }
         // Skip binary / non-UTF-8 files (read_to_string errors on them).
         let Ok(content) = std::fs::read_to_string(entry.path()) else { continue };

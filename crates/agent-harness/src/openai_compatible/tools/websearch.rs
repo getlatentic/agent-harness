@@ -294,31 +294,9 @@ mod tests {
         assert_eq!(asked.lock().unwrap()[0].0, None);
     }
 
-    /// The provider keys are process-global, so these cannot run beside each
-    /// other or beside anything else reading them.
-    static PROVIDER_ENV: Mutex<()> = Mutex::new(());
-
     fn with_keys<T>(exa: Option<&str>, parallel: Option<&str>, body: impl FnOnce() -> T) -> T {
-        let _guard = PROVIDER_ENV.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let restore: Vec<(&str, Option<std::ffi::OsString>)> = ["EXA_API_KEY", "PARALLEL_API_KEY"]
-            .iter()
-            .map(|name| (*name, std::env::var_os(name)))
-            .collect();
-
-        for (name, value) in [("EXA_API_KEY", exa), ("PARALLEL_API_KEY", parallel)] {
-            match value {
-                Some(v) => std::env::set_var(name, v),
-                None => std::env::remove_var(name),
-            }
-        }
-        let out = body();
-        for (name, value) in restore {
-            match value {
-                Some(v) => std::env::set_var(name, v),
-                None => std::env::remove_var(name),
-            }
-        }
-        out
+        let _env = crate::test_env::scoped(&[("EXA_API_KEY", exa), ("PARALLEL_API_KEY", parallel)]);
+        body()
     }
 
     #[test]
