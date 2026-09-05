@@ -7,6 +7,8 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+## [0.6.0-alpha.2] - 2026-09-05
+
 ### Moving from alpha.1
 
 An alpha series carries breaking changes between its pre-releases, and Cargo's

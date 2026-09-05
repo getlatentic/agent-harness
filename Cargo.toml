@@ -22,7 +22,7 @@ members = ["crates/cli-stream", "crates/agent-harness"]
 # `version` here (via `version.workspace = true`); cli-stream versions
 # independently, pinning its own `version` in its manifest rather than this line.
 [workspace.package]
-version = "0.6.0-alpha.1"
+version = "0.6.0-alpha.2"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
