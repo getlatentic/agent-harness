@@ -100,6 +100,7 @@ impl Harness for CodexHarness {
             custom_model: true,
             effort: true,
             login: true,
+            custom_instructions: true,
             ..Default::default()
         }
     }
@@ -276,7 +277,7 @@ fn build_codex_args(
     // `exec resume` too.
     args.push("--json".to_owned());
     args.push("--skip-git-repo-check".to_owned());
-    if let Some(model) = tuning.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+    if let Some(model) = crate::harness::nonblank(tuning.model.as_deref()) {
         args.push("--model".to_owned());
         args.push(model.to_owned());
     }
@@ -288,6 +289,25 @@ fn build_codex_args(
     let effort = tuning.effort.unwrap_or(crate::ReasoningEffort::Low);
     args.push("-c".to_owned());
     args.push(format!("model_reasoning_effort=\"{}\"", effort.as_cli_value()));
+    // The host's custom instructions, as a `developer` role message alongside
+    // Codex's own base instructions — additive, which is what
+    // `extra_instructions` means. `base_instructions` would *replace* them and
+    // is not what this field offers.
+    //
+    // There is no CLI flag; the door is `-c`, whose value is parsed as TOML. The
+    // help says an unparseable value falls back to a raw literal, but relying on
+    // that would misread the values that *do* parse — `true`, `12`, anything
+    // containing `=` — so the text is emitted as an escaped TOML basic string.
+    //
+    // Verified against codex-cli 0.149.0 rather than read: with
+    // `developer_instructions` set to answer with one fixed word, `What is 2+2?`
+    // returned that word; without it, `4`.
+    if let Some(extra) = crate::harness::nonblank(tuning.extra_instructions.as_deref()) {
+        if !extra_args_sets_config(&tuning.extra_args, "developer_instructions") {
+            args.push("-c".to_owned());
+            args.push(format!("developer_instructions={}", toml_basic_string(extra)));
+        }
+    }
     if matches!(mode, RunMode::Edit) {
         // Low-friction sandboxed auto-execution so Codex can apply
         // edits without interactive approval. (Exact sandbox flags
@@ -302,6 +322,35 @@ fn build_codex_args(
     }
     args.push(prompt);
     args
+}
+
+
+/// A TOML basic string: quoted, with the escapes the spec requires. `-c
+/// key=value` parses `value` as TOML, so an unescaped quote or newline in a
+/// host's instructions would change the key's meaning or fail to parse.
+fn toml_basic_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Whether the host's `extra_args` already sets `-c <key>=…`, so the adapter
+/// should leave the key alone rather than emit a second, losing override.
+fn extra_args_sets_config(extra_args: &[String], key: &str) -> bool {
+    let prefix = format!("{key}=");
+    extra_args.iter().any(|a| a.starts_with(&prefix))
 }
 
 #[cfg(test)]
@@ -506,6 +555,65 @@ mod tests {
             .position(|a| a == flag)
             .and_then(|i| args.get(i + 1))
             .map(String::as_str)
+    }
+
+    /// Every `-c key=value` in `args`, so a test reads the config Codex actually
+    /// receives rather than a flag position.
+    fn config_value<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
+        let prefix = format!("{key}=");
+        args.windows(2)
+            .find(|w| w[0] == "-c" && w[1].starts_with(&prefix))
+            .map(|w| &w[1][prefix.len()..])
+    }
+
+    #[test]
+    fn extra_instructions_ride_as_developer_instructions_but_blank_ones_do_not() {
+        // The last arm is the positive one: an adapter that emitted the key
+        // never would satisfy the blank arms on its own.
+        for (instructions, expected) in
+            [("", None), ("   ", None), ("be terse", Some(r#""be terse""#))]
+        {
+            let tuning =
+                RunTuning { extra_instructions: Some(instructions.to_owned()), ..RunTuning::default() };
+            let args = build_codex_args("hi".to_owned(), RunMode::Ask, &tuning, None);
+            assert_eq!(config_value(&args, "developer_instructions"), expected, "{instructions:?}");
+        }
+    }
+
+    #[test]
+    fn instructions_are_emitted_as_an_escaped_toml_string() {
+        // `-c` parses its value as TOML. A bare quote would end the string early
+        // and a newline would not parse at all, so both are escaped; the result
+        // must be a TOML string that round-trips to the original text.
+        let raw = "say \"hi\"\nthen\tstop\\done";
+        let tuning =
+            RunTuning { extra_instructions: Some(raw.to_owned()), ..RunTuning::default() };
+        let args = build_codex_args("hi".to_owned(), RunMode::Ask, &tuning, None);
+        let emitted = config_value(&args, "developer_instructions").expect("key emitted");
+        assert_eq!(emitted, r#""say \"hi\"\nthen\tstop\\done""#);
+        let parsed: String =
+            serde_json::from_str(emitted).expect("a TOML basic string parses as a JSON string too");
+        assert_eq!(parsed, raw, "escaping must round-trip");
+    }
+
+    #[test]
+    fn a_host_that_sets_developer_instructions_itself_gets_no_duplicate() {
+        let tuning = RunTuning {
+            extra_instructions: Some("adapter copy".to_owned()),
+            extra_args: vec!["-c".to_owned(), "developer_instructions=\"host copy\"".to_owned()],
+            ..RunTuning::default()
+        };
+        let args = build_codex_args("hi".to_owned(), RunMode::Ask, &tuning, None);
+        assert_eq!(
+            args.iter().filter(|a| a.starts_with("developer_instructions=")).count(),
+            1,
+            "adapter must not add a second, losing override"
+        );
+
+        // Positive arm: without the host's copy the adapter emits its own.
+        let adapter_only = RunTuning { extra_args: Vec::new(), ..tuning };
+        let args = build_codex_args("hi".to_owned(), RunMode::Ask, &adapter_only, None);
+        assert_eq!(config_value(&args, "developer_instructions"), Some(r#""adapter copy""#));
     }
 
     #[test]

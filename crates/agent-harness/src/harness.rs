@@ -199,6 +199,7 @@ pub enum RunMode {
     Edit,
 }
 
+#[cfg(any(feature = "codex", feature = "acp"))]
 /// Whether a run may call tools at all — the question of *reach*, kept apart
 /// from [`RunMode`]'s question of *write permission*.
 ///
@@ -352,9 +353,17 @@ pub struct RunTuning {
     /// this schema; the rest ignore it. `None` → free-form text.
     pub output_schema: Option<serde_json::Value>,
     /// Extra system-prompt instructions from the host — the user's per-harness
-    /// "custom instructions". The `openai-compatible` adapter appends it after
-    /// its base system prompt; other adapters currently ignore it (a CLI mapping
-    /// such as Claude's `--append-system-prompt` can opt in later). `None` → none.
+    /// "custom instructions", appended to whatever base prompt the agent has.
+    ///
+    /// A preference, in the tiers on [`Harness`], honoured by every CLI adapter
+    /// that can express it: `openai-compatible` appends it after its base system
+    /// prompt, Claude passes `--append-system-prompt`, and Codex sends
+    /// `-c developer_instructions=…` (a `developer` role message beside its own
+    /// base instructions). ACP has no equivalent and ignores it. `None` → none.
+    ///
+    /// Additive by name and by design — a host wanting to *replace* the agent's
+    /// prompt is asking for something this has never offered (the fourth row on
+    /// [`Harness`]).
     pub extra_instructions: Option<String>,
     /// Absolute path to the agent's executable, overriding PATH resolution of
     /// the bare CLI name. `None` → resolve by name on PATH. CLI adapters
@@ -585,10 +594,18 @@ pub struct Features {
     /// `false` for harnesses Compose authenticates itself (bob).
     pub login: bool,
     /// Honors [`RunTuning::extra_instructions`] — the user's per-harness custom
-    /// instructions, appended to the system prompt. `true` only for the
-    /// `openai-compatible` adapter so far; the picker hides the field for the
-    /// rest rather than offering a control that does nothing.
+    /// instructions, appended to the system prompt. `true` for
+    /// `openai-compatible`, `claude` and `codex`; the picker hides the field for
+    /// an adapter that leaves it `false` rather than offering a control that does
+    /// nothing.
     pub custom_instructions: bool,
+    /// Serves the [`ToolServer`](crate::ToolServer)s a host attaches with the
+    /// adapter's `with_tool_server` — functions the host program implements,
+    /// offered to the agent as an MCP server living in this process. `true` for
+    /// `claude` (over Claude Code's control protocol) and `openai-compatible`
+    /// (dispatched by its own loop). An adapter that leaves it `false` has no
+    /// `with_tool_server`, so a host cannot hand it a tool for it to drop.
+    pub host_tools: bool,
 }
 
 /// Where a user gets a harness that isn't on the machine yet.
@@ -926,7 +943,16 @@ fn login_event(event: &Event) -> Option<InstallEvent> {
 /// code, hence the `cfg`.
 #[cfg(any(feature = "claude", feature = "codex"))]
 pub(crate) fn api_key_value_usable(value: Option<String>) -> bool {
-    matches!(value, Some(v) if !v.trim().is_empty())
+    nonblank(value.as_deref()).is_some()
+}
+
+/// The text a host actually gave, trimmed — `None` for an absent or
+/// whitespace-only value. An empty `--model ""` or an all-blank instruction
+/// would otherwise reach the CLI as a request for nothing. Every adapter uses
+/// it, so the lean build has no caller.
+#[cfg(any(feature = "claude", feature = "codex", feature = "openai-compatible"))]
+pub(crate) fn nonblank(text: Option<&str>) -> Option<&str> {
+    text.map(str::trim).filter(|t| !t.is_empty())
 }
 
 #[cfg(test)]

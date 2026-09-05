@@ -20,6 +20,10 @@ cargo add agent-harness
 - **Swap agents without rewriting.** Change the constructor. Your loop stays.
 - **A built-in agent for open models.** The `openai-compatible` feature is not a
   wrapper. It speaks the chat API and runs the tool loop in Rust.
+- **Hand the agent your functions.** A `ToolServer` of `HostTool`s lives in
+  your process and is offered to the agent as an MCP server — no server
+  binary, no port. Claude Code reaches it over its control protocol; the
+  built-in agent dispatches to it directly.
 - **Add your own agent.** Implement `Harness` in your own crate and register it.
   No fork.
 - **Discovery, not installation.** `readiness()` reports what is on the machine.

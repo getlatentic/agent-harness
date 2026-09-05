@@ -22,6 +22,7 @@
 
 pub mod events;
 pub mod harness;
+pub mod host_tools;
 pub mod raw;
 pub mod models_dev;
 mod program_path;
@@ -34,6 +35,7 @@ pub use events::{
     SuggestedEdit, ToolCallEnd, ToolCallStart, ToolKind, ToolLocation, UsageInfo,
 };
 pub use raw::parse_raw_line;
+pub use host_tools::{FnTool, HostTool, ToolServer};
 pub use harness::{
     run_login_command, Attachment, BoxError, CredentialSpec, Harness, Features, Error,
     Info, ModelChoice, Readiness, InstallCallback, InstalledModel, InstallHint,

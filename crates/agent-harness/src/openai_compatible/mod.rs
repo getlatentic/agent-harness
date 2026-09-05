@@ -225,6 +225,8 @@ pub struct OpenHarness {
     agents: Vec<(String, AgentDef)>,
     /// MCP servers to launch over stdio and expose their tools to the model.
     mcp_servers: Vec<McpServer>,
+    /// Host tools dispatched in this process — see [`Self::with_tool_server`].
+    tool_servers: Vec<crate::ToolServer>,
     /// Per-model pricing for cost estimation on `RunEvent::Usage`.
     model_costs: Vec<(String, ModelCost)>,
     /// Pre-execution permission rules gating tool calls.
@@ -402,6 +404,7 @@ impl OpenHarness {
             context_tokens: None,
             agents: Vec::new(),
             mcp_servers: Vec::new(),
+            tool_servers: Vec::new(),
             model_costs: Vec::new(),
             permissions: Vec::new(),
             permission_prompt: None,
@@ -442,6 +445,7 @@ impl OpenHarness {
             context_tokens: None,
             agents: Vec::new(),
             mcp_servers: Vec::new(),
+            tool_servers: Vec::new(),
             model_costs: Vec::new(),
             permissions: Vec::new(),
             permission_prompt: None,
@@ -579,6 +583,18 @@ impl OpenHarness {
         self
     }
 
+    /// Offer the model a [`ToolServer`](crate::ToolServer) of functions this
+    /// program implements. This runtime owns its loop, so the tools are
+    /// dispatched here directly — no MCP transport — and offered under the name
+    /// an MCP server of that name would give them (`<server>_<tool>`), so a
+    /// tool can move between an in-process server and an external one without
+    /// the model seeing a different name. A read-only tool is offered in
+    /// [`RunMode::Ask`](crate::RunMode::Ask); the rest only in `Edit`.
+    pub fn with_tool_server(mut self, server: crate::ToolServer) -> Self {
+        self.tool_servers.push(server);
+        self
+    }
+
     /// Register per-token pricing for a model, so its runs emit an estimated cost
     /// on [`crate::RunEvent::Usage`]. Rates are USD per million tokens.
     pub fn with_model_cost(mut self, model: impl Into<String>, cost: ModelCost) -> Self {
@@ -691,6 +707,7 @@ impl Harness for OpenHarness {
             custom_model: true,
             max_turns: true,
             custom_instructions: true,
+            host_tools: true,
             ..Default::default()
         }
     }
@@ -807,6 +824,7 @@ impl Harness for OpenHarness {
             dialect,
             agents: self.agents.clone(),
             mcp_servers: self.mcp_servers.clone(),
+            tool_servers: self.tool_servers.clone(),
             output_schema: tuning.output_schema,
             model_cost,
             image_data_uris,

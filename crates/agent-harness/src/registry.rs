@@ -191,6 +191,10 @@ mod tests {
             withheld_tools: _,
             login: _,
             custom_instructions: _,
+            // Advertise-only. A caller acts on it — but an adapter without it
+            // has no `with_tool_server`, so there is no request to refuse and
+            // nothing an adapter could silently drop.
+            host_tools: _,
         } = crate::Features::default();
         vec!["withheld_tools"]
     }
@@ -233,6 +237,11 @@ mod tests {
         assert!(codex.custom_model && codex.effort && !codex.max_turns);
 
         assert!(claude.login && codex.login);
+        // Both adapters map `extra_instructions` onto their CLI; the picker
+        // shows the field only where this is true.
+        assert!(claude.custom_instructions && codex.custom_instructions);
+        // Only adapters with a `with_tool_server` may say so.
+        assert!(claude.host_tools && !codex.host_tools);
     }
 
     // A third-party / custom provider — proves the registry is open: this

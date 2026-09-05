@@ -7,6 +7,62 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+### Added
+
+- **Host tools: functions from your own program, offered to the agent
+  in-process.** `ToolServer::new("shop").with_tool(FnTool::new(…))` — or your
+  own `HostTool` impl — attached with `with_tool_server` on `Claude` and
+  `OpenHarness`. The agent sees an MCP server of that name; nothing is spawned
+  and nothing listens on a port.
+
+  - Claude Code is served over its control protocol: the run opens
+    `--input-format stream-json`, registers the servers in an `initialize`
+    control request, sends the prompt as a `user` message, answers each
+    `mcp_message` with the server's JSON-RPC reply, and closes stdin after the
+    `result` so the CLI exits. This is the Agent SDK's `type: "sdk"` MCP server,
+    from Rust. Runs with no tool server attached, and runs asking for
+    `ToolAccess::None`, keep the one-way spawn unchanged.
+  - The `openai-compatible` runtime dispatches to the tool directly, in its own
+    loop, under the name an MCP server would give it (`<server>_<tool>`), with
+    the same deferral and permission rules. A tool declared `read_only` is
+    offered in `Ask`; the rest only in `Edit`.
+  - `Features::host_tools` says which adapters serve them. Codex and ACP have
+    no `with_tool_server`, so there is nothing for them to drop.
+  - Protocol facts measured against Claude Code 2.1.241: under stream-json
+    input the positional prompt is ignored (a run with one and a closed stdin
+    produces nothing); the CLI does not exit after the answer until stdin
+    closes; `initialize.sdkMcpServers` alone registers a server, without
+    `--mcp-config`.
+
+- `cli-stream`: `ProcessHandle::close_stdin`, so a child that reads until EOF
+  can be told the conversation is over.
+
+### Changed
+
+- **`RunTuning::extra_instructions` is now honoured by the Claude and Codex
+  adapters.** It was previously read only by `openai-compatible`, so a host's
+  custom instructions were silently dropped on the two adapters most likely to
+  be running.
+
+  - Claude: `--append-system-prompt`.
+  - Codex: `-c developer_instructions=…`, a `developer` role message beside
+    Codex's own base instructions. There is no flag for it — `-c` is the door,
+    and its value is parsed as TOML, so the text is emitted as an escaped TOML
+    basic string rather than relying on the documented raw-literal fallback
+    (which would misread any value that *does* parse, such as `true` or one
+    containing `=`).
+
+  Both skip the setting when the host already provides it through `extra_args`,
+  and neither emits anything for a blank string. Both were verified against the
+  installed CLIs — for Codex, `developer_instructions` set to answer with one
+  fixed word returned that word where an unmodified run returned `4`, and a
+  value carrying a quote, a newline and an `=` round-tripped intact.
+
+  This is the only lever some callers have. A DSPy `ReActV2` loop over these
+  adapters renders its tools as text, and dspy drops `tool_choice` on a rendered
+  exchange — so its forced submit never reaches the provider, and prose in the
+  system prompt is what is left.
+
 ## [0.6.0-alpha.1] - 2026-09-04
 
 A release about what a run *reports* and what it is *allowed to reach*. Two of

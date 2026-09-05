@@ -19,8 +19,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use harness::{
-    ApiKey, Attachment, Harness, ModelChoice, OpenHarness, OpenHarnessConfig, PromptCache, RunEvent, RunMode,
-    RunRequest, RunTuning,
+    ApiKey, Attachment, FnTool, Harness, ModelChoice, OpenHarness, OpenHarnessConfig, PromptCache, RunEvent,
+    RunMode, RunRequest, RunTuning, ToolServer,
 };
 use serde_json::{json, Value};
 
@@ -372,4 +372,56 @@ fn the_delay_a_provider_asks_for_is_the_delay_it_gets() {
     assert_eq!(streamed_text(&events), "pong");
     assert_eq!(seen.lock().unwrap().len(), 2);
     assert!(waited >= Duration::from_millis(900), "the asked-for second is actually waited: {waited:?}");
+}
+
+#[test]
+fn a_host_tool_is_offered_under_its_server_name_and_dispatched_in_this_process() {
+    // The closure below is the whole point: it runs here, in the test's
+    // process, because the model asked for it — no server, no subprocess.
+    let called: Arc<Mutex<Option<Value>>> = Arc::default();
+    let record = Arc::clone(&called);
+    let shop = ToolServer::new("shop").with_tool(
+        FnTool::new(
+            "stock",
+            "units on hand",
+            json!({ "type": "object", "properties": { "sku": { "type": "string" } } }),
+            move |args| {
+                *record.lock().unwrap() = Some(args);
+                Ok("42 units".to_owned())
+            },
+        )
+        .as_read_only(),
+    );
+    let (base, seen) = fake_openai(vec![
+        (
+            200,
+            sse(&[json!({ "choices": [{ "delta": { "tool_calls": [{ "index": 0, "id": "c1",
+                "function": { "name": "shop_stock", "arguments": "{\"sku\":\"A-7\"}" } }] } }] })]),
+        ),
+        answer("42 units of A-7"),
+    ]);
+    let harness = harness_at(&base, ApiKey::NotNeeded, PromptCache::default()).with_tool_server(shop);
+    // `ask` is a read-only run, so this also shows a read-only host tool is
+    // offered where a mutating one would be withheld.
+    let events = collect(&harness, ask("how many A-7 are on hand?"));
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2, "the result goes back for a second turn: {events:?}");
+    let offered = seen[0].body["tools"].as_array().expect("tools offered");
+    let stock = offered
+        .iter()
+        .find(|t| t["function"]["name"] == "shop_stock")
+        .unwrap_or_else(|| panic!("host tool offered under <server>_<tool>: {offered:?}"));
+    assert_eq!(stock["function"]["description"], "units on hand");
+    assert_eq!(stock["function"]["parameters"]["properties"]["sku"]["type"], "string");
+
+    assert_eq!(*called.lock().unwrap(), Some(json!({ "sku": "A-7" })), "the closure ran with the model's arguments");
+    let followup = seen[1].body["messages"].as_array().unwrap();
+    let result = followup.iter().find(|m| m["role"] == "tool").expect("the tool result is fed back");
+    assert_eq!(result["content"], "42 units");
+    assert!(
+        events.iter().any(|e| matches!(e, RunEvent::ToolStart { title, .. } if title == "shop_stock")),
+        "the call shows on the event stream: {events:?}"
+    );
+    assert_eq!(streamed_text(&events), "42 units of A-7");
 }

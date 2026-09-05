@@ -131,6 +131,10 @@ required-features = ["openai-compatible"]
 name = "tool_call"
 required-features = ["openai-compatible"]
 
+[[example]]
+name = "host_tools"
+required-features = ["claude"]
+
 # cargo-release stamps the single shared workspace CHANGELOG here — on the last
 # crate of the lockstep release — so the version header is inserted exactly
 # once (a workspace-wide replacement would run per crate and duplicate it). The

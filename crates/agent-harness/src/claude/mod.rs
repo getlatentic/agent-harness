@@ -21,9 +21,10 @@ use crate::{
     normalize_process_event, probe_version, Command, ResolveCli, CredentialSpec, Harness,
     Features, Error, Info, ModelChoice, Readiness,
     InstallCallback, InstallHint, RunCallback, RunHandle, RunMode, RunRequest, RunTuning,
-    ToolAccess,
+    ToolAccess, ToolServer,
 };
 
+mod control;
 mod parser;
 // Shared with the Codex adapter so it can report its install-kind too. (The
 // binary resolve + classify logic is harness-agnostic; it lives here for now.)
@@ -40,6 +41,9 @@ pub const DEFAULT_CLAUDE_COMMAND: &str = "claude";
 #[derive(Debug, Clone)]
 pub struct ClaudeHarness {
     command: String,
+    /// Host tools served to the CLI over its control protocol — see
+    /// [`Self::with_tool_server`].
+    tool_servers: Vec<ToolServer>,
 }
 
 impl Default for ClaudeHarness {
@@ -83,7 +87,19 @@ impl ClaudeHarness {
     /// });
     /// ```
     pub fn custom(config: ClaudeHarnessConfig) -> Self {
-        Self { command: config.command }
+        Self { command: config.command, tool_servers: Vec::new() }
+    }
+
+    /// Offer the agent a [`ToolServer`] of functions this program implements.
+    ///
+    /// Claude Code sees it as an MCP server named after the server, with each
+    /// tool as `mcp__<server>__<tool>`, and calls back into this process over
+    /// its control protocol — no server process, no port. Attaching one opens
+    /// that channel for every run that may call tools; a run asking for
+    /// [`ToolAccess::None`] is unchanged, since it may call nothing.
+    pub fn with_tool_server(mut self, server: ToolServer) -> Self {
+        self.tool_servers.push(server);
+        self
     }
 }
 
@@ -120,6 +136,8 @@ impl Harness for ClaudeHarness {
             max_turns: true,
             withheld_tools: true,
             login: true,
+            custom_instructions: true,
+            host_tools: true,
             ..Default::default()
         }
     }
@@ -174,25 +192,31 @@ impl Harness for ClaudeHarness {
     fn start(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, Error> {
         // `attachments` ignored: Claude Code is a text CLI (no image input here).
         let RunRequest { run_id, prompt, cwd, mode, tools, tuning, resume, attachments: _ } = request;
-        let args = build_claude_args(prompt, mode, tools, &tuning, resume.as_deref());
+        // Host tools ride the control channel, and so does the prompt, as a
+        // message — under stream-json input the CLI ignores the positional. A
+        // run that may call nothing has no use for the channel and keeps the
+        // one-way spawn.
+        let over_control_channel = !self.tool_servers.is_empty() && tools != ToolAccess::None;
+        let positional = if over_control_channel { None } else { Some(prompt.clone()) };
+        let args = build_claude_args(positional, mode, tools, &tuning, resume.as_deref());
         let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
         // No env injected — Claude Code uses its own auth. PATH
         // augmentation inside `spawn_streaming` ensures `node` is
         // found for a Finder-launched .app.
         let program = tuning.binary_path.clone().unwrap_or_else(|| PathBuf::from(&self.command));
-        let handle = Command::new(program)
-            .cwd(cwd)
-            .run_id(run_id)
-            .args(args)
-            .resolve_cli()
+        let command = Command::new(program).cwd(cwd).run_id(run_id.clone()).args(args).resolve_cli();
+        if over_control_channel {
+            let handle = control::start(command, &run_id, prompt, self.tool_servers.clone(), on_event)?;
+            return Ok(Box::new(handle));
+        }
+        let handle = command
             .stream(move |event| {
                 for normalized in normalize_process_event(event, parse_claude_line) {
                     (*on_event)(normalized);
                 }
-            },
-        )
-        .map_err(Error::spawn)?;
+            })
+            .map_err(Error::spawn)?;
         Ok(Box::new(handle))
     }
 
@@ -267,26 +291,29 @@ fn resolved_details(command: &str) -> Value {
 /// reasoning-effort `-p` flag, so `tuning.effort` is intentionally
 /// ignored here.
 fn build_claude_args(
-    prompt: String,
+    prompt: Option<String>,
     mode: RunMode,
     tools: ToolAccess,
     tuning: &RunTuning,
     resume: Option<&str>,
 ) -> Vec<String> {
-    let mut args = vec![
-        "-p".to_owned(),
-        prompt,
-        "--output-format".to_owned(),
-        "stream-json".to_owned(),
-        "--verbose".to_owned(),
-        "--include-partial-messages".to_owned(),
-    ];
+    // `None` means the prompt arrives on stdin as a stream-json message, which
+    // is how the control channel is opened — see [`control`]. The CLI ignores
+    // a positional prompt in that mode, so none is sent.
+    let mut args = vec!["-p".to_owned()];
+    match prompt {
+        Some(prompt) => args.push(prompt),
+        None => args.extend(["--input-format".to_owned(), "stream-json".to_owned()]),
+    }
+    args.extend(
+        ["--output-format", "stream-json", "--verbose", "--include-partial-messages"].map(str::to_owned),
+    );
     // Continue a prior session instead of replaying history in the prompt.
     if let Some(session_id) = resume {
         args.push("--resume".to_owned());
         args.push(session_id.to_owned());
     }
-    if let Some(model) = tuning.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+    if let Some(model) = crate::harness::nonblank(tuning.model.as_deref()) {
         args.push("--model".to_owned());
         args.push(model.to_owned());
     }
@@ -350,6 +377,22 @@ fn build_claude_args(
         && !extra_args_sets(&tuning.extra_args, "--mcp-config")
     {
         args.push("--strict-mcp-config".to_owned());
+    }
+    // The host's custom instructions, appended to the agent's own system prompt.
+    // `--append-system-prompt` is additive, which is what `extra_instructions`
+    // has always been: replacing Claude's prompt is not on offer here, and
+    // `--system-prompt` is the flag that would do it.
+    //
+    // This matters where a caller cannot steer the model any other way. A DSPy
+    // ReActV2 loop over this adapter renders its tools as text, and its
+    // `forced_tool` steering is dropped on that path — the provider is never
+    // told to submit — so the only remaining lever on the final turn is prose in
+    // the system prompt.
+    if let Some(extra) = crate::harness::nonblank(tuning.extra_instructions.as_deref()) {
+        if !extra_args_sets(&tuning.extra_args, "--append-system-prompt") {
+            args.push("--append-system-prompt".to_owned());
+            args.push(extra.to_owned());
+        }
     }
     if matches!(mode, RunMode::Edit) && !extra_args_sets(&tuning.extra_args, "--permission-mode") {
         args.push("--permission-mode".to_owned());
@@ -589,7 +632,7 @@ mod tests {
     #[test]
     fn withheld_tools_are_denied_by_name_not_by_an_empty_allowlist() {
         let args =
-            build_claude_args("hi".into(), RunMode::Ask, ToolAccess::None, &RunTuning::default(), None);
+            build_claude_args(Some("hi".into()), RunMode::Ask, ToolAccess::None, &RunTuning::default(), None);
         assert!(!args.iter().any(|a| a == "--allowedTools"), "that flag does not gate anything");
         let i = args.iter().position(|a| a == "--disallowedTools").expect("the flag");
         assert_eq!(args[i + 1], "*", "a wildcard: a name list leaked 2 of 3 live runs");
@@ -602,7 +645,7 @@ mod tests {
     #[test]
     fn write_permission_and_tool_access_are_independent() {
         let args =
-            build_claude_args("hi".into(), RunMode::Edit, ToolAccess::None, &RunTuning::default(), None);
+            build_claude_args(Some("hi".into()), RunMode::Edit, ToolAccess::None, &RunTuning::default(), None);
         let i = args.iter().position(|a| a == "--disallowedTools").expect("no tools offered");
         assert_eq!(args[i + 1], "*");
         let j = args.iter().position(|a| a == "--permission-mode").expect("still an edit run");
@@ -615,11 +658,11 @@ mod tests {
     #[test]
     fn withheld_tools_do_not_connect_mcp_servers_either() {
         let args =
-            build_claude_args("hi".into(), RunMode::Ask, ToolAccess::None, &RunTuning::default(), None);
+            build_claude_args(Some("hi".into()), RunMode::Ask, ToolAccess::None, &RunTuning::default(), None);
         assert!(args.iter().any(|a| a == "--strict-mcp-config"), "{args:?}");
         // …and an ordinary run is untouched: a host mounting servers keeps them.
         let open =
-            build_claude_args("hi".into(), RunMode::Ask, ToolAccess::Default, &RunTuning::default(), None);
+            build_claude_args(Some("hi".into()), RunMode::Ask, ToolAccess::Default, &RunTuning::default(), None);
         assert!(!open.iter().any(|a| a == "--strict-mcp-config"), "{open:?}");
     }
 
@@ -631,7 +674,7 @@ mod tests {
             extra_args: vec!["--mcp-config".into(), "servers.json".into()],
             ..Default::default()
         };
-        let args = build_claude_args("hi".into(), RunMode::Ask, ToolAccess::None, &tuning, None);
+        let args = build_claude_args(Some("hi".into()), RunMode::Ask, ToolAccess::None, &tuning, None);
         assert!(!args.iter().any(|a| a == "--strict-mcp-config"), "{args:?}");
     }
 
@@ -641,7 +684,7 @@ mod tests {
             extra_args: vec!["--disallowedTools".into(), "Bash".into()],
             ..Default::default()
         };
-        let args = build_claude_args("hi".into(), RunMode::Ask, ToolAccess::None, &tuning, None);
+        let args = build_claude_args(Some("hi".into()), RunMode::Ask, ToolAccess::None, &tuning, None);
         let flags = args.iter().filter(|a| *a == "--disallowedTools").count();
         assert_eq!(flags, 1, "exactly one, and it is the host's");
         assert!(args.contains(&"Bash".to_owned()));
@@ -649,7 +692,7 @@ mod tests {
 
     #[test]
     fn claude_args_default_omit_model_and_turn_cap() {
-        let args = build_claude_args("hi".to_owned(), RunMode::Ask, ToolAccess::Default, &RunTuning::default(), None);
+        let args = build_claude_args(Some("hi".to_owned()), RunMode::Ask, ToolAccess::Default, &RunTuning::default(), None);
         // Prompt is the positional right after `-p`.
         assert_eq!(args[0], "-p");
         assert_eq!(args[1], "hi");
@@ -661,7 +704,7 @@ mod tests {
     #[test]
     fn claude_resume_adds_session_flag() {
         let args =
-            build_claude_args("hi".to_owned(), RunMode::Ask, ToolAccess::Default, &RunTuning::default(), Some("sess-123"));
+            build_claude_args(Some("hi".to_owned()), RunMode::Ask, ToolAccess::Default, &RunTuning::default(), Some("sess-123"));
         assert_eq!(flag_value(&args, "--resume"), Some("sess-123"));
         // The prompt + headless stream flags are untouched.
         assert_eq!(args[0], "-p");
@@ -676,7 +719,7 @@ mod tests {
             max_turns: Some(5),
             ..RunTuning::default()
         };
-        let args = build_claude_args("hi".to_owned(), RunMode::Ask, ToolAccess::Default, &tuning, None);
+        let args = build_claude_args(Some("hi".to_owned()), RunMode::Ask, ToolAccess::Default, &tuning, None);
         assert_eq!(flag_value(&args, "--model"), Some("opus"));
         assert_eq!(flag_value(&args, "--max-turns"), Some("5"));
         // Claude Code has no reasoning-effort `-p` flag — it must not leak.
@@ -686,15 +729,169 @@ mod tests {
     #[test]
     fn claude_blank_model_is_treated_as_unset() {
         let tuning = RunTuning { model: Some("   ".to_owned()), ..RunTuning::default() };
-        let args = build_claude_args("hi".to_owned(), RunMode::Ask, ToolAccess::Default, &tuning, None);
+        let args = build_claude_args(Some("hi".to_owned()), RunMode::Ask, ToolAccess::Default, &tuning, None);
         assert!(!args.iter().any(|a| a == "--model"));
     }
 
     #[test]
     fn claude_edit_mode_defaults_to_accept_edits() {
         // Conservative built-in default; a host overrides via extra_args.
-        let args = build_claude_args("hi".to_owned(), RunMode::Edit, ToolAccess::Default, &RunTuning::default(), None);
+        let args = build_claude_args(Some("hi".to_owned()), RunMode::Edit, ToolAccess::Default, &RunTuning::default(), None);
         assert_eq!(flag_value(&args, "--permission-mode"), Some("acceptEdits"));
+    }
+
+    #[test]
+    fn a_prompt_on_stdin_opens_the_control_channel_and_sends_no_positional() {
+        let args = build_claude_args(None, RunMode::Ask, ToolAccess::Default, &RunTuning::default(), None);
+        assert_eq!(&args[..3], &["-p", "--input-format", "stream-json"], "no positional, input on stdin");
+        // The ordinary spawn is untouched: prompt positional, no input format.
+        let args = build_claude_args(Some("hi".into()), RunMode::Ask, ToolAccess::Default, &RunTuning::default(), None);
+        assert_eq!(&args[..2], &["-p", "hi"]);
+        assert!(!args.iter().any(|a| a == "--input-format"));
+    }
+
+    /// A stand-in for `claude` speaking just enough of the control protocol to
+    /// call one host tool: it checks each message the adapter must send, in the
+    /// order the CLI needs them, and exits with a distinct code at the first
+    /// one that is wrong — so a failure names the step. It then waits for EOF,
+    /// which is how the adapter is supposed to end the conversation.
+    ///
+    /// Keys are matched one at a time because `serde_json` writes them sorted.
+    #[cfg(unix)]
+    fn fake_control_claude() -> std::path::PathBuf {
+        crate::test_support::fake_cli(
+            "claude-control",
+            r#"read -r init
+case "$init" in *'"subtype":"initialize"'*) ;; *) exit 3;; esac
+case "$init" in *'"sdkMcpServers":["shop"]'*) ;; *) exit 3;; esac
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"run-1-initialize","response":{}}}'
+read -r user
+case "$user" in *'"type":"user"'*) ;; *) exit 4;; esac
+case "$user" in *'"content":"count the stock"'*) ;; *) exit 4;; esac
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"s1","tools":[],"mcp_servers":[{"name":"shop","status":"connected"}]}'
+printf '%s\n' '{"type":"control_request","request_id":"c1","request":{"subtype":"mcp_message","server_name":"shop","message":{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"stock","arguments":{"sku":"A"}}}}}'
+read -r reply
+case "$reply" in *'"request_id":"c1"'*) ;; *) exit 5;; esac
+case "$reply" in *'"mcp_response"'*) ;; *) exit 5;; esac
+text=$(printf '%s' "$reply" | sed -n 's/.*"text":"\([^"]*\)".*/\1/p')
+printf '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%s"}}}\n' "$text"
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false}'
+cat >/dev/null
+"#,
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_host_tool_is_served_over_the_control_channel_and_stdin_is_closed_after_the_result() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let cli = fake_control_claude();
+        let claude = ClaudeHarness::custom(ClaudeHarnessConfig { command: cli.to_string_lossy().into_owned() })
+            .with_tool_server(ToolServer::new("shop").with_tool(crate::FnTool::new(
+                "stock",
+                "units on hand",
+                serde_json::json!({"type": "object"}),
+                |args| Ok(format!("{} units", args["sku"].as_str().unwrap_or("").len())),
+            )));
+        let (tx, rx) = mpsc::channel();
+        let _handle = claude
+            .start(
+                RunRequest {
+                    run_id: "run-1".to_owned(),
+                    prompt: "count the stock".to_owned(),
+                    cwd: Some(std::env::temp_dir()),
+                    ..Default::default()
+                },
+                std::sync::Arc::new(move |event| {
+                    let _ = tx.send(event);
+                }),
+            )
+            .expect("spawns");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut events = Vec::new();
+        loop {
+            let left = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or_else(|| panic!("no Exited: stdin was never closed after the result — {events:?}"));
+            match rx.recv_timeout(left) {
+                Ok(event) => {
+                    let done = matches!(event, crate::RunEvent::Exited { .. });
+                    events.push(event);
+                    if done {
+                        break;
+                    }
+                }
+                Err(err) => panic!("stream ended without Exited ({err}): {events:?}"),
+            }
+        }
+
+        let said: String = events
+            .iter()
+            .filter_map(|e| match e {
+                crate::RunEvent::Text { delta, .. } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, "1 units", "the tool's answer reached the CLI and came back: {events:?}");
+        assert!(
+            events.iter().any(|e| matches!(e, crate::RunEvent::Exited { exit_code: Some(0), cancelled: false, .. })),
+            "exit 3/4/5 names the protocol step the adapter got wrong: {events:?}"
+        );
+    }
+
+    #[test]
+    fn extra_instructions_are_appended_to_the_system_prompt() {
+        let tuning = RunTuning {
+            extra_instructions: Some("  always emit a submit tool call  ".to_owned()),
+            ..RunTuning::default()
+        };
+        let args = build_claude_args(Some("hi".to_owned()), RunMode::Ask, ToolAccess::Default, &tuning, None);
+        assert_eq!(flag_value(&args, "--append-system-prompt"), Some("always emit a submit tool call"));
+    }
+
+    #[test]
+    fn blank_extra_instructions_emit_no_flag_but_real_ones_do() {
+        // An empty string is the host saying "no custom instructions", not a
+        // request to append nothing — an empty flag value would cost a prompt
+        // section and change the run for no reason.
+        //
+        // The last arm is the positive one, and it is why this test can fail: an
+        // adapter that emitted the flag *never* would satisfy the blank arms
+        // alone, which is a negative claim answered by a mechanism that does
+        // nothing.
+        for (instructions, expected) in [("", None), ("   ", None), ("real", Some("real"))] {
+            let tuning =
+                RunTuning { extra_instructions: Some(instructions.to_owned()), ..RunTuning::default() };
+            let args = build_claude_args(Some("hi".to_owned()), RunMode::Ask, ToolAccess::Default, &tuning, None);
+            assert_eq!(
+                flag_value(&args, "--append-system-prompt"),
+                expected,
+                "instructions {instructions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_that_sets_append_system_prompt_itself_gets_no_duplicate() {
+        // Same rule as --permission-mode: the host fully owns a flag it sets.
+        let tuning = RunTuning {
+            extra_instructions: Some("adapter copy".to_owned()),
+            extra_args: vec!["--append-system-prompt".to_owned(), "host copy".to_owned()],
+            ..RunTuning::default()
+        };
+        let args = build_claude_args(Some("hi".to_owned()), RunMode::Ask, ToolAccess::Default, &tuning, None);
+        assert_eq!(args.iter().filter(|a| *a == "--append-system-prompt").count(), 1);
+        assert_eq!(flag_value(&args, "--append-system-prompt"), Some("host copy"));
+
+        // The positive arm: the same tuning WITHOUT the host's flag emits the
+        // adapter's own copy. Without this, an adapter that never emitted
+        // anything would pass the deduplication assertion above.
+        let adapter_only = RunTuning { extra_args: Vec::new(), ..tuning };
+        let args = build_claude_args(Some("hi".to_owned()), RunMode::Ask, ToolAccess::Default, &adapter_only, None);
+        assert_eq!(flag_value(&args, "--append-system-prompt"), Some("adapter copy"));
     }
 
     #[test]
@@ -704,7 +901,7 @@ mod tests {
             extra_args: vec!["--add-dir".to_owned(), "/extra".to_owned()],
             ..RunTuning::default()
         };
-        let args = build_claude_args("hi".to_owned(), RunMode::Ask, ToolAccess::Default, &tuning, None);
+        let args = build_claude_args(Some("hi".to_owned()), RunMode::Ask, ToolAccess::Default, &tuning, None);
         assert!(args.ends_with(&["--add-dir".to_owned(), "/extra".to_owned()]));
     }
 
@@ -716,7 +913,7 @@ mod tests {
             extra_args: vec!["--permission-mode".to_owned(), "bypassPermissions".to_owned()],
             ..RunTuning::default()
         };
-        let args = build_claude_args("hi".to_owned(), RunMode::Edit, ToolAccess::Default, &tuning, None);
+        let args = build_claude_args(Some("hi".to_owned()), RunMode::Edit, ToolAccess::Default, &tuning, None);
         let modes: Vec<usize> = args
             .iter()
             .enumerate()
