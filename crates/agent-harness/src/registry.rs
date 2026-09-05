@@ -199,6 +199,10 @@ mod tests {
             // has no `with_tool_server`, so there is no request to refuse and
             // nothing an adapter could silently drop.
             host_tools: _,
+            // Advertise-only. A schema an adapter cannot honour shows up in the
+            // result — prose where data was expected — so the caller sees it,
+            // and reads the flag first to know which to expect.
+            structured_output: _,
         } = crate::Features::default();
         vec!["withheld_tools"]
     }
@@ -248,6 +252,7 @@ mod tests {
         assert!(claude.custom_instructions && codex.custom_instructions);
         // Only adapters with a `with_tool_server` may say so.
         assert!(claude.host_tools && !codex.host_tools);
+        assert!(claude.structured_output && codex.structured_output);
     }
 
     // A third-party / custom provider — proves the registry is open: this

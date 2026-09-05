@@ -198,25 +198,23 @@ pub fn parse_claude_line(line: &str) -> ParsedLine {
             let cache_write_tokens = usage
                 .and_then(|u| u.get("cache_creation_input_tokens"))
                 .and_then(Value::as_u64);
-            if input_tokens.is_none() && output_tokens.is_none() {
-                return ParsedLine::default();
-            }
             // Claude reports input/output separately; derive the total. Cache
             // tokens are reported separately and are NOT folded into the total.
             let total_tokens = match (input_tokens, output_tokens) {
                 (Some(i), Some(o)) => Some(i + o),
                 _ => None,
             };
-            ParsedLine {
-                usage: Some(UsageInfo {
-                    input_tokens,
-                    output_tokens,
-                    total_tokens,
-                    cache_read_tokens,
-                    cache_write_tokens,
-                }),
-                ..ParsedLine::default()
-            }
+            let usage = (input_tokens.is_some() || output_tokens.is_some()).then_some(UsageInfo {
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            });
+            // Under `--json-schema` the CLI puts the `StructuredOutput` tool's input
+            // here, whole — the prose already streamed is the model's commentary.
+            let structured_output = obj.get("structured_output").filter(|v| !v.is_null()).cloned();
+            ParsedLine { usage, structured_output, ..ParsedLine::default() }
         }
         // Aggregate assistant lines: text already streamed via deltas, so we
         // take ONLY a completed `AskUserQuestion` tool call from one — its full
@@ -466,6 +464,31 @@ mod tests {
             &serde_json::json!({ "type": "result", "subtype": "success", "is_error": false }).to_string()
         )
         .is_empty());
+    }
+
+    #[test]
+    fn a_result_carrying_structured_output_yields_it_with_or_without_usage() {
+        let with_usage = parse_claude_line(
+            &serde_json::json!({ "type": "result", "subtype": "success", "structured_output": { "code": "q" },
+                "usage": { "input_tokens": 3, "output_tokens": 1 } })
+            .to_string(),
+        );
+        assert_eq!(with_usage.structured_output, Some(serde_json::json!({ "code": "q" })));
+        assert!(with_usage.usage.is_some());
+        // The shape reaches the host even on a result line with no token counts,
+        // which used to return nothing at all.
+        let alone = parse_claude_line(
+            &serde_json::json!({ "type": "result", "subtype": "success", "structured_output": { "code": "q" } }).to_string(),
+        );
+        assert_eq!(alone.structured_output, Some(serde_json::json!({ "code": "q" })));
+        assert!(alone.usage.is_none());
+        // `null` is the CLI saying there was none.
+        let none = parse_claude_line(
+            &serde_json::json!({ "type": "result", "subtype": "success", "structured_output": null,
+                "usage": { "input_tokens": 3, "output_tokens": 1 } })
+            .to_string(),
+        );
+        assert!(none.structured_output.is_none() && none.usage.is_some());
     }
 
     #[test]

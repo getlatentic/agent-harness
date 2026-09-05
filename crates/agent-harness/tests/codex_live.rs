@@ -115,3 +115,70 @@ fn codex_reaches_the_file_when_its_tools_are_offered() {
     );
     let _ = std::fs::remove_dir_all(&workspace);
 }
+
+/// `--output-schema` reaches Codex as a file, and the answer comes back as data:
+/// the last `agent_message` is the JSON, surfaced as `StructuredOutput` beside
+/// the text it always was.
+#[test]
+#[ignore = "live: needs the codex CLI installed and signed in; costs tokens"]
+fn codex_fits_a_schema_and_reports_the_answer_as_data() {
+    let workspace = std::env::temp_dir().join("agent-harness-codex-schema");
+    let _ = std::fs::remove_dir_all(&workspace);
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::write(workspace.join("note.txt"), format!("code: {PLANTED}\n")).expect("planted file");
+
+    let events: Arc<Mutex<Vec<RunEvent>>> = Arc::default();
+    let sink = Arc::clone(&events);
+    let done = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&done);
+    let _handle = Codex::new()
+        .start(
+            RunRequest {
+                run_id: "codex-live-schema".to_owned(),
+                prompt: "Read the file note.txt in the working directory and report the code it contains.".to_owned(),
+                cwd: Some(workspace),
+                mode: RunMode::Ask,
+                tools: ToolAccess::Default,
+                tuning: RunTuning {
+                    output_schema: Some(serde_json::json!({
+                        "type": "object", "properties": { "code": { "type": "string" } },
+                        "required": ["code"], "additionalProperties": false
+                    })),
+                    ..RunTuning::default()
+                },
+                ..Default::default()
+            },
+            Arc::new(move |event| {
+                if matches!(event, RunEvent::Exited { .. }) {
+                    flag.store(true, Ordering::SeqCst);
+                }
+                sink.lock().unwrap().push(event);
+            }),
+        )
+        .expect("run should start");
+    for _ in 0..12_000 {
+        if done.load(Ordering::SeqCst) {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(done.load(Ordering::SeqCst), "live run did not finish within 10 minutes");
+
+    let events = events.lock().unwrap().clone();
+    let structured = events
+        .iter()
+        .find_map(|e| match e {
+            RunEvent::StructuredOutput { value, .. } => Some(value.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no structured answer: {events:?}"));
+    assert!(structured["code"].as_str().is_some_and(|c| c.contains(PLANTED)), "the shape holds the file's code: {structured}");
+    let said: String = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::Text { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(serde_json::from_str::<serde_json::Value>(&said).is_ok(), "the text is the JSON itself: {said:?}");
+}

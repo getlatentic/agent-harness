@@ -457,6 +457,15 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
                 finish_error(&on_event, rid, format!("the model returned no answer (stopped: {why})"));
                 return;
             }
+            // The constrained answer as data, for a host that asked for a shape.
+            if cfg.output_schema.is_some()
+                && let Some(value) = transcript
+                    .last()
+                    .and_then(|m| m.content.as_deref())
+                    .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            {
+                (*on_event)(RunEvent::StructuredOutput { run_id: rid.to_owned(), value });
+            }
             (*on_event)(RunEvent::Exited { run_id: rid.to_owned(), exit_code: Some(0), cancelled: false });
             return;
         }

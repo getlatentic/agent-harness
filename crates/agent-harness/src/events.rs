@@ -275,6 +275,15 @@ pub enum RunEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         updated_at: Option<String>,
     },
+    /// The answer as data, when the run asked for a schema and the agent honoured
+    /// it: Claude Code's `--json-schema` result, Codex's `--output-schema` reply,
+    /// the OpenAI-compatible runtime's constrained final message. Emitted once,
+    /// before `Exited`, beside whatever prose streamed as `Text` — a host that
+    /// asked for a shape reads this and ignores the prose; one that did not never
+    /// sees it. Absent when the adapter could not honour the schema, which
+    /// [`Features::structured_output`](crate::Features::structured_output) says
+    /// up front.
+    StructuredOutput { run_id: String, value: serde_json::Value },
     /// Command / IO / parse failure. Terminal — followed by `Exited`.
     Error { run_id: String, message: String },
     /// The run finished. Sent exactly once. Like every `RunEvent` variant it is
@@ -390,6 +399,9 @@ pub struct ParsedLine {
     pub edits: Vec<SuggestedEdit>,
     /// Token accounting → `RunEvent::Usage`.
     pub usage: Option<UsageInfo>,
+    /// The schema-fitting answer a CLI reports beside its prose (Claude's
+    /// `result.structured_output`) → `RunEvent::StructuredOutput`.
+    pub structured_output: Option<serde_json::Value>,
     pub activity: Option<String>,
     /// An in-band failure the harness reported on its *stdout* (codex's
     /// `turn.failed` / `error` lines) → `RunEvent::Error`. Terminal. Kept
@@ -523,6 +535,9 @@ pub fn run_events_from_parsed(run_id: &str, parsed: ParsedLine) -> Vec<RunEvent>
             run_id: run_id.to_owned(),
             delta: thinking,
         });
+    }
+    if let Some(value) = parsed.structured_output {
+        out.push(RunEvent::StructuredOutput { run_id: run_id.to_owned(), value });
     }
     if let Some(start) = parsed.tool_start {
         out.push(RunEvent::ToolStart {

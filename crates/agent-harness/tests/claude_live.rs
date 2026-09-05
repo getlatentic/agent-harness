@@ -221,3 +221,95 @@ fn claude_calls_a_host_tool_in_this_process_and_none_withholds_it() {
     assert!(!said.contains(PLANTED), "the token was reached with no tools offered: {said:?}");
     assert_eq!(exit, Some(0), "a None run with a server attached still ends cleanly");
 }
+
+/// Run one prompt under `tools` with a schema; report the structured answer, the
+/// tools that started, and everything said.
+fn run_with_schema(tools: ToolAccess) -> (Option<serde_json::Value>, Vec<String>, String) {
+    let workspace = std::env::temp_dir().join(format!("agent-harness-claude-schema-{tools:?}"));
+    let _ = std::fs::remove_dir_all(&workspace);
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::write(workspace.join("note.txt"), format!("code: {PLANTED}\n")).expect("planted file");
+
+    let events: Arc<Mutex<Vec<RunEvent>>> = Arc::default();
+    let sink = Arc::clone(&events);
+    let done = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&done);
+    let _handle = Claude::new()
+        .start(
+            RunRequest {
+                run_id: format!("claude-live-schema-{tools:?}"),
+                prompt: "Read the file note.txt in the working directory and report the code it contains. \
+                         If you cannot read it, put the reason in the code field."
+                    .to_owned(),
+                cwd: Some(workspace),
+                mode: RunMode::Ask,
+                tools,
+                tuning: RunTuning {
+                    max_turns: Some(4),
+                    output_schema: Some(serde_json::json!({
+                        "type": "object", "properties": { "code": { "type": "string" } }, "required": ["code"]
+                    })),
+                    ..RunTuning::default()
+                },
+                ..Default::default()
+            },
+            Arc::new(move |event| {
+                if matches!(event, RunEvent::Exited { .. }) {
+                    flag.store(true, Ordering::SeqCst);
+                }
+                sink.lock().unwrap().push(event);
+            }),
+        )
+        .expect("run should start");
+    for _ in 0..12_000 {
+        if done.load(Ordering::SeqCst) {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(done.load(Ordering::SeqCst), "live run did not finish within 10 minutes");
+
+    let events = events.lock().unwrap().clone();
+    let structured = events.iter().find_map(|e| match e {
+        RunEvent::StructuredOutput { value, .. } => Some(value.clone()),
+        _ => None,
+    });
+    let started = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::ToolStart { title, .. } => Some(title.clone()),
+            _ => None,
+        })
+        .collect();
+    let said = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::Text { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    (structured, started, said)
+}
+
+/// The schema is honoured in both directions of the tool question. With tools,
+/// the shape arrives holding what the file said. Without them — the arm that
+/// used to fail, because the wildcard denied the very tool that carries the
+/// schema — the shape still arrives, holding the model's account of having no
+/// way to read the file, and the file is never reached.
+#[test]
+#[ignore = "live: needs the claude CLI installed and signed in; costs tokens"]
+fn claude_fits_a_schema_with_tools_and_still_fits_it_with_none() {
+    let (structured, started, said) = run_with_schema(ToolAccess::Default);
+    let value = structured.expect("a structured answer with tools offered");
+    assert!(value["code"].as_str().is_some_and(|c| c.contains(PLANTED)), "the shape holds the file's code: {value}");
+
+    let (structured, started_none, said_none) = run_with_schema(ToolAccess::None);
+    let value = structured.expect("a structured answer with tools withheld");
+    assert!(value["code"].is_string(), "the shape is still filled: {value}");
+    assert!(!value.to_string().contains(PLANTED) && !said_none.contains(PLANTED), "the file was reached with no tools: {value} / {said_none}");
+    assert!(
+        started_none.iter().all(|t| t == "StructuredOutput"),
+        "only the tool that carries the answer may start under None: {started_none:?}"
+    );
+    let _ = (started, said);
+}

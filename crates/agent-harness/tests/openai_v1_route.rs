@@ -255,6 +255,29 @@ fn a_requested_schema_reaches_the_provider_in_the_response_format_wrapper() {
 }
 
 #[test]
+fn a_constrained_answer_is_also_reported_as_data_and_an_unconstrained_one_is_not() {
+    let schema = json!({ "type": "object", "properties": { "answer": { "type": "string" } } });
+    let structured = |events: &[RunEvent]| {
+        events.iter().find_map(|e| match e {
+            RunEvent::StructuredOutput { value, .. } => Some(value.clone()),
+            _ => None,
+        })
+    };
+    let (base, _) = fake_openai(vec![answer(r#"{"answer": "4"}"#)]);
+    let with_schema = RunRequest {
+        tuning: RunTuning { model: Some("test-model".to_owned()), output_schema: Some(schema), ..Default::default() },
+        ..ask("2+2?")
+    };
+    let events = collect(&harness_at(&base, ApiKey::NotNeeded, PromptCache::default()), with_schema);
+    assert_eq!(structured(&events), Some(json!({ "answer": "4" })), "{events:?}");
+    assert_eq!(streamed_text(&events), r#"{"answer": "4"}"#, "and the text is still the text");
+
+    let (base, _) = fake_openai(vec![answer(r#"{"answer": "4"}"#)]);
+    let events = collect(&harness_at(&base, ApiKey::NotNeeded, PromptCache::default()), ask("2+2?"));
+    assert_eq!(structured(&events), None, "JSON nobody asked for is only text");
+}
+
+#[test]
 fn an_attached_image_rides_on_the_first_user_message() {
     let (base, seen) = fake_openai(vec![answer("a cat")]);
     let request = RunRequest {

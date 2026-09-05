@@ -349,8 +349,10 @@ pub struct RunTuning {
     /// knobs as their own typed fields above. Default empty.
     pub extra_args: Vec<String>,
     /// A JSON Schema the final assistant answer must conform to (structured
-    /// output). Adapters that support it constrain the model's final message to
-    /// this schema; the rest ignore it. `None` → free-form text.
+    /// output). An adapter advertising [`Features::structured_output`] constrains
+    /// the answer to it and reports the result as
+    /// [`RunEvent::StructuredOutput`](crate::RunEvent::StructuredOutput); the rest
+    /// ignore it. `None` → free-form text.
     pub output_schema: Option<serde_json::Value>,
     /// Extra system-prompt instructions from the host — the user's per-harness
     /// "custom instructions", appended to whatever base prompt the agent has.
@@ -606,6 +608,13 @@ pub struct Features {
     /// (dispatched by its own loop). An adapter that leaves it `false` has no
     /// `with_tool_server`, so a host cannot hand it a tool for it to drop.
     pub host_tools: bool,
+    /// Honours [`RunTuning::output_schema`]: the answer also arrives as
+    /// [`RunEvent::StructuredOutput`](crate::RunEvent::StructuredOutput), fitting
+    /// the schema. `true` for `claude` (`--json-schema`), `codex`
+    /// (`--output-schema`) and `openai-compatible` (`response_format`). A host
+    /// that asked for a shape reads this to know whether to expect data or prose;
+    /// ACP has no equivalent and leaves it `false`.
+    pub structured_output: bool,
 }
 
 /// Where a user gets a harness that isn't on the machine yet.
