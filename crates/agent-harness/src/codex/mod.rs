@@ -301,9 +301,17 @@ fn build_codex_args(
     // reasoning.effort 'minimal'", a 400 that breaks a default run). So when
     // the user picks no effort, send `low` rather than leaving codex on
     // `minimal`. Only `minimal` when explicitly chosen.
-    let effort = tuning.effort.unwrap_or(crate::ReasoningEffort::Low);
+    //
+    // `none` is Codex's thinking-off, and a run asking for that through
+    // `max_thinking_tokens: Some(0)` gets it — unless `effort` names a level, which
+    // is the more specific request. Accepted by codex-cli 0.149.0, measured.
+    let effort = match (tuning.effort, tuning.max_thinking_tokens) {
+        (Some(effort), _) => effort.as_cli_value(),
+        (None, Some(0)) => "none",
+        (None, _) => "low",
+    };
     args.push("-c".to_owned());
-    args.push(format!("model_reasoning_effort=\"{}\"", effort.as_cli_value()));
+    args.push(format!("model_reasoning_effort=\"{effort}\""));
     // The host's custom instructions, as a `developer` role message alongside
     // Codex's own base instructions — additive, which is what
     // `extra_instructions` means. `base_instructions` would *replace* them and
@@ -329,6 +337,17 @@ fn build_codex_args(
     if let Some(path) = output_schema {
         args.push("--output-schema".to_owned());
         args.push(path.to_string_lossy().into_owned());
+    }
+    // The whole system prompt in place of Codex's own: the `instructions`
+    // config key. Verified two-arm against 0.149.0 — with it set to answer with
+    // one fixed word, `What is 2+2?` returned that word; `base_instructions`,
+    // the field the crate's own source names, is not reachable from `-c` and
+    // changed nothing.
+    if let Some(prompt) = crate::harness::nonblank(tuning.system_prompt.as_deref())
+        && !extra_args_sets_config(&tuning.extra_args, "instructions")
+    {
+        args.push("-c".to_owned());
+        args.push(format!("instructions={}", toml_basic_string(prompt)));
     }
     if matches!(mode, RunMode::Edit) {
         // Low-friction sandboxed auto-execution so Codex can apply
@@ -594,6 +613,31 @@ mod tests {
         args.windows(2)
             .find(|w| w[0] == "-c" && w[1].starts_with(&prefix))
             .map(|w| &w[1][prefix.len()..])
+    }
+
+    #[test]
+    fn a_replaced_system_prompt_is_the_instructions_key_escaped_as_toml() {
+        let tuning = RunTuning { system_prompt: Some("You are a \"judge\".".into()), ..RunTuning::default() };
+        let args = build_codex_args("hi".into(), RunMode::Ask, &tuning, None, None);
+        assert_eq!(config_value(&args, "instructions"), Some(r#""You are a \"judge\".""#));
+        assert!(config_value(&args, "developer_instructions").is_none(), "replaced, not appended");
+        let none = build_codex_args("hi".into(), RunMode::Ask, &RunTuning::default(), None, None);
+        assert!(config_value(&none, "instructions").is_none());
+    }
+
+    #[test]
+    fn thinking_off_is_reasoning_effort_none_unless_an_effort_is_named() {
+        let off = RunTuning { max_thinking_tokens: Some(0), ..RunTuning::default() };
+        let args = build_codex_args("hi".into(), RunMode::Ask, &off, None, None);
+        assert_eq!(config_value(&args, "model_reasoning_effort"), Some(r#""none""#));
+        // A cap above zero is not "off": Codex has no budget knob, so the default stands.
+        let capped = RunTuning { max_thinking_tokens: Some(4000), ..RunTuning::default() };
+        let args = build_codex_args("hi".into(), RunMode::Ask, &capped, None, None);
+        assert_eq!(config_value(&args, "model_reasoning_effort"), Some(r#""low""#));
+        // A named effort is the more specific request and wins.
+        let named = RunTuning { max_thinking_tokens: Some(0), effort: Some(crate::ReasoningEffort::High), ..RunTuning::default() };
+        let args = build_codex_args("hi".into(), RunMode::Ask, &named, None, None);
+        assert_eq!(config_value(&args, "model_reasoning_effort"), Some(r#""high""#));
     }
 
     #[test]

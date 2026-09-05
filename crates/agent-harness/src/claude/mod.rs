@@ -206,7 +206,15 @@ impl Harness for ClaudeHarness {
         // augmentation inside `spawn_streaming` ensures `node` is
         // found for a Finder-launched .app.
         let program = tuning.binary_path.clone().unwrap_or_else(|| PathBuf::from(&self.command));
-        let command = Command::new(program).cwd(cwd).run_id(run_id.clone()).args(args).resolve_cli();
+        // The only environment this adapter adds: Claude Code reads its
+        // thinking cap from a variable, and uses its own auth for everything
+        // else.
+        let command = Command::new(program)
+            .cwd(cwd)
+            .run_id(run_id.clone())
+            .args(args)
+            .env(thinking_env(&tuning))
+            .resolve_cli();
         if over_control_channel {
             let handle = control::start(command, &run_id, prompt, self.tool_servers.clone(), on_event)?;
             return Ok(Box::new(handle));
@@ -378,6 +386,21 @@ fn build_claude_args(
             _ => {}
         }
     }
+    // The whole system prompt in place of the agent's. A caller replacing it
+    // wants the model, not the agent, so the settings and project files that
+    // shape the agent stay unloaded too. Measured on one prompt: the envelope
+    // that leaves behind was ~7,000 tokens a call; with these three flags, ~340.
+    if let Some(prompt) = crate::harness::nonblank(tuning.system_prompt.as_deref())
+        && !extra_args_sets(&tuning.extra_args, "--system-prompt")
+    {
+        args.extend(["--system-prompt".to_owned(), prompt.to_owned()]);
+        if !extra_args_sets(&tuning.extra_args, "--setting-sources") {
+            args.extend(["--setting-sources".to_owned(), String::new()]);
+        }
+        if !extra_args_sets(&tuning.extra_args, "--exclude-dynamic-system-prompt-sections") {
+            args.push("--exclude-dynamic-system-prompt-sections".to_owned());
+        }
+    }
     // The shape the answer must fit. The result line then carries the
     // `StructuredOutput` call's input as `structured_output`, which the parser
     // surfaces as `RunEvent::StructuredOutput`.
@@ -430,6 +453,14 @@ fn build_claude_args(
     // Host passthrough/overrides, appended verbatim after the adapter's own.
     args.extend(tuning.extra_args.iter().cloned());
     args
+}
+
+/// `MAX_THINKING_TOKENS`, when the run caps thinking; nothing otherwise.
+fn thinking_env(tuning: &RunTuning) -> Vec<(String, String)> {
+    tuning
+        .max_thinking_tokens
+        .map(|cap| vec![("MAX_THINKING_TOKENS".to_owned(), cap.to_string())])
+        .unwrap_or_default()
 }
 
 /// Whether the host's `extra_args` already sets `flag` (so the adapter should
@@ -893,6 +924,46 @@ cat >/dev/null
         let plain = build_claude_args(Some("hi".into()), RunMode::Ask, ToolAccess::None, &RunTuning::default(), None);
         assert_eq!(flag_value(&plain, "--disallowedTools"), Some("*"));
         assert!(!plain.iter().any(|a| a == "--tools" || a == "--json-schema"), "{plain:?}");
+    }
+
+    #[test]
+    fn a_replaced_system_prompt_is_sent_whole_and_leaves_the_agents_envelope_unloaded() {
+        let tuning = RunTuning { system_prompt: Some("You are a judge.".into()), ..RunTuning::default() };
+        let args = build_claude_args(Some("hi".into()), RunMode::Ask, ToolAccess::None, &tuning, None);
+        assert_eq!(flag_value(&args, "--system-prompt"), Some("You are a judge."));
+        assert_eq!(flag_value(&args, "--setting-sources"), Some(""), "no settings, no project files");
+        assert!(args.iter().any(|a| a == "--exclude-dynamic-system-prompt-sections"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--append-system-prompt"), "replaced, not appended");
+
+        // A host that sets the flag itself owns it, and the envelope flags it
+        // did not ask for are not added behind its back.
+        let host = RunTuning {
+            system_prompt: Some("adapter copy".into()),
+            extra_args: vec!["--system-prompt".into(), "host copy".into()],
+            ..RunTuning::default()
+        };
+        let args = build_claude_args(Some("hi".into()), RunMode::Ask, ToolAccess::None, &host, None);
+        assert_eq!(args.iter().filter(|a| *a == "--system-prompt").count(), 1);
+        assert_eq!(flag_value(&args, "--system-prompt"), Some("host copy"));
+        assert!(!args.iter().any(|a| a == "--setting-sources"), "{args:?}");
+
+        // Blank means none was given.
+        let blank = RunTuning { system_prompt: Some("  ".into()), ..RunTuning::default() };
+        let args = build_claude_args(Some("hi".into()), RunMode::Ask, ToolAccess::None, &blank, None);
+        assert!(!args.iter().any(|a| a == "--system-prompt"));
+    }
+
+    #[test]
+    fn a_thinking_cap_is_the_one_environment_variable_and_none_means_no_environment() {
+        assert_eq!(
+            thinking_env(&RunTuning { max_thinking_tokens: Some(0), ..RunTuning::default() }),
+            vec![("MAX_THINKING_TOKENS".to_owned(), "0".to_owned())]
+        );
+        assert_eq!(
+            thinking_env(&RunTuning { max_thinking_tokens: Some(4000), ..RunTuning::default() }),
+            vec![("MAX_THINKING_TOKENS".to_owned(), "4000".to_owned())]
+        );
+        assert!(thinking_env(&RunTuning::default()).is_empty(), "Claude Code's own auth needs nothing added");
     }
 
     #[test]

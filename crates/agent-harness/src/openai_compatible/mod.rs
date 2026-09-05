@@ -833,6 +833,7 @@ impl Harness for OpenHarness {
             permission_prompt: self.permission_prompt.clone(),
             reasoning_tag: self.reasoning_tag.clone(),
             extra_instructions: tuning.extra_instructions,
+            system_prompt: tuning.system_prompt,
         };
 
         let cancel = Arc::new(AtomicBool::new(false));

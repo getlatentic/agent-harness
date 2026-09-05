@@ -313,3 +313,67 @@ fn claude_fits_a_schema_with_tools_and_still_fits_it_with_none() {
     );
     let _ = (started, said);
 }
+
+/// A model call, not an agent run: the replaced prompt is the whole prompt and
+/// thinking is off. The measure is the token count the CLI reports — the agent's
+/// envelope alone is ~7,000 tokens a call, so a cap well under that is the
+/// regression guard for "the envelope came back".
+#[test]
+#[ignore = "live: needs the claude CLI installed and signed in; costs tokens"]
+fn claude_as_a_model_pays_hundreds_of_prompt_tokens_not_thousands() {
+    let events: Arc<Mutex<Vec<RunEvent>>> = Arc::default();
+    let sink = Arc::clone(&events);
+    let done = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&done);
+    let _handle = Claude::new()
+        .start(
+            RunRequest {
+                run_id: "claude-live-model".to_owned(),
+                prompt: "Reply with exactly the word MODELOK and nothing else.".to_owned(),
+                cwd: Some(std::env::temp_dir()),
+                mode: RunMode::Ask,
+                tools: ToolAccess::None,
+                tuning: RunTuning {
+                    system_prompt: Some("You answer exactly as instructed, in plain text.".to_owned()),
+                    max_thinking_tokens: Some(0),
+                    max_turns: Some(1),
+                    ..RunTuning::default()
+                },
+                ..Default::default()
+            },
+            Arc::new(move |event| {
+                if matches!(event, RunEvent::Exited { .. }) {
+                    flag.store(true, Ordering::SeqCst);
+                }
+                sink.lock().unwrap().push(event);
+            }),
+        )
+        .expect("run should start");
+    for _ in 0..12_000 {
+        if done.load(Ordering::SeqCst) {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(done.load(Ordering::SeqCst), "live run did not finish within 10 minutes");
+
+    let events = events.lock().unwrap().clone();
+    let said: String = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::Text { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(said.contains("MODELOK"), "the replaced prompt still yields the answer: {said:?}");
+    let prompt_tokens = events
+        .iter()
+        .find_map(|e| match e {
+            RunEvent::Usage { input_tokens, cache_read_tokens, cache_write_tokens, .. } => {
+                Some(input_tokens.unwrap_or(0) + cache_read_tokens.unwrap_or(0) + cache_write_tokens.unwrap_or(0))
+            }
+            _ => None,
+        })
+        .expect("a usage event");
+    assert!(prompt_tokens > 0 && prompt_tokens < 1500, "the agent's envelope is back in the prompt: {prompt_tokens} tokens");
+}
