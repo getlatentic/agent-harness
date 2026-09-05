@@ -36,7 +36,7 @@ use harness::{ApiKey,
 ///
 /// `patience` is in 50ms ticks: a plain completion answers in seconds, while a
 /// tool round trip spends a turn on the call and another on the answer.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn live_run(
     provider: &str,
     base_url: &str,

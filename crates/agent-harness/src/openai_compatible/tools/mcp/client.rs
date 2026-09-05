@@ -318,7 +318,7 @@ pub(super) fn parse_rpc_result(text: &str, id: i64) -> Result<Value, String> {
 #[cfg(test)]
 #[derive(Clone, Default)]
 pub(super) struct ScriptedConnection {
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     replies: std::sync::Arc<
         std::sync::Mutex<std::collections::HashMap<String, std::collections::VecDeque<Result<Value, String>>>>,
     >,

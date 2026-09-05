@@ -806,7 +806,6 @@ fn compact_now(
     transcript.len() != before
 }
 
-#[allow(clippy::too_many_arguments)]
 fn compact_to(
     cfg: &LoopConfig,
     transcript: &mut Vec<ChatMessage>,
