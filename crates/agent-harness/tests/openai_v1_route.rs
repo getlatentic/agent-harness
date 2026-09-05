@@ -255,6 +255,29 @@ fn a_requested_schema_reaches_the_provider_in_the_response_format_wrapper() {
 }
 
 #[test]
+fn a_replaced_system_prompt_is_the_whole_system_message() {
+    let (base, seen) = fake_openai(vec![answer("ok")]);
+    let request = RunRequest {
+        tuning: RunTuning {
+            model: Some("test-model".to_owned()),
+            system_prompt: Some("You are a judge. Score 0-10.".to_owned()),
+            extra_instructions: Some("Be brief.".to_owned()),
+            ..Default::default()
+        },
+        ..ask("hi")
+    };
+    collect(&harness_at(&base, ApiKey::NotNeeded, PromptCache::default()), request);
+    let seen = seen.lock().unwrap();
+    let system = seen[0].body["messages"][0].clone();
+    assert_eq!(system["role"], "system");
+    let content = system["content"].as_str().unwrap_or_default();
+    assert!(content.starts_with("You are a judge. Score 0-10."), "the caller's prompt, first: {content:?}");
+    assert!(content.contains("Be brief."), "additive instructions still ride: {content:?}");
+    assert!(!content.contains("# Project instructions") && !content.contains("skill"), "no agent envelope: {content:?}");
+    assert!(content.len() < 200, "the whole prompt is what was given, not thousands of tokens around it: {}", content.len());
+}
+
+#[test]
 fn a_constrained_answer_is_also_reported_as_data_and_an_unconstrained_one_is_not() {
     let schema = json!({ "type": "object", "properties": { "answer": { "type": "string" } } });
     let structured = |events: &[RunEvent]| {

@@ -367,6 +367,24 @@ pub struct RunTuning {
     /// prompt is asking for something this has never offered (the fourth row on
     /// [`Harness`]).
     pub extra_instructions: Option<String>,
+    /// The agent's system prompt, replaced. `None` keeps the agent's own (with
+    /// `extra_instructions` appended); `Some` sends this instead — Claude's
+    /// `--system-prompt`, Codex's `instructions` key, the openai-compatible base
+    /// prompt. A caller replacing the prompt wants the model, not the agent, so
+    /// the project files and settings that shape the agent are not loaded
+    /// either (Claude: `--setting-sources ""`; openai-compatible: no instruction
+    /// files, no skill catalog). Measured on one prompt: the agent's envelope is
+    /// ~7,000 tokens a call; with this, ~340. A preference in the tiers on
+    /// [`Harness`]: ACP ignores it.
+    pub system_prompt: Option<String>,
+    /// Cap on the model's extended thinking, in tokens; `Some(0)` turns it off.
+    /// Claude sets `MAX_THINKING_TOKENS`; Codex sends reasoning effort `none`
+    /// for `Some(0)` unless [`effort`](Self::effort) names a level — and `none`
+    /// is what its built-in `web_search`/`image_gen` reject, so a run that
+    /// needs those keeps thinking on. Measured on one prompt: thinking off took
+    /// a call from 10.0s to 7.9s and its output from 240 tokens to 72. A
+    /// preference: the openai-compatible runtime and ACP ignore it.
+    pub max_thinking_tokens: Option<u32>,
     /// Absolute path to the agent's executable, overriding PATH resolution of
     /// the bare CLI name. `None` → resolve by name on PATH. CLI adapters
     /// (claude/codex/bob) spawn this path instead of their default program; the
@@ -681,11 +699,14 @@ pub struct Info {
 /// | Say it is missing | the request cannot be *expressed* here | neither — add the capability, or decline to |
 ///
 /// The fourth row is not a way of handling a request; it is noticing that there
-/// was no request. A host wanting its system prompt to *replace* the agent's is
-/// not being refused a guarantee or ignored a preference — [`RunTuning`] offers
-/// `extra_instructions`, additive by name, and replacement has never been on
-/// offer. Reach for this row when the tiers feel stretched: usually the thing
-/// being classified is a missing capability wearing a request's clothes.
+/// was no request. A host wanting the agent's *tools* replaced by its own — not
+/// offered beside them — is not being refused a guarantee or ignored a
+/// preference: `with_tool_server` adds, and replacement of the agent's tools has
+/// never been on offer. Reach for this row when the tiers feel stretched:
+/// usually the thing being classified is a missing capability wearing a
+/// request's clothes. (Replacing the *system prompt* used to sit here, until a
+/// measured need — a model call paying ~7,000 tokens of agent envelope — made it
+/// a field: [`RunTuning::system_prompt`].)
 ///
 /// A *preference* changes what a run costs or how well it goes, and not
 /// honouring it shows up in the result: a turn cap ignored means more turns,

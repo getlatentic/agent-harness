@@ -25,6 +25,19 @@ Unreleased changes accumulate under **Unreleased** until the next release.
   the user's MCP servers out, and without it the same prompt read the file
   through them.
 
+- **The model without the agent: `RunTuning::system_prompt` and
+  `RunTuning::max_thinking_tokens`.** A host using an agent as a plain model — a
+  DSPy judge, a reflection LM, a `Predict` — was paying for the agent's envelope
+  on every call: ~7,000 tokens of system prompt, settings and project files, and
+  extended thinking. `system_prompt` replaces the agent's prompt (Claude
+  `--system-prompt` plus `--setting-sources ""` and
+  `--exclude-dynamic-system-prompt-sections`; Codex `-c instructions=`; the
+  openai-compatible base prompt, with no instruction files or catalogs);
+  `max_thinking_tokens` caps thinking (Claude `MAX_THINKING_TOKENS`; Codex
+  reasoning effort `none` for `Some(0)`). Measured on one prompt: 6,990 → 342
+  prompt tokens, 10.0s → 7.7s. Both are preferences; ACP ignores them.
+  `extra_instructions` stays additive and rides beside either.
+
 ### Changed
 
 - **Edition 2024; `rust-version` is now 1.88.** The floor moves from a

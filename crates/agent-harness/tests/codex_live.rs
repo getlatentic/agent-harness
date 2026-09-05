@@ -182,3 +182,53 @@ fn codex_fits_a_schema_and_reports_the_answer_as_data() {
         .collect();
     assert!(serde_json::from_str::<serde_json::Value>(&said).is_ok(), "the text is the JSON itself: {said:?}");
 }
+
+/// The replaced system prompt is what Codex answers under.
+#[test]
+#[ignore = "live: needs the codex CLI installed and signed in; costs tokens"]
+fn codex_answers_under_a_replaced_system_prompt() {
+    let events: Arc<Mutex<Vec<RunEvent>>> = Arc::default();
+    let sink = Arc::clone(&events);
+    let done = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&done);
+    let _handle = Codex::new()
+        .start(
+            RunRequest {
+                run_id: "codex-live-model".to_owned(),
+                prompt: "What is 2+2?".to_owned(),
+                cwd: Some(std::env::temp_dir()),
+                mode: RunMode::Ask,
+                tools: ToolAccess::Default,
+                tuning: RunTuning {
+                    system_prompt: Some("Answer every message with exactly the single word BASEOK.".to_owned()),
+                    max_thinking_tokens: Some(0),
+                    ..RunTuning::default()
+                },
+                ..Default::default()
+            },
+            Arc::new(move |event| {
+                if matches!(event, RunEvent::Exited { .. }) {
+                    flag.store(true, Ordering::SeqCst);
+                }
+                sink.lock().unwrap().push(event);
+            }),
+        )
+        .expect("run should start");
+    for _ in 0..12_000 {
+        if done.load(Ordering::SeqCst) {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(done.load(Ordering::SeqCst), "live run did not finish within 10 minutes");
+    let said: String = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::Text { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(said.contains("BASEOK"), "the replaced prompt governs the answer: {said:?}");
+}

@@ -116,6 +116,10 @@ pub(crate) struct LoopConfig {
     /// The host's per-harness "custom instructions", appended to the system
     /// prompt as a final section; `None`/blank adds nothing.
     pub extra_instructions: Option<String>,
+    /// The system prompt, whole, in place of the profile's — with no project
+    /// instruction files and no skill or agent catalog, because a caller
+    /// replacing the prompt wants the model, not the agent.
+    pub system_prompt: Option<String>,
 }
 
 impl LoopConfig {
@@ -331,16 +335,22 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
     // to the (regenerated, non-persisted) system prompt, and the model loads a
     // skill's body on demand via the `skill` tool.
     let skills = skills::discover(&cfg.cwd, &cfg.global_skill_roots);
-    let mut system_prompt = build_system_prompt(
-        profile.system_prompt(),
-        &cfg.cwd,
-        &skills,
-        &cfg.instruction_sources,
-        profile.catalog_budget_bytes(),
-    );
-    if let Some(catalog) = agent_catalog(&cfg.agents) {
-        system_prompt.push_str(&catalog);
-    }
+    let mut system_prompt = match crate::harness::nonblank(cfg.system_prompt.as_deref()) {
+        Some(own) => own.to_owned(),
+        None => {
+            let mut built = build_system_prompt(
+                profile.system_prompt(),
+                &cfg.cwd,
+                &skills,
+                &cfg.instruction_sources,
+                profile.catalog_budget_bytes(),
+            );
+            if let Some(catalog) = agent_catalog(&cfg.agents) {
+                built.push_str(&catalog);
+            }
+            built
+        }
+    };
     if let Some(extra) = crate::harness::nonblank(cfg.extra_instructions.as_deref()) {
         system_prompt.push_str("\n\n# Additional instructions\n");
         system_prompt.push_str(extra);
@@ -1244,6 +1254,7 @@ mod tests {
             permission_prompt: None,
             reasoning_tag: Some("think".to_owned()),
             extra_instructions: None,
+            system_prompt: None,
         }
     }
 
