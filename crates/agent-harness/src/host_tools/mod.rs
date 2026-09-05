@@ -174,15 +174,6 @@ impl ToolServer {
     pub(crate) fn tool(&self, name: &str) -> Option<&Arc<dyn HostTool>> {
         self.tools.iter().find(|tool| tool.name() == name)
     }
-
-    /// Run `name` with `arguments` — see [`call_guarded`].
-    #[cfg(any(feature = "claude", feature = "openai-compatible"))]
-    pub(crate) fn call(&self, name: &str, arguments: Value) -> Result<String, String> {
-        match self.tool(name) {
-            Some(tool) => call_guarded(tool.as_ref(), arguments),
-            None => Err(format!("no tool named `{name}` on server `{}`", self.name)),
-        }
-    }
 }
 
 /// Call a host tool so that a panic in it is a failed call, not a dead thread.
@@ -225,34 +216,20 @@ mod tests {
         FnTool::new(name, "echoes", json!({"type": "object"}), |args| Ok(args.to_string()))
     }
 
-    #[cfg(any(feature = "claude", feature = "openai-compatible"))]
     #[test]
     fn a_later_tool_with_the_same_name_replaces_the_earlier_one() {
         let server = ToolServer::new("s")
             .with_tool(FnTool::new("dup", "first", json!({}), |_| Ok("first".into())))
             .with_tool(FnTool::new("dup", "second", json!({}), |_| Ok("second".into())));
         assert_eq!(server.tools().len(), 1, "one tool, not two: {server:?}");
-        assert_eq!(server.call("dup", json!({})), Ok("second".to_owned()));
-    }
-
-    #[cfg(any(feature = "claude", feature = "openai-compatible"))]
-    #[test]
-    fn calling_a_tool_the_server_does_not_have_is_an_error_naming_both() {
-        let server = ToolServer::new("shop").with_tool(echo("stock"));
-        let err = server.call("price", json!({})).unwrap_err();
-        assert!(err.contains("price") && err.contains("shop"), "{err}");
+        assert_eq!(server.tools()[0].description(), "second");
     }
 
     #[cfg(any(feature = "claude", feature = "openai-compatible"))]
     #[test]
     fn a_panicking_tool_is_a_failed_call_not_a_crash() {
-        let server = ToolServer::new("s").with_tool(FnTool::new(
-            "boom",
-            "panics",
-            json!({}),
-            |_| -> Result<String, String> { panic!("host bug") },
-        ));
-        let err = server.call("boom", json!({})).unwrap_err();
+        let boom = FnTool::new("boom", "panics", json!({}), |_| -> Result<String, String> { panic!("host bug") });
+        let err = call_guarded(&boom, json!({})).unwrap_err();
         assert!(err.contains("boom") && err.contains("host bug"), "{err}");
     }
 

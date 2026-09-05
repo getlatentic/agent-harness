@@ -313,7 +313,7 @@ fn build_claude_args(
         args.push("--resume".to_owned());
         args.push(session_id.to_owned());
     }
-    if let Some(model) = tuning.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+    if let Some(model) = crate::harness::nonblank(tuning.model.as_deref()) {
         args.push("--model".to_owned());
         args.push(model.to_owned());
     }
@@ -388,8 +388,7 @@ fn build_claude_args(
     // `forced_tool` steering is dropped on that path — the provider is never
     // told to submit — so the only remaining lever on the final turn is prose in
     // the system prompt.
-    if let Some(extra) = tuning.extra_instructions.as_deref().map(str::trim).filter(|s| !s.is_empty())
-    {
+    if let Some(extra) = crate::harness::nonblank(tuning.extra_instructions.as_deref()) {
         if !extra_args_sets(&tuning.extra_args, "--append-system-prompt") {
             args.push("--append-system-prompt".to_owned());
             args.push(extra.to_owned());

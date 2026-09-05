@@ -943,7 +943,16 @@ fn login_event(event: &Event) -> Option<InstallEvent> {
 /// code, hence the `cfg`.
 #[cfg(any(feature = "claude", feature = "codex"))]
 pub(crate) fn api_key_value_usable(value: Option<String>) -> bool {
-    matches!(value, Some(v) if !v.trim().is_empty())
+    nonblank(value.as_deref()).is_some()
+}
+
+/// The text a host actually gave, trimmed — `None` for an absent or
+/// whitespace-only value. An empty `--model ""` or an all-blank instruction
+/// would otherwise reach the CLI as a request for nothing. Every adapter uses
+/// it, so the lean build has no caller.
+#[cfg(any(feature = "claude", feature = "codex", feature = "openai-compatible"))]
+pub(crate) fn nonblank(text: Option<&str>) -> Option<&str> {
+    text.map(str::trim).filter(|t| !t.is_empty())
 }
 
 #[cfg(test)]

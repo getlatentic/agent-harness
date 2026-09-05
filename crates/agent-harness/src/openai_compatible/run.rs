@@ -341,7 +341,7 @@ pub(crate) fn drive(cfg: LoopConfig, cancel: Arc<AtomicBool>, on_event: RunCallb
     if let Some(catalog) = agent_catalog(&cfg.agents) {
         system_prompt.push_str(&catalog);
     }
-    if let Some(extra) = cfg.extra_instructions.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(extra) = crate::harness::nonblank(cfg.extra_instructions.as_deref()) {
         system_prompt.push_str("\n\n# Additional instructions\n");
         system_prompt.push_str(extra);
     }

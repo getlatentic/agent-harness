@@ -8,7 +8,7 @@
 
 use serde_json::{json, Value};
 
-use super::ToolServer;
+use super::{call_guarded, ToolServer};
 
 /// The MCP protocol revision answered when the client names none.
 const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
@@ -66,16 +66,16 @@ fn tools_call(server: &ToolServer, id: Value, params: &Value) -> Value {
     let Some(name) = params["name"].as_str() else {
         return error(id, -32602, "invalid params: tools/call needs a tool name");
     };
-    if server.tool(name).is_none() {
-        // Unknown tool is a protocol error in MCP; a tool that ran and failed is
-        // a result with `isError`, below, so the model can read the failure.
+    // Unknown tool is a protocol error in MCP; a tool that ran and failed is a
+    // result with `isError`, below, so the model can read the failure.
+    let Some(tool) = server.tool(name) else {
         return error(id, -32602, &format!("unknown tool: {name}"));
-    }
+    };
     let arguments = match &params["arguments"] {
         Value::Null => json!({}),
         given => given.clone(),
     };
-    let (text, is_error) = match server.call(name, arguments) {
+    let (text, is_error) = match call_guarded(tool.as_ref(), arguments) {
         Ok(text) => (text, false),
         Err(text) => (text, true),
     };
