@@ -154,12 +154,16 @@ mod tests {
         RunHandle, RunRequest,
     };
 
+    // Asserts the two default adapters are present, so it needs them compiled in.
+    #[cfg(all(feature = "claude", feature = "codex"))]
     #[test]
     fn default_registry_lists_claude_codex_in_order() {
         assert_eq!(default_registry().ids(), vec!["claude", "codex"]);
         assert_eq!(default_registry().catalog()[0].manifest.id, DEFAULT_HARNESS_ID);
     }
 
+    // Asserts the two default adapters are present, so it needs them compiled in.
+    #[cfg(all(feature = "claude", feature = "codex"))]
     #[test]
     fn harness_by_id_resolves_builtins_and_rejects_unknown() {
         assert!(harness_by_id("claude").is_some());
@@ -223,6 +227,8 @@ mod tests {
         }
     }
 
+    // Asserts the two default adapters are present, so it needs them compiled in.
+    #[cfg(all(feature = "claude", feature = "codex"))]
     #[test]
     fn capabilities_match_each_adapter_and_back_credential_required() {
         let caps = |id: &str| harness_by_id(id).unwrap().features();
