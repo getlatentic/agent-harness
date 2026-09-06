@@ -7,6 +7,17 @@ Unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+### Added
+
+- **`Features::system_prompt` and `Features::max_thinking_tokens`.** The two
+  model-mode knobs alpha.2 added to `RunTuning` shipped with no flag saying
+  which adapters honour them, so a host using the agent as a plain model had
+  to know from the docs that ACP keeps its envelope and the openai-compatible
+  runtime has nowhere to send a thinking cap. Now it reads them: `system_prompt`
+  is `true` for `claude`, `codex` and `openai-compatible`; `max_thinking_tokens`
+  for `claude` and `codex`. Both advertise-only, as `structured_output` is — an
+  ignored preference costs tokens, not safety.
+
 ## [0.6.0-alpha.2] - 2026-09-05
 
 ### Moving from alpha.1

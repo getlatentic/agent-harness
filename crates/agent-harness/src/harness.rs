@@ -575,6 +575,13 @@ pub struct ModelManagement {
 /// adapter names what it does support and leaves the rest, rather than
 /// restating eight fields and risking one being wrong by omission.
 ///
+/// Every [`RunTuning`] knob an adapter can honour or not has a flag here —
+/// `model` → `custom_model`, `effort`, `max_turns`, `extra_instructions` →
+/// `custom_instructions`, `output_schema` → `structured_output`,
+/// `system_prompt`, `max_thinking_tokens` — so no knob's reach is described
+/// only in prose. The two without one are not capabilities: `extra_args` is
+/// the escape hatch, `binary_path` is path resolution.
+///
 /// ```
 /// # use harness::Features;
 /// let claude_like = Features { max_turns: true, ..Default::default() };
@@ -633,6 +640,17 @@ pub struct Features {
     /// that asked for a shape reads this to know whether to expect data or prose;
     /// ACP has no equivalent and leaves it `false`.
     pub structured_output: bool,
+    /// Honours [`RunTuning::system_prompt`]: the agent's own prompt, settings
+    /// and project files are not sent, and the caller's text is the whole
+    /// system prompt. `true` for `claude`, `codex` and `openai-compatible`. A
+    /// host using the agent as a plain model reads this to know whether it is
+    /// paying for the agent's envelope on every call; ACP leaves it `false`.
+    pub system_prompt: bool,
+    /// Honours [`RunTuning::max_thinking_tokens`]. `true` for `claude`
+    /// (`MAX_THINKING_TOKENS`) and `codex` (reasoning effort `none` for
+    /// `Some(0)`); the openai-compatible runtime and ACP have nowhere to send
+    /// it and leave it `false`.
+    pub max_thinking_tokens: bool,
 }
 
 /// Where a user gets a harness that isn't on the machine yet.

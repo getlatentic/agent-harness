@@ -203,6 +203,11 @@ mod tests {
             // result — prose where data was expected — so the caller sees it,
             // and reads the flag first to know which to expect.
             structured_output: _,
+            // Advertise-only, both: a prompt or a thinking cap an adapter
+            // ignores costs tokens, not safety, and the host reads the flag to
+            // know what a call will cost before making it.
+            system_prompt: _,
+            max_thinking_tokens: _,
         } = crate::Features::default();
         vec!["withheld_tools"]
     }
@@ -253,6 +258,10 @@ mod tests {
         // Only adapters with a `with_tool_server` may say so.
         assert!(claude.host_tools && !codex.host_tools);
         assert!(claude.structured_output && codex.structured_output);
+        // Both replace the prompt and cap thinking: the two knobs a host using
+        // the agent as a plain model reads before deciding what a call costs.
+        assert!(claude.system_prompt && claude.max_thinking_tokens);
+        assert!(codex.system_prompt && codex.max_thinking_tokens);
     }
 
     // A third-party / custom provider — proves the registry is open: this

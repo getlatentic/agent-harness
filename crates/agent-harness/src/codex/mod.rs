@@ -102,6 +102,8 @@ impl Harness for CodexHarness {
             login: true,
             custom_instructions: true,
             structured_output: true,
+            system_prompt: true,
+            max_thinking_tokens: true,
             ..Default::default()
         }
     }

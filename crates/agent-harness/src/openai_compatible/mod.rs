@@ -709,6 +709,7 @@ impl Harness for OpenHarness {
             custom_instructions: true,
             host_tools: true,
             structured_output: true,
+            system_prompt: true,
             ..Default::default()
         }
     }
