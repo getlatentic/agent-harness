@@ -575,6 +575,13 @@ pub struct ModelManagement {
 /// adapter names what it does support and leaves the rest, rather than
 /// restating eight fields and risking one being wrong by omission.
 ///
+/// Every [`RunTuning`] knob an adapter can honour or not has a flag here —
+/// `model` → `custom_model`, `effort`, `max_turns`, `extra_instructions` →
+/// `custom_instructions`, `output_schema` → `structured_output`,
+/// `system_prompt`, `max_thinking_tokens` — so no knob's reach is described
+/// only in prose. The two without one are not capabilities: `extra_args` is
+/// the escape hatch, `binary_path` is path resolution.
+///
 /// ```
 /// # use harness::Features;
 /// let claude_like = Features { max_turns: true, ..Default::default() };
