@@ -139,6 +139,8 @@ impl Harness for ClaudeHarness {
             custom_instructions: true,
             host_tools: true,
             structured_output: true,
+            system_prompt: true,
+            max_thinking_tokens: true,
             ..Default::default()
         }
     }

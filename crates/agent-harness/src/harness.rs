@@ -633,6 +633,17 @@ pub struct Features {
     /// that asked for a shape reads this to know whether to expect data or prose;
     /// ACP has no equivalent and leaves it `false`.
     pub structured_output: bool,
+    /// Honours [`RunTuning::system_prompt`]: the agent's own prompt, settings
+    /// and project files are not sent, and the caller's text is the whole
+    /// system prompt. `true` for `claude`, `codex` and `openai-compatible`. A
+    /// host using the agent as a plain model reads this to know whether it is
+    /// paying for the agent's envelope on every call; ACP leaves it `false`.
+    pub system_prompt: bool,
+    /// Honours [`RunTuning::max_thinking_tokens`]. `true` for `claude`
+    /// (`MAX_THINKING_TOKENS`) and `codex` (reasoning effort `none` for
+    /// `Some(0)`); the openai-compatible runtime and ACP have nowhere to send
+    /// it and leave it `false`.
+    pub max_thinking_tokens: bool,
 }
 
 /// Where a user gets a harness that isn't on the machine yet.
